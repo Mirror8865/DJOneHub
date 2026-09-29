@@ -4,8 +4,8 @@ DJI 4G 模块的 Mac、iPhone/iPad 与 QDC507 Agent 源码，以及用于诊断�
 
 ## 鸣谢
 
-- 感谢小红书博主「小吴折腾AI」的一同开发。
-- 感谢 XUXU 的大力支持。
+- 感谢小红书博主 [「小吴折腾AI」](https://xhslink.cn/o/70Ecv4YqEvk) 的一同开发。
+- 感谢 [XUXU](https://xhslink.cn/o/AYJ2PKK9tyj) 的大力支持。
 
 ## 支持小店
 
