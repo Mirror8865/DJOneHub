@@ -21,6 +21,7 @@ DJOneHub 面向 DJI 4G 模块的日常连接、通信与维护场景，提供 Ma
 - `module/`：QDC507 Agent、内核桥接和构建工具。
 - `tools/qdc507-legacy/`：独立诊断、配置、USB/QMI/ADB 修复工具的源码与脚本。
 - `docs/release/`：本次正式基线的发布说明。
+- `docs/USAGE_GUIDE.md`：从构建、连接到排障的使用教程。
 - `release-assets/`：仅在本地暂存、等待上传至私有 GitHub Release 的发布包；二进制不会被 Git 跟踪。
 
 ## 发布策略
@@ -30,6 +31,8 @@ DJOneHub 面向 DJI 4G 模块的日常连接、通信与维护场景，提供 Ma
 在构建 iPhone/iPad App 前，先从该 Release 下载包并放到 `iPadOS/DJOneHub-iPad/Resources/module-update.djupdate`。该路径被 Xcode 作为 App 资源引用，但文件受 Git 忽略，以免二进制进入源码历史。
 
 本仓库刻意不包含 WebUSB 刷写器、ESP32 实验、测试固件、历史 IPA/DMG/ZIP、回滚备份、路由器备份及无关资料。
+
+完整操作步骤见 [使用教程](docs/USAGE_GUIDE.md)。
 
 ## 鸣谢
 
