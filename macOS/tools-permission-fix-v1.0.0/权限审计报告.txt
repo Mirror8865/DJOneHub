@@ -1,0 +1,24 @@
+DJOneHub v1.2.9 权限审计
+
+必须权限
+- 通讯录：由 com.jamie.djonehub.notifier 通过 Contacts.framework 请求。
+- 麦克风：由 com.jamie.djonehub.notifier 在实际通话音频启动时通过 AVFoundation 请求。
+- 后台运行：两个用户级 LaunchAgent 负责后台服务和通知助手。
+
+不需要的权限
+- 摄像头
+- 屏幕录制
+- 辅助功能
+- 输入监控
+- 完全磁盘访问
+- 自动化
+- 定位服务（GPS 数据来自外接模块）
+
+其他能力
+- USB 访问不是 TCC 隐私授权；需要模块被 macOS 枚举，且没有被其他进程独占。
+- 软件仅监听 127.0.0.1:7575，不需要允许公网入站连接。
+- 来电和短信使用自绘浮窗，不使用 UserNotifications.framework 的系统通知授权流程。
+
+安全边界
+- tccutil 只能重置授权决定，不能授予权限。
+- 最终的“允许”必须由当前登录用户在 macOS 弹窗或系统设置中确认。
