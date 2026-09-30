@@ -81,6 +81,10 @@ DJOneHub 面向 DJI 4G 模块的日常连接、通信与维护场景，提供 Ma
 
 当前 Release 没有提供可直接安装的 Mac DMG；Mac 客户端需要从 `macOS/` 源码构建。新手优先使用上面的 iPhone/iPad 流程；有开发环境的用户再阅读 [macOS 使用说明](macOS/README.md)。
 
+### Windows 电脑刷机页面（第三方候选）
+
+Windows 用户如需为**自己已授权的、尚未部署 Agent 的 QDC507 模块**进行首次刷写，可查看 [Windows 电脑刷机页面](docs/WINDOWS_WEB_FLASHER.md)。该页面记录的是第三方提供的 Chrome/Edge WebUSB 候选方案，不是本 Release 的正式附件；请先核对来源、摘要与硬件兼容性，再决定是否使用。
+
 ### 遇到问题先看这里
 
 | 现象 | 建议操作 |
@@ -88,13 +92,14 @@ DJOneHub 面向 DJI 4G 模块的日常连接、通信与维护场景，提供 Ma
 | IPA 安装不上 | 这是未签名 IPA 的正常限制；使用自己的证书重签后安装。 |
 | App 看不到模块 | 更换数据线、直连设备、重新插拔，并确认模块已首次部署。 |
 | 更新包打不开 | `.djupdate` 不是 App，不能在 iPhone/iPad 文件管理器中直接打开。 |
+| Windows 需要首次刷写 | 查看 [Windows 电脑刷机页面](docs/WINDOWS_WEB_FLASHER.md)，不要替换整个复合 USB 设备的驱动。 |
 | 不确定 ADB 脚本能不能运行 | 先不要运行。该脚本仅用于已验证的 QDC507 模块排障，不是新手初始化步骤。 |
 | 需要更多技术细节 | 查看 [完整使用教程](docs/USAGE_GUIDE.md)。 |
 
 当前源码基线：
 
 - Mac 客户端与后台：`1.2.10 (19)`
-- iPhone/iPad 客户端：`0.7.6 (41)`
+- iPhone/iPad 客户端：`0.7.6 (42)`
 - QDC507 Agent：`0.3.21`
 
 ## 目录
@@ -105,4 +110,5 @@ DJOneHub 面向 DJI 4G 模块的日常连接、通信与维护场景，提供 Ma
 - `tools/qdc507-legacy/`：独立诊断、配置、USB/QMI/ADB 修复工具的源码与脚本。
 - `docs/release/`：本次正式基线的发布说明。
 - `docs/USAGE_GUIDE.md`：从构建、连接到排障的使用教程。
+- `docs/WINDOWS_WEB_FLASHER.md`：Windows 电脑首次刷机的第三方候选页面与安全边界。
 - `release-assets/`：仅在本地暂存、等待上传至私有 GitHub Release 的发布包；二进制不会被 Git 跟踪。
