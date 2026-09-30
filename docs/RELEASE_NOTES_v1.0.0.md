@@ -2,6 +2,19 @@
 
 `v1.0.0` 是本仓库首次整理后的 GitHub 发布版本。
 
+## 鸣谢
+
+- 感谢小红书博主 [「小吴折腾AI」](https://xhslink.cn/o/70Ecv4YqEvk) 的一同开发。
+- 感谢 [XUXU](https://xhslink.cn/o/AYJ2PKK9tyj) 的大力支持。
+- 感谢 [Jamie（@没错jamie就是我）](https://xhslink.cn/o/2CbGt9pN3AB)。
+- 感谢 [JieDen](https://xhslink.cn/o/5WQkSOfgE3i)。
+
+## 支持小店
+
+这是我的微信小程序，售卖咖啡豆和茶叶；如果你喜欢这个项目，欢迎扫码支持，感谢大家。
+
+![咖啡豆与茶叶小程序二维码](https://raw.githubusercontent.com/wzz04810-debug/DJOneHub/main/docs/assets/coffee-tea-miniprogram-qr.jpg)
+
 ## 包含内容
 
 - Mac 客户端与后台源码：`1.2.10 (19)`
@@ -40,8 +53,3 @@ WebUSB 刷写器、ESP32 实验、测试固件 `0.3.45`/`0.4.2`、历史安装�
 ## 免责声明
 
 本项目及本 Release 仅用于学习、研究与合法的非商业用途。不得用于非法、侵权、规避安全限制、未经授权访问设备或违反运营商及平台规则的行为。使用者应自行确认设备授权范围，并承担不当使用造成的后果。
-
-## 鸣谢
-
-- 小红书博主「小吴折腾AI」的一同开发。
-- XUXU 的大力支持。
