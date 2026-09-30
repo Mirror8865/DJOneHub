@@ -88,30 +88,23 @@ class AdbDeployTransport:
         command = [self._adb] + (["-s", self._serial] if self._serial else []) + list(args)
         return subprocess.run(command, capture_output=True, timeout=timeout_seconds)
 
-    def _text(self, completed) -> str:
-        output = completed.stdout.decode("utf-8", errors="replace")
+    def _raw_shell(self, command: str, timeout_seconds: int = 30) -> str:
+        """不走状态标记的单条 adb shell, 只给只读复查和 USB 组合修复用."""
+        completed = self._run(["shell", command], timeout_seconds)
+        output = completed.stdout.decode("utf-8", "replace")
         if completed.stderr:
-            output += completed.stderr.decode("utf-8", errors="replace")
+            output += completed.stderr.decode("utf-8", "replace")
         return output
 
-    def _raw_shell(self, command: str, timeout_seconds: int = 30) -> str:
-        """不走状态标记的单条 adb shell; 只给只读复查和 USB 组合修复用."""
-        return self._text(self._run(["shell", command], timeout_seconds))
-
-    def _device_serials(self) -> list[str]:
-        listing = self._text(self._run(["devices"], 60))
+    def open(self) -> None:
+        self._run(["start-server"], 60)
+        listing = self._run(["devices"], 60).stdout.decode("utf-8", "replace")
         serials = []
         for line in listing.splitlines()[1:]:
             parts = line.split("\t")
             if len(parts) >= 2 and parts[1].strip() == "device":
                 name = parts[0].strip()
-                if name and not name.startswith(("*", "(")):
-                    serials.append(name)
-        return serials
-
-    def open(self) -> None:
-        self._run(["start-server"], 60)
-        serials = self._device_serials()
+                serials.append("" if name.startswith("(") else name)
         if not serials:
             raise RuntimeError(
                 "adb 未发现已授权的模块设备; 请确认 USB 线支持数据传输、"
@@ -119,53 +112,46 @@ class AdbDeployTransport:
             )
         if len(serials) > 1:
             raise RuntimeError(f"adb 发现多个设备, 无法确定目标: {serials}")
-        self._serial = serials[0]
-
-    def read_usb_state(self) -> dict:
-        """只读复查作者部署器校验的三个值; 读不到也照样返回, 由调用方判断."""
-        values = {}
-        for name in ("idVendor", "idProduct", "functions"):
-            lines = [
-                line.strip().rstrip(",")
-                for line in self._raw_shell(f"cat {USB_GADGET}/{name} 2>/dev/null").replace("\r", "").splitlines()
-                if line.strip() and "No such file" not in line and not line.strip().startswith("cat:")
-            ]
-            values[name] = ",".join(lines).replace(" ", "").lower()
-        return {
-            "vendor": values["idVendor"].split(",")[0],
-            "product": values["idProduct"].split(",")[0],
-            "functions": values["functions"],
-        }
-
-    def repair_mac_profile(self, target_functions: str, timeout_seconds: int = 90) -> None:
-        """后台把 Linux 侧 gadget 补成 Mac 完整模式 (activateMobileGadget 的逆操作)."""
-        self._push_bytes(mac_repair_script(target_functions).encode("utf-8"), MAC_REPAIR_SCRIPT, 120)
-        self._raw_shell(
-            f"chmod 755 {MAC_REPAIR_SCRIPT}; "
-            f"start-stop-daemon -S -b -x {MAC_REPAIR_SCRIPT} "
-            f"|| setsid sh {MAC_REPAIR_SCRIPT} </dev/null >/dev/null 2>&1 & "
-            "sleep 1; echo repair-launched",
-            60,
-        )
-        # 写 enable=0 会断开 USB, 等重新枚举出来再看结果; 序列号也可能变, 先丢掉旧值.
-        self._serial = None
-        deadline = time.time() + timeout_seconds
-        while time.time() < deadline:
-            time.sleep(3)
-            serials = self._device_serials()
-            if len(serials) != 1:
-                continue
-            self._serial = serials[0]
-            try:
-                functions = self.read_usb_state()["functions"]
-            except Exception:
-                continue
-            if not missing_mac_functions(functions):
-                return
-        raise RuntimeError("USB 组合修复未完成: 模块没有恢复成 Mac 完整模式; 请重新插拔模块后重跑本脚本.")
+        self._serial = serials[0] or None
 
     def close(self) -> None:
         return None
+
+    def read_usb_state(self) -> dict:
+        """一次 shell 读完三个只读属性; 缺项给空串, 由调用方判断."""
+        output = self._raw_shell(
+            f"cd {USB_GADGET} 2>/dev/null || exit 0; "
+            "for name in idVendor idProduct functions; do "
+            'echo "$name=$(cat $name 2>/dev/null)"; done'
+        )
+        values = {}
+        for line in output.replace("\r", "\n").splitlines():
+            name, _, value = line.partition("=")
+            values[name.strip()] = value.strip()
+        return {
+            "vendor": values.get("idVendor", ""),
+            "product": values.get("idProduct", ""),
+            "functions": values.get("functions", "").replace(" ", ""),
+        }
+
+    def repair_mac_profile(self, target_functions: str, timeout_seconds: int = 90) -> None:
+        """后台把 gadget 补成 Mac 完整模式 (activate_mobile_functions 的逆操作)."""
+        self._push_bytes(mac_repair_script(target_functions).encode("utf-8"), MAC_REPAIR_SCRIPT, 120)
+        self._raw_shell(
+            f"chmod 755 {MAC_REPAIR_SCRIPT}; start-stop-daemon -S -b -x {MAC_REPAIR_SCRIPT}", 60
+        )
+        # 写 enable=0 时 USB 会断开重新枚举, 旧 serial 可能失效; 每轮重新发现设备.
+        deadline = time.time() + timeout_seconds
+        while time.time() < deadline:
+            time.sleep(3)
+            self._serial = None
+            try:
+                self.open()
+                if not missing_mac_functions(self.read_usb_state()["functions"]):
+                    return
+            except Exception:
+                continue
+        raise RuntimeError("USB 组合修复失败: 模块没有回到 Mac 完整模式; 请重新插拔模块后重跑本脚本.")
 
     def _push_bytes(self, data: bytes, remote_path: str, timeout_seconds: int = 600) -> None:
         import tempfile
@@ -203,14 +189,14 @@ class AdbDeployTransport:
             self._run(["shell", f"rm -f {remote}"], 30)
         position = output.rfind(marker)
         if position < 0:
-            # 作者部署器不少检查用 `exit NN` 直接结束命令, 这种失败不会打印状态标记,
-            # 光看输出是一句没有信息量的话; 顺手把模块当前的 USB 组合报出来.
+            # 作者部署器遇到组合不符时用 `exit NN` 直接结束命令, 且不打印状态标记,
+            # 只看得到一句没有信息量的话; 顺手把模块当前的 USB 组合带出来.
             try:
                 state = describe_usb_state(self.read_usb_state())
             except Exception as error:
                 state = f"读取模块 USB 状态也失败: {error}"
             raise RuntimeError(
-                "模块 shell 未返回退出状态 (作者部署器的检查失败时会 exit, 所以没有输出);\n"
+                "模块 shell 未返回退出状态 (作者部署器在组合不符时会静默 exit, 且不打印状态标记);\n"
                 f"  command={command[:240]!r}\n"
                 f"  output={output[-500:]!r}\n"
                 f"  模块当前: {state}"
@@ -251,12 +237,15 @@ class AdbDeployTransport:
 
 
 def describe_usb_state(state: dict) -> str:
+    """把 USB 组合渲染成一行, 给日志和报错用."""
     vendor = state.get("vendor") or "?"
     product = state.get("product") or "?"
-    return f"USB ID={vendor}:{product} (期望 {MAC_USB_IDS}) functions={state.get('functions') or '空'}"
+    functions = state.get("functions") or "空"
+    return f"USB ID={vendor}:{product} (期望 {MAC_USB_IDS}) functions={functions}"
 
 
 def missing_mac_functions(functions: str) -> list[str]:
+    """作者部署器要求的 serial/audio 里缺了哪些."""
     items = [item.strip() for item in functions.split(",") if item.strip()]
     return [name for name in MAC_FUNCTIONS if name not in items]
 
@@ -287,7 +276,7 @@ restore() {{
     echo 1 >$G/enable 2>/dev/null || true
 }}
 trap restore 0 1 2 3 15
-sleep 2
+sleep 3
 echo 0 >$G/enable || exit 11
 sleep 1
 echo tty >$G/f_serial/transports
@@ -361,6 +350,7 @@ def self_test() -> None:
     assert mac_functions("diag,ecm,ffs") == "diag,serial,ecm,ffs,audio"
     assert mac_functions("diag,serial,ecm,ffs,audio") == "diag,serial,ecm,ffs,audio"
     assert mac_functions("ffs,ecm") == "serial,ffs,ecm,audio"
+    assert mac_functions("audio,diag,ecm") == "audio,diag,serial,ecm"
     assert missing_mac_functions("diag,serial,ecm,ffs,audio") == []
     assert missing_mac_functions("diag,ecm,ffs") == ["serial", "audio"]
     assert "diag,serial,ecm,ffs,audio" in mac_repair_script("diag,serial,ecm,ffs,audio")
