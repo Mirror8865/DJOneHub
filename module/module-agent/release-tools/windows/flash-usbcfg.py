@@ -104,6 +104,7 @@ class AtPort:
             pass
 
     def __enter__(self):
+        self.open()
         return self
 
     def __exit__(self, *_exc):
