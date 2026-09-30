@@ -17,6 +17,10 @@
   写 USB 组合 -> 等 adb 重新枚举 -> 永久部署, 每步都看上一步的退出码, 任何一步
   失败就立刻停下, 不会在异常状态上继续往下刷. 备份与失败自动回滚仍然全部由
   flash-usbcfg.py 负责, 这里不加任何自己的写模块逻辑.
+
+  usbnet 不是 1 (ECM) 也算"需要写入": usbnet=0 的模块 functions 里是 rmnet 而不是
+  ecm, 作者部署器会静默 exit 43, 而 ecm 只能在 AT 侧用 AT+QCFG="usbnet",1 改回来.
+  预检打印的 usbnet=-1 表示读不出模式, 这时不主动改它.
   flash 另外认识两个自家参数: --yes (跳过确认) 和 --force (即使当前组合已是
   目标值也重新写入并重启); 其余参数 (--port 等) 照样原样透传.
 #>
@@ -339,13 +343,19 @@ if ($Action -eq 'flash') {
     # 组合值与目标值都从脚本自己打印的 ASCII 状态行里取, 不依赖中文日志.
     $currentUsbcfg = Get-FieldFromLines $preflight.Lines 'DJONEHUB_USBCFG current=(\S+)'
     $targetUsbcfg = Get-FieldFromLines $preflight.Lines 'target=(\S+)'
+    # usbnet=-1 表示脚本读不出模块的模式, 这时不主动改它.
+    $usbnetValue = Get-FieldFromLines $preflight.Lines 'usbnet=(-?\d+)'
+    $usbnetNeedsFix = ($usbnetValue -match '^\d+$') -and ($usbnetValue -ne '1')
     $adbSerials = Get-AdbSerial
     $alreadyTarget = ($currentUsbcfg -and $targetUsbcfg -and $currentUsbcfg -eq $targetUsbcfg)
-    $needWrite = $forceWrite -or (-not $alreadyTarget) -or ($adbSerials.Count -eq 0)
+    $needWrite = $forceWrite -or (-not $alreadyTarget) -or ($adbSerials.Count -eq 0) -or $usbnetNeedsFix
 
     if (-not $needWrite) {
-        Write-Info "当前组合已是目标值 ($currentUsbcfg), 且 adb 已看到模块; 跳过写入和重启."
+        Write-Info "当前组合已是目标值 ($currentUsbcfg), usbnet=1, 且 adb 已看到模块; 跳过写入和重启."
     } else {
+        if ($usbnetNeedsFix) {
+            Write-Warn "模块 USB 网络模式是 usbnet=$usbnetValue (不是 1): 会一并改成 1 (ECM), 否则部署时作者部署器会静默 exit 43."
+        }
         if (-not $assumeYes) {
             Write-Host ""
             Write-Host "即将把模块 USB 组合写成 $targetUsbcfg 并重启模块, 然后永久部署 DJOneHub Agent." -ForegroundColor Yellow

@@ -4,7 +4,8 @@
 原始 deploy-qdc507-agent.py 一字不改地导入执行; 本文件只做四件事:
   1. 指定打包自带的语音运行时目录 (DJONEHUB_VOICE_RUNTIME)
   2. 用 adb.exe 版 DeployTransport 替换 macOS 的 libusb 版
-  3. 部署前只读复查 USB 组合, 缺 serial/audio 就按作者的做法补回来
+  3. 部署前只读复查 USB 组合, 缺 serial/audio 就按作者的做法补回来;
+     缺 ecm 说明模块是 usbnet=0, 这时"按作者的做法"补不回来, 直接报清楚原因
      (作者部署器组合不符时只回 exit 41/42/43, 没有任何输出)
   4. 把命令行参数原样交给原始 main()
 
@@ -37,6 +38,9 @@ MAC_USB_IDS = "2c7c:0125"
 # 手机直连模式相对 Mac 完整模式就少这两个功能 (作者 activate_mobile_functions 的 sed
 # 只删 serial/audio), 缺了它们作者部署器直接 exit 41 / exit 42.
 MAC_FUNCTIONS = ("serial", "audio")
+# 作者部署器还要求组合里有 ecm (exit 43), 但 ecm 补不出来: 它由模块固件的 USB
+# 网络模式决定 (usbnet=0 时 gadget 里是 rmnet), 只能在 AT 侧用 usbnet 改写.
+ECM_FUNCTION = "ecm"
 MAC_REPAIR_SCRIPT = "/data/local/tmp/djonehub-mac-profile.sh"
 
 
@@ -250,6 +254,15 @@ def missing_mac_functions(functions: str) -> list[str]:
     return [name for name in MAC_FUNCTIONS if name not in items]
 
 
+def missing_ecm(functions: str) -> bool:
+    """模块组合里是不是缺 ecm (usbnet=0 的模块 gadget 里是 rmnet).
+
+    只有读到的组合像模块的组合时才判定, 免得把空读/错读当成缺 ecm.
+    """
+    items = {item.strip() for item in functions.split(",") if item.strip()}
+    return bool(items & {"diag", "ffs"}) and ECM_FUNCTION not in items
+
+
 def mac_functions(current: str) -> str:
     """在模块现有 functions 上补回 serial/audio 并保持原顺序."""
     items = [item.strip() for item in current.split(",") if item.strip()]
@@ -297,11 +310,20 @@ def ensure_mac_usb_profile(transport) -> None:
     print(f"[USB 预检] {describe_usb_state(state)}", flush=True)
     if f"{state['vendor']}:{state['product']}" != MAC_USB_IDS:
         print(f"[USB 预检] 警告: USB ID 不是 {MAC_USB_IDS}, 请先重跑 Flash-All.bat 写入组合.", flush=True)
+    if missing_ecm(state["functions"]):
+        # serial/audio 用 gadget 重写就能补回来, ecm 不行: 它由模块固件的 usbnet
+        # 模式决定, 只能在 AT 侧写 AT+QCFG="usbnet",1 再重启模块.
+        raise RuntimeError(
+            f"模块 USB functions 里没有 {ECM_FUNCTION} (当前 {state['functions'] or '空'}): "
+            "模块是 usbnet=0 (RMNET/传统拨号) 模式, 作者部署器会静默 exit 43 后失败.\n"
+            "  重新插拔模块, 然后重跑 Flash-All.bat: 它会用 AT 把 usbnet 改成 1 (ECM) 并重启模块.\n"
+            "  单跑 Deploy-Module.bat 修不好这个: ecm 只能由模块重启后的组合提供."
+        )
     missing = missing_mac_functions(state["functions"])
     if not missing:
         return
     items = {item.strip() for item in state["functions"].split(",") if item.strip()}
-    if not items & {"diag", "ffs", "ecm"}:
+    if not items & {"diag", "ffs", ECM_FUNCTION}:
         raise RuntimeError(
             f"读到的 USB functions={state['functions'] or '空'} 不像模块的组合, 拒绝改写; "
             "请重新插拔模块后重跑本脚本."
@@ -353,6 +375,10 @@ def self_test() -> None:
     assert mac_functions("audio,diag,ecm") == "audio,diag,serial,ecm"
     assert missing_mac_functions("diag,serial,ecm,ffs,audio") == []
     assert missing_mac_functions("diag,ecm,ffs") == ["serial", "audio"]
+    assert missing_ecm("diag,serial,rmnet,ffs,audio")
+    assert not missing_ecm("diag,serial,ecm,ffs,audio")
+    assert not missing_ecm("")
+    assert not missing_ecm("hello")
     assert "diag,serial,ecm,ffs,audio" in mac_repair_script("diag,serial,ecm,ffs,audio")
     print("self-test ok")
 

@@ -8,6 +8,9 @@
   4. 写入后立即回读; 未匹配目标值 -> 立刻把原值写回并回读确认, 不重启.
   5. 只有回读确认才重启; 重启后校验失败 -> 自动恢复原配置并再次重启.
   6. --restore 可用备份文件把模块恢复到写入前状态.
+  7. 顺手把 USB 网络模式写成 usbnet=1 (ECM): 作者部署器要求模块 functions 里有
+     ecm, 而 usbnet=0 的模块只有 rmnet, 部署器会静默 exit 43. 原值也一样先备份,
+     回滚时一起写回.
 
 只依赖 pyserial (由 Setup-Only.bat / bootstrap.ps1 自动安装), 不依赖 passlib:
 QADBKEY 的 md5-crypt 由本文件自带实现, 已在 400 组随机用例上与 passlib 逐字节比对一致.
@@ -42,12 +45,17 @@ BACKUP_DIR = HERE / "usbcfg-rollback"
 TARGET_VID = 0x2C7C
 TARGET_PID = 0x0125
 TARGET_FLAGS = [1, 1, 1, 1, 1, 1, 1]
+# 作者客户端 (macOS/cmd/djonehub-macos/web/index.html) 写明"模块固定保持 usbnet=1":
+# 0=RMNET(传统拨号), 1=ECM(4G 网卡), 2/3=实验模式. usbnet=0 时 gadget 里是 rmnet
+# 而不是 ecm, 作者部署器的组合闸门 (exit 43) 会直接失败.
+TARGET_USBNET = 1
 
 USBCFG_RE = re.compile(
     r'\+QCFG:\s*"usbcfg"\s*,\s*(0x[0-9A-Fa-f]+)\s*,\s*(0x[0-9A-Fa-f]+)'
     r'\s*,\s*((?:[01]\s*,\s*)*[01])',
     re.IGNORECASE,
 )
+USBNET_RE = re.compile(r'\+QCFG:\s*"usbnet"\s*,\s*(\d+)', re.IGNORECASE)
 QD_RE = re.compile(r"QDC507", re.IGNORECASE)
 VOICE_CALL_RE = re.compile(r"\+CLCC:\s*\d+\s*,\s*\d+\s*,\s*[0-5]\s*,\s*0\s*,")
 MD5CRYPT_ALPHABET = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
@@ -70,6 +78,15 @@ def parse_usbcfg(raw: str):
     pid = int(match.group(2), 0)
     flags = [int(value) for value in match.group(3).replace(" ", "").split(",")]
     return vid, pid, flags
+
+
+def parse_usbnet(raw: str):
+    match = USBNET_RE.search(raw or "")
+    return int(match.group(1)) if match else None
+
+
+def usbnet_command(mode: int) -> str:
+    return f'AT+QCFG="usbnet",{mode}'
 
 
 def fmt(vid: int, pid: int, flags: list[int]) -> str:
@@ -136,6 +153,9 @@ class AtPort:
     def read_usbcfg(self, wait: float = 1.5) -> str:
         return self.at('AT+QCFG="usbcfg"', wait)
 
+    def read_usbnet(self, wait: float = 1.5) -> str:
+        return self.at('AT+QCFG="usbnet"', wait)
+
 
 def probe_port(name: str):
     """返回 (ati, gmr, usbcfg, clcc) 或 None."""
@@ -148,6 +168,7 @@ def probe_port(name: str):
                 "ati": port.at("ATI", 0.9).strip(),
                 "gmr": gmr.strip(),
                 "usbcfg": port.read_usbcfg().strip(),
+                "usbnet": port.read_usbnet().strip(),
                 "clcc": port.at("AT+CLCC", 0.9).strip(),
             }
     except Exception:
@@ -219,7 +240,7 @@ def md5crypt_unlock_key(challenge: str, secret: str = "SH_adb_quectel") -> str:
     return md5crypt(secret, challenge).split("$")[3][:15]
 
 
-def save_backup(raw: str, vid: int, pid: int, flags: list[int], gmr: str) -> Path:
+def save_backup(raw: str, vid: int, pid: int, flags: list[int], gmr: str, usbnet) -> Path:
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     payload = {
@@ -229,6 +250,8 @@ def save_backup(raw: str, vid: int, pid: int, flags: list[int], gmr: str) -> Pat
         "raw": raw,
         "command": composition_command(vid, pid, flags),
         "target": fmt(TARGET_VID, TARGET_PID, TARGET_FLAGS),
+        "usbnet": usbnet,
+        "usbnet_target": TARGET_USBNET,
     }
     stamped = BACKUP_DIR / f"usbcfg-before-{stamp}.json"
     latest = BACKUP_DIR / "usbcfg-latest.json"
@@ -246,12 +269,40 @@ def confirm_applied(port: AtPort, vid: int, pid: int, flags: list[int], wait: fl
     return False
 
 
-def rollback(port: AtPort, original, reason: str) -> int:
+def confirm_usbnet(port: AtPort, mode: int, wait: float = 2.0) -> bool:
+    for _ in range(3):
+        if parse_usbnet(port.read_usbnet(wait)) == mode:
+            return True
+        time.sleep(0.4)
+    return False
+
+
+def apply_usbnet(port: AtPort, mode: int):
+    """把 USB 网络模式写成 mode 并回读; 返回 (是否成功, 写入前读到的值).
+
+    已经是目标值时不写入, 所以 usbnet 本来就正确的模块行为完全不变.
+    """
+    previous = parse_usbnet(port.read_usbnet(2.0))
+    if previous == mode:
+        log(f"  usbnet 已是 {mode}, 无需写入.")
+        return True, previous
+    log(f"  usbnet {previous if previous is not None else '<读取失败>'} -> {mode} (ECM)")
+    log("  " + port.at(usbnet_command(mode), 2.0).strip().replace("\r\n", " | "))
+    return confirm_usbnet(port, mode), previous
+
+
+def rollback(port: AtPort, original, usbnet, reason: str) -> int:
     vid, pid, flags = original
     log(f"回滚: {reason}")
+    if usbnet is not None and usbnet != TARGET_USBNET:
+        log(f"写回原 usbnet {usbnet}")
+        log("  " + port.at(usbnet_command(usbnet), 2.0).strip().replace("\r\n", " | "))
     log(f"写回原配置 {fmt(vid, pid, flags)}")
     log("  " + port.at(composition_command(vid, pid, flags), 2.0).strip().replace("\r\n", " | "))
-    if confirm_applied(port, vid, pid, flags):
+    confirmed = confirm_applied(port, vid, pid, flags)
+    if usbnet is not None and usbnet != TARGET_USBNET:
+        confirmed = confirm_usbnet(port, usbnet) and confirmed
+    if confirmed:
         log("回滚已确认: 模块保持写入前的 USB 配置, 未重启.")
         return 2
     log("警告: 回滚回读未确认, 请重新插拔模块后执行 --restore.")
@@ -331,6 +382,14 @@ def main() -> int:
     current = parsed
     log(f"当前 USBCFG = {fmt(*current)}")
 
+    original_usbnet = parse_usbnet(info["usbnet"])
+    if original_usbnet is None:
+        log(f"警告: 读不出 usbnet 模式 (读到 {info['usbnet']!r}), 本次不改它.")
+    elif original_usbnet == TARGET_USBNET:
+        log(f"当前 usbnet = {original_usbnet} (ECM), 正确.")
+    else:
+        log(f"当前 usbnet = {original_usbnet}, 需要改成 {TARGET_USBNET} (ECM) 才能部署.")
+
     def load_backup(path: Path):
         data = json.loads(path.read_text(encoding="utf-8"))
         vid, pid, flags = parse_usbcfg(data["usbcfg"]) or (None, None, None)
@@ -348,6 +407,10 @@ def main() -> int:
         try:
             with AtPort(name) as port:
                 port.at(composition_command(*original), 2.0)
+                saved_usbnet = data.get("usbnet")
+                if isinstance(saved_usbnet, int) and parse_usbnet(port.read_usbnet(1.5)) != saved_usbnet:
+                    log(f"  usbnet 也写回 {saved_usbnet}")
+                    port.at(usbnet_command(saved_usbnet), 2.0)
                 if not confirm_applied(port, *original):
                     log("恢复回读未确认, 请重新插拔后再试.")
                     return 5
@@ -364,18 +427,20 @@ def main() -> int:
         log("模块正在语音通话, 拒绝写入 USB 配置.")
         return 6
     log("  通话闸门: 通过 (无 mode=0 的语音呼叫)")
-    backup_path = save_backup(info["usbcfg"], *current, info["gmr"])
+    backup_path = save_backup(info["usbcfg"], *current, info["gmr"], original_usbnet)
     log(f"  已备份原始配置 -> {backup_path}")
 
     if not args.write:
         log("预检完成, 未写入任何内容. 加 --write 才会真正写入.")
-        log(f"计划写入: {fmt(TARGET_VID, TARGET_PID, TARGET_FLAGS)}")
+        log(f"计划写入: {fmt(TARGET_VID, TARGET_PID, TARGET_FLAGS)} 且 usbnet={TARGET_USBNET} (ECM)")
         # 给上层脚本 (bootstrap.ps1 -Action flash) 的机器可读状态行: 纯 ASCII,
         # 不经过控制台代码页, 换台机器也不会因为编码差异而解析失败.
         print(
             f"DJONEHUB_USBCFG current={fmt(*current)} "
             f"target={fmt(TARGET_VID, TARGET_PID, TARGET_FLAGS)} "
-            f"already={1 if current == (TARGET_VID, TARGET_PID, TARGET_FLAGS) else 0}",
+            f"already={1 if current == (TARGET_VID, TARGET_PID, TARGET_FLAGS) else 0} "
+            f"usbnet={original_usbnet if original_usbnet is not None else -1} "
+            f"usbnet_target={TARGET_USBNET}",
             flush=True,
         )
         return 0
@@ -407,7 +472,15 @@ def main() -> int:
             log("  回读: " + readback_raw.strip().replace("\r\n", " | "))
             readback = parse_usbcfg(readback_raw)
             if readback != (TARGET_VID, TARGET_PID, TARGET_FLAGS):
-                return rollback(port, current, "回读与目标不一致")
+                return rollback(port, current, original_usbnet, "回读与目标不一致")
+
+            if original_usbnet is not None and original_usbnet != TARGET_USBNET:
+                log('步骤 4b/6 写入 USB 网络模式 (AT+QCFG="usbnet",1) 并回读')
+                ok, previous = apply_usbnet(port, TARGET_USBNET)
+                if previous is not None:
+                    original_usbnet = previous
+                if not ok:
+                    return rollback(port, current, original_usbnet, "usbnet 回读与目标不一致")
 
             if args.no_reboot:
                 log("已确认写入, 按 --no-reboot 跳过重启; 重启后才会生效.")
@@ -434,9 +507,13 @@ def main() -> int:
 
     log(f"AT 串口重新出现 = {found_name}")
     after = parse_usbcfg(found_info["usbcfg"])
+    after_usbnet = parse_usbnet(found_info["usbnet"])
     log("  回读: " + found_info["usbcfg"].replace("\r\n", " | "))
+    log(f"  回读 usbnet = {after_usbnet}")
 
-    if after == (TARGET_VID, TARGET_PID, TARGET_FLAGS):
+    if after == (TARGET_VID, TARGET_PID, TARGET_FLAGS) and (
+        original_usbnet is None or after_usbnet == TARGET_USBNET
+    ):
         adb = usb_adb_present()
         if adb is True:
             log("成功: 目标组合已生效, 且 adb 已看到模块设备.")
@@ -447,11 +524,14 @@ def main() -> int:
         log("成功: 目标组合已生效 (未找到 adb.exe, 跳过 ADB 复查).")
         return 0
 
-    log(f"重启后组合不是目标值: {fmt(*after) if after else found_info['usbcfg']!r}")
+    if after != (TARGET_VID, TARGET_PID, TARGET_FLAGS):
+        log(f"重启后组合不是目标值: {fmt(*after) if after else found_info['usbcfg']!r}")
+    else:
+        log(f"重启后 usbnet 不是目标值: {after_usbnet}")
     log("尝试自动恢复原始配置 ...")
     try:
         with AtPort(found_name) as port:
-            return rollback(port, current, "重启后校验失败")
+            return rollback(port, current, original_usbnet, "重启后校验失败")
     except Exception as error:
         log(f"自动恢复失败: {error}; 请重新插拔后执行 --restore.")
         return 5

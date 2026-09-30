@@ -29,6 +29,8 @@
           并把原组合备份到 usbcfg-rollback\ (这一步不写入任何内容);
        b. 写入作者客户端用的目标组合 0x2C7C,0x0125,1,1,1,1,1,1,1, 并立刻回读;
           回读不一致 -> 立即写回原值, 并且不重启;
+          顺手把 USB 网络模式写成 usbnet=1 (ECM): 作者部署器要求组合里有 ecm, 而
+          usbnet=0 的模块只有 rmnet, 会静默 exit 43 (原值也在备份里, 回滚一起写回);
        c. 回读一致后才重启模块 (AT+CFUN=1,1), 等它重新枚举并再次校验;
        d. adb 看到模块后复用作者原始部署器永久部署 Agent, 逐个打印 SHA-256 校验。
    当前组合已经是目标值、且 adb 已经能看到模块时, b/c 会自动跳过, 不会白白多重启一次。
@@ -59,7 +61,7 @@
    不写入任何内容。确认打印出来的确实是 QDC507 后, 再执行:
        Write-USBConfig.bat --write
    它会写入作者客户端使用的目标组合 0x2C7C,0x0125,1,1,1,1,1,1,1, 然后:
-       - 先备份原组合到 usbcfg-rollback\ (时间戳 + latest 各一份)
+       - 先备份原组合与 usbnet 模式到 usbcfg-rollback\ (时间戳 + latest 各一份)
        - 写入后立刻回读; 回读不一致 -> 立即写回原值, 并且不重启
        - 回读一致才重启 (AT+CFUN=1,1), 重启后重新校验
        - 重启后仍不是目标值 -> 自动恢复原配置
@@ -70,14 +72,15 @@
    模块身份校验 (uid=0 / armv7l / Linux 3.18.44)、USB 组合校验、原厂服务 PID 校验、
    通话校验、目标路径摘要校验、原子 mv、/data 空间校验、失败自动回滚全部保持作者原样。
    部署前还会只读复查模块 USB 组合: 缺 serial/audio 就按作者的做法把 gadget 补回 Mac 完整
-   模式后再部署 (作者部署器在组合不符时只回 exit 41/42/43, 一句话都不打印)。
+   模式后再部署; 缺 ecm 则不再硬改 gadget (那是模块 usbnet=0 造成的, 只有 AT 侧能改),
+   直接报清楚原因并提示重跑 Flash-All.bat (作者部署器在组合不符时只回 exit 41/42/43, 一句话都不打印)。
    部署完成时终端会打印每个文件在模块内的 SHA-256 校验结果。
 
 4. 部署成功后, 把模块插到已安装并授权 DJOneHub 的 iPhone / iPad 上使用。
 
 回滚
 ----
-- 恢复 USB 组合 (回到写入前状态):
+- 恢复 USB 组合与 usbnet 模式 (回到写入前状态):
       双击 Restore-USBConfig.bat
       或 Write-USBConfig.bat --restore
   默认使用 usbcfg-rollback\usbcfg-latest.json; 也可用
@@ -101,7 +104,9 @@
 - "adb 未发现已授权的模块设备": USB 组合还没写成目标值, 或模块还没重新枚举;
   先重跑 Flash-All.bat (它会在需要时自动补做写组合这一步)。
 - "模块 shell 未返回退出状态": 作者部署器内的检查失败时会直接 exit, 所以没有任何输出;
-  报错里会附带模块当前的 USB ID 与 functions, 按提示重跑 Flash-All.bat 或重新插拔即可。
+  报错里会附带模块当前的 USB ID 与 functions。functions 里没有 ecm 说明模块是
+  usbnet=0 (RMNET) 模式: 重新插拔后重跑 Flash-All.bat 即可 (它会把 usbnet 改成 1 再重启);
+  单跑 Deploy-Module.bat 修不好, 因为 ecm 由模块固件重启后的组合提供。
 - 杀毒软件报 module-agent\deploy-qdc507-agent.py: 该文件只是 Python 脚本,
   会被某些安全软件误判; 请把本目录加入信任区后重新解压。
 - 只想看当前状态不想部署: 直接跑
