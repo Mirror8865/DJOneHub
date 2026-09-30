@@ -61,9 +61,9 @@ struct DJOneHubCallActivityAttributes: ActivityAttributes {
 }
 
 extension DJOneHubCallActivityAttributes.ContentState {
-    /// ActivityKit 的 stale 只表示主 App 暂时没有提交新内容，不能证明 USB 模块离线。
     /// 模块离线由主 App 的真实 HTTP 探测失败显式写入 `.offline`。
-    func liveActivityDisplayState(isStale: Bool) -> Self {
+    /// 不读取 `ActivityViewContext.isStale`，因为该属性从 iOS 16.2 才可用。
+    func liveActivityDisplayState() -> Self {
         self
     }
 }
@@ -134,10 +134,10 @@ private enum LiveActivityCallClient {
 
     private static func synchronizeActivities(after action: Action, callID: String) async {
         for activity in Activity<DJOneHubCallActivityAttributes>.activities
-        where activity.content.state.callID == callID {
+        where activity.contentState.callID == callID {
             switch action {
             case .answer:
-                let previous = activity.content.state
+                let previous = activity.contentState
                 let state = DJOneHubCallActivityAttributes.ContentState(
                     callID: previous.callID,
                     number: previous.number,
@@ -145,9 +145,11 @@ private enum LiveActivityCallClient {
                     phase: .active,
                     startedAt: Date()
                 )
-                await activity.update(ActivityContent(state: state, staleDate: nil))
+                // `update(using:)` 是 iOS 16.1 的 ActivityKit API。
+                await activity.update(using: state)
             case .reject, .hangup:
-                await activity.end(nil, dismissalPolicy: .immediate)
+                // `end(using:)` 同样可在 iOS 16.1 使用。
+                await activity.end(using: nil, dismissalPolicy: .immediate)
             }
         }
     }

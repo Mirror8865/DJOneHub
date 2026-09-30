@@ -6,7 +6,7 @@
 
 - 使用可传输数据的 USB-C 线缆，并直接连接电脑或 iPhone/iPad；不要把不稳定的扩展坞当作排障基准。
 - Mac 端需要 macOS 13 或更高版本；从源码构建 Mac 客户端需要完整 Xcode、Go 和 `pkg-config`。
-- iPhone/iPad 客户端要求 iOS/iPadOS 16.3 或更高版本，构建时需要自己的 Apple Developer 签名 Team。
+- iPhone/iPad 客户端要求 iOS/iPadOS 16.1 或更高版本，构建时需要自己的 Apple Developer 签名 Team。
 - 首次部署到空白模块所需的设备专用部署资产不在本仓库。没有完成首次部署时，不要把本教程中的更新步骤当作首次刷机方案。
 
 ## 2. 验证 Release 附件

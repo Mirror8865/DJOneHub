@@ -110,10 +110,8 @@ final class LiveActivityController {
                 )
                 activity = try Activity.request(
                     attributes: DJOneHubCallActivityAttributes(moduleName: "DJOneHub"),
-                    content: ActivityContent(
-                        state: initialState,
-                        staleDate: nil
-                    ),
+                    // 使用 iOS 16.1 的创建接口，避免将最低系统抬高到 16.2。
+                    contentState: initialState,
                     pushType: nil
                 )
 #if DEBUG
@@ -133,12 +131,8 @@ final class LiveActivityController {
             )
             // 在线/离线由真实模块请求决定；不以 ActivityKit stale 代替连通性探测。
             guard nextState != lastState else { return }
-            await activity.update(
-                ActivityContent(
-                    state: nextState,
-                    staleDate: nil
-                )
-            )
+            // 16.1 使用 contentState 版本的更新接口。
+            await activity.update(using: nextState)
 #if DEBUG
             print("[DJOneHub LiveActivity] updated id=\(activity.id) phase=\(nextState.phase.rawValue)")
 #endif
@@ -153,7 +147,7 @@ final class LiveActivityController {
     func stop() async {
         resolveExistingActivity()
         if let activity {
-            await activity.end(nil, dismissalPolicy: .immediate)
+            await activity.end(using: nil, dismissalPolicy: .immediate)
         }
         activity = nil
         lastState = nil
@@ -164,10 +158,10 @@ final class LiveActivityController {
         let existing = Activity<DJOneHubCallActivityAttributes>.activities
         activity = existing.first
 #if DEBUG
-        let summary = existing.map { "\($0.id):\($0.content.state.phase.rawValue)" }.joined(separator: ",")
+        let summary = existing.map { "\($0.id):\($0.contentState.phase.rawValue)" }.joined(separator: ",")
         print("[DJOneHub LiveActivity] resolved count=\(existing.count) activities=[\(summary)]")
 #endif
-        lastState = activity?.content.state
+        lastState = activity?.contentState
     }
 
 }

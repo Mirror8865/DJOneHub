@@ -33,7 +33,7 @@ DJOneHub 面向 DJI 4G 模块的日常连接、通信与维护场景，提供 Ma
 
 1. 自己有权操作的 DJI/QDC507 4G 模块，且模块已经完成**首次部署**。
 2. 一根确认可传输数据的 USB-C 线；仅充电线无法连接。
-3. iPhone 或 iPad（系统需 iOS/iPadOS 16.3 或更高版本）。
+3. iPhone 或 iPad（系统需 iOS/iPadOS 16.1 或更高版本）。
 4. 自己的 Apple 账号和侧载/重签条件。Release 提供的 IPA 未签名，不能双击或直接安装。
 
 > **重要：**本仓库提供的 `module-update-0.3.21.djupdate` 是已部署模块的更新包，不是空白模块的首次刷机包。模块尚未首次部署时，请不要自行反复刷写、执行 ADB 修复或套用网上未知脚本。
@@ -44,8 +44,8 @@ DJOneHub 面向 DJI 4G 模块的日常连接、通信与维护场景，提供 Ma
 
 | 你的设备 | 下载文件 |
 | --- | --- |
-| iPhone | `DJOneHub-iPhone-v0.7.6-build41-unsigned.ipa` |
-| iPad | `DJOneHub-iPad-v0.7.6-build41-unsigned.ipa` |
+| iPhone | `DJOneHub-iPhone-v0.7.6-build42-unsigned.ipa` |
+| iPad | `DJOneHub-iPad-v0.7.6-build42-unsigned.ipa` |
 
 不要下载错设备版本；也不要把 `.djupdate` 当作 iPhone/iPad App。
 

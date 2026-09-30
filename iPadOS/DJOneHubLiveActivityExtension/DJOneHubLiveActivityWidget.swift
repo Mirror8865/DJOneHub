@@ -14,11 +14,11 @@ struct DJOneHubLiveActivityBundle: WidgetBundle {
 struct DJOneHubLiveActivityWidget: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: DJOneHubCallActivityAttributes.self) { context in
-            lockScreenView(context.state.liveActivityDisplayState(isStale: context.isStale))
+            lockScreenView(context.state.liveActivityDisplayState())
                 .activityBackgroundTint(Color(uiColor: .systemBackground))
                 .activitySystemActionForegroundColor(.primary)
         } dynamicIsland: { context in
-            let state = context.state.liveActivityDisplayState(isStale: context.isStale)
+            let state = context.state.liveActivityDisplayState()
             return DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
                     Image(systemName: symbolName(for: state.phase))

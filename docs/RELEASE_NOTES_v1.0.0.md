@@ -18,7 +18,7 @@
 ## 包含内容
 
 - Mac 客户端与后台源码：`1.2.10 (19)`
-- iPhone/iPad 客户端源码：`0.7.6 (41)`
+- iPhone/iPad 客户端源码：`0.7.6 (42)`，最低支持 iOS/iPadOS 16.1
 - QDC507 Agent 源码：`0.3.21`
 - QDC507 独立诊断、配置和修复工具源码
 
@@ -32,19 +32,21 @@ SHA-256：
 b3554ad426a623e18dead9b80cfc3356d41f70934b99d0531dcf8dd3e2a17e2b
 ```
 
-同时提供以下 iOS/iPadOS 未签名 IPA：
+同时提供以下兼容 iOS/iPadOS 16.1 及更高版本的未签名 IPA：
 
-- `DJOneHub-iPhone-v0.7.6-build41-unsigned.ipa`
-- `DJOneHub-iPad-v0.7.6-build41-unsigned.ipa`
+- `DJOneHub-iPhone-v0.7.6-build42-unsigned.ipa`
+- `DJOneHub-iPad-v0.7.6-build42-unsigned.ipa`
 
-两者均由当前 `0.7.6 (41)` 源码构建，分别限制为 iPhone 或 iPad 设备族，且不含签名、Provisioning Profile 或 `_CodeSignature`。它们**不能直接安装**；使用前必须由下载者使用自己的 Apple 开发者证书重签，或通过自己授权的侧载方式安装。
+两者均由当前 `0.7.6 (42)` 源码构建，分别限制为 iPhone 或 iPad 设备族，且不含签名、Provisioning Profile 或 `_CodeSignature`。它们**不能直接安装**；使用前必须由下载者使用自己的 Apple 开发者证书重签，或通过自己授权的侧载方式安装。
 
 SHA-256：
 
 ```text
-DJOneHub-iPhone-v0.7.6-build41-unsigned.ipa  f8efbe3fd387751330b9a0718ad10213552b3f15238af7762c3d0332eee46a51
-DJOneHub-iPad-v0.7.6-build41-unsigned.ipa    88114752578ed5548174274a74084fef2a953443607e9b40328a2085a3254d44
+DJOneHub-iPhone-v0.7.6-build42-unsigned.ipa  5a8194fffb9b4b0102392e486c6a926ff2c7754cbe1ef35bbd1b51f52738a336
+DJOneHub-iPad-v0.7.6-build42-unsigned.ipa    9392e75c219fa3f0eeaab5974e81d574a075bf5349bee83f498744859544e0df
 ```
+
+`build41` IPA 仍作为历史附件保留，仅适用于 iOS/iPadOS 16.3 及更高版本；需要 16.1 兼容性的用户请下载 `build42`。
 
 ## 未包含内容
 
