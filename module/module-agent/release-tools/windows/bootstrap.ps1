@@ -6,16 +6,24 @@
       powershell -NoProfile -ExecutionPolicy Bypass -File bootstrap.ps1 -Action deploy --confirm-persistent-deploy
       powershell -NoProfile -ExecutionPolicy Bypass -File bootstrap.ps1 -Action usbcfg
       powershell -NoProfile -ExecutionPolicy Bypass -File bootstrap.ps1 -Action usbcfg --write --port COM8
+      powershell -NoProfile -ExecutionPolicy Bypass -File bootstrap.ps1 -Action flash
 
   职责只有三件事:
     1. 定位或自动下载 Android platform-tools (adb.exe), 解压到本目录下的 platform-tools
     2. 定位 Python 3 (>= 3.8); usbcfg 动作按需安装 pyserial
     3. 把后面的参数原样交给对应的 Python 脚本, 不做任何额外解释或改写
+
+  例外只有 -Action flash (Flash-All.bat 双击调用): 按顺序跑 只读预检 ->
+  写 USB 组合 -> 等 adb 重新枚举 -> 永久部署, 每步都看上一步的退出码, 任何一步
+  失败就立刻停下, 不会在异常状态上继续往下刷. 备份与失败自动回滚仍然全部由
+  flash-usbcfg.py 负责, 这里不加任何自己的写模块逻辑.
+  flash 另外认识两个自家参数: --yes (跳过确认) 和 --force (即使当前组合已是
+  目标值也重新写入并重启); 其余参数 (--port 等) 照样原样透传.
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('deploy', 'usbcfg', 'setup')]
+    [ValidateSet('deploy', 'usbcfg', 'setup', 'flash')]
     [string]$Action,
 
     [Parameter(ValueFromRemainingArguments = $true)]
@@ -183,7 +191,7 @@ Write-Host ""
 
 # ---- 1. adb ----
 $adb = $null
-if ($Action -eq 'deploy' -or $Action -eq 'setup') {
+if ($Action -eq 'deploy' -or $Action -eq 'setup' -or $Action -eq 'flash') {
     $adb = Resolve-PlatformTools
     Write-Info "adb: $adb"
 } else {
@@ -207,7 +215,7 @@ if (-not $python) {
 }
 Write-Info ("Python: " + $python.Exe + " " + ($python.Args -join ' '))
 
-if ($Action -eq 'usbcfg') {
+if ($Action -eq 'usbcfg' -or $Action -eq 'flash') {
     if (-not (Resolve-Pyserial $python)) {
         Write-Fail "pyserial 安装失败; 请手动执行: python -m pip install pyserial"
         exit 4
@@ -221,30 +229,190 @@ if ($Action -eq 'setup') {
 }
 
 # ---- 3. 交给 Python 脚本 ----
-$scriptName = if ($Action -eq 'deploy') { 'deploy_qdc507_windows.py' } else { 'flash-usbcfg.py' }
-$scriptPath = Join-Path $Root $scriptName
-if (-not (Test-Path $scriptPath)) {
-    Write-Fail "缺少脚本: $scriptPath (请完整解压分享包, 不要只复制单个文件)"
-    exit 2
-}
 if ($adb) { $env:DJONEHUB_ADB = $adb }
-
-$exeArgs = @($python.Args)
 # 统一 UTF-8: 管道或重定向时 Python 不再按本机 ANSI 代码页输出, 中文不会乱码.
 $env:PYTHONIOENCODING = 'utf-8'
-Write-Host ""
-Write-Info ("执行: " + $scriptName + " " + ($ScriptArgs -join ' '))
-Write-Host ""
 
-$previous = $ErrorActionPreference
-$ErrorActionPreference = 'Continue'
-$code = 1
-try {
-    & $python.Exe @exeArgs $scriptPath @ScriptArgs
-    $code = $LASTEXITCODE
-} catch {
-    Write-Fail "运行 $scriptName 失败: $($_.Exception.Message)"
-} finally {
-    $ErrorActionPreference = $previous
+function Invoke-PythonScript {
+    # 跑一个 Python 脚本, 返回 @{ Code = 退出码; Lines = 输出行 }.
+    # -Capture: 一边照常打印给用户看, 一边把输出留一份给调用方做判断.
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [string[]]$Arguments = @(),
+        [switch]$Capture
+    )
+    $scriptPath = Join-Path $Root $Name
+    if (-not (Test-Path $scriptPath)) {
+        Write-Fail "缺少脚本: $scriptPath (请完整解压分享包, 不要只复制单个文件)"
+        return [pscustomobject]@{ Code = 2; Lines = @() }
+    }
+    Write-Host ""
+    Write-Info ("执行: " + $Name + " " + ($Arguments -join ' '))
+    Write-Host ""
+
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $code = 1
+    $captured = @()
+    try {
+        if ($Capture) {
+            & $python.Exe @($python.Args) $scriptPath @Arguments 2>&1 |
+                Tee-Object -Variable captured | Out-Host
+            $code = $LASTEXITCODE
+        } else {
+            & $python.Exe @($python.Args) $scriptPath @Arguments | Out-Host
+            $code = $LASTEXITCODE
+        }
+    } catch {
+        Write-Fail "运行 $Name 失败: $($_.Exception.Message)"
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+    return [pscustomobject]@{ Code = $code; Lines = @($captured) }
 }
-exit $code
+
+function Get-AdbSerial {
+    # 返回处于 device (已授权) 状态的设备; adb 本身跑不起来时返回空数组.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $serials = @()
+    try {
+        $listing = @(& $adb devices 2>$null)
+        if ($LASTEXITCODE -eq 0) {
+            foreach ($line in ($listing | Select-Object -Skip 1)) {
+                $parts = @([string]$line -split "`t")
+                if ($parts.Count -ge 2 -and $parts[1].Trim() -eq 'device') {
+                    $serials += $parts[0].Trim()
+                }
+            }
+        }
+    } catch {
+        $serials = @()
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+    return , $serials
+}
+
+function Wait-AdbSerial {
+    param([int]$TimeoutSeconds = 120)
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ($true) {
+        $serials = Get-AdbSerial
+        if ($serials.Count -ge 1) { return $serials }
+        if ((Get-Date) -ge $deadline) { return @() }
+        Start-Sleep -Seconds 3
+    }
+}
+
+function Get-FieldFromLines {
+    param([string[]]$Lines, [string]$Pattern)
+    foreach ($line in $Lines) {
+        $match = [regex]::Match([string]$line, $Pattern)
+        if ($match.Success) { return $match.Groups[1].Value.Trim() }
+    }
+    return $null
+}
+
+if ($Action -eq 'flash') {
+    # 一键刷机: 只读预检 -> 写 USB 组合 + 重启 -> 等 adb -> 永久部署.
+    # 任何一步非 0 就立刻退出, 绝不带着坏状态继续往下走.
+    $assumeYes = $false
+    $forceWrite = $false
+    $usbcfgArgs = New-Object System.Collections.ArrayList
+    foreach ($arg in $ScriptArgs) {
+        if ($arg -match '^(-y|--yes|--assume-yes)$') { $assumeYes = $true }
+        elseif ($arg -match '^(--force|--force-write)$') { $forceWrite = $true }
+        else { [void]$usbcfgArgs.Add($arg) }
+    }
+    $usbcfgArgs = @($usbcfgArgs)
+
+    Write-Host ""
+    Write-Host "===== 第 1/3 步: 只读预检 (不写入任何内容) =====" -ForegroundColor Cyan
+    $preflight = Invoke-PythonScript 'flash-usbcfg.py' $usbcfgArgs -Capture
+    if ($preflight.Code -ne 0) {
+        Write-Host ""
+        Write-Fail "预检失败 (exit $($preflight.Code)); 没有写入任何内容, 已停止."
+        exit $preflight.Code
+    }
+
+    # 组合值与目标值都从脚本自己打印的 ASCII 状态行里取, 不依赖中文日志.
+    $currentUsbcfg = Get-FieldFromLines $preflight.Lines 'DJONEHUB_USBCFG current=(\S+)'
+    $targetUsbcfg = Get-FieldFromLines $preflight.Lines 'target=(\S+)'
+    $adbSerials = Get-AdbSerial
+    $alreadyTarget = ($currentUsbcfg -and $targetUsbcfg -and $currentUsbcfg -eq $targetUsbcfg)
+    $needWrite = $forceWrite -or (-not $alreadyTarget) -or ($adbSerials.Count -eq 0)
+
+    if (-not $needWrite) {
+        Write-Info "当前组合已是目标值 ($currentUsbcfg), 且 adb 已看到模块; 跳过写入和重启."
+    } else {
+        if (-not $assumeYes) {
+            Write-Host ""
+            Write-Host "即将把模块 USB 组合写成 $targetUsbcfg 并重启模块, 然后永久部署 DJOneHub Agent." -ForegroundColor Yellow
+            Write-Host "原组合 ($currentUsbcfg) 已备份到 usbcfg-rollback\, 写入失败会自动回滚."
+            $answer = Read-Host "确认继续? 输入 Y 回车"
+            if ($answer -notmatch '^(y|yes)$') {
+                Write-Host ""
+                Write-Warn "已取消, 没有写入任何内容."
+                exit 0
+            }
+        }
+        Write-Host ""
+        Write-Host "===== 第 2/3 步: 写入 USB 组合并重启模块 =====" -ForegroundColor Cyan
+        $written = Invoke-PythonScript 'flash-usbcfg.py' @($usbcfgArgs + @('--write')) -Capture
+        if ($written.Code -ne 0) {
+            Write-Host ""
+            Write-Fail "写入 USB 组合失败 (exit $($written.Code)); 已停止, 不会继续部署."
+            Write-Host "如果模块状态异常, 双击 Restore-USBConfig.bat 可以恢复写入前的 USB 组合."
+            exit $written.Code
+        }
+    }
+
+    Write-Host ""
+    Write-Host "===== 第 3/3 步: 等 adb 枚举并永久部署 =====" -ForegroundColor Cyan
+    $serials = Wait-AdbSerial -TimeoutSeconds 120
+    if ($serials.Count -eq 0) {
+        Write-Host ""
+        Write-Fail "adb 在 120 秒内没有发现模块设备."
+        Write-Host "请重新插拔模块后重跑本脚本; 仍然不行就再跑一次并加上 --force."
+        exit 8
+    }
+
+    if ($needWrite) {
+        # AT+CFUN=1,1 之后模块很快重新枚举, 但它内部还没启动完: 这几十秒里作者
+        # 部署器的 `mount -o remount,rw /dev/ubi0_0 /` 会返回 EBUSY, 部署失败并
+        # 回滚 (实测: "mount: mounting /dev/ubi0_0 on / failed: Device or resource
+        # busy"). 试过用 remount 当探针, 探针自己能过、紧接着部署器同一句还是
+        # EBUSY, 所以探针不可靠; 实测重启后 30 秒左右再部署就正常, 这里固定等
+        # 45 秒, 让第一次尝试就大概率成功, 真失败还有下面的重试兜底.
+        $settleSeconds = 45
+        Write-Info "等待模块启动完成 ($settleSeconds 秒) ..."
+        Start-Sleep -Seconds $settleSeconds
+    }
+
+    # 部署失败时作者部署器会连自己的回滚一起跑, 结果是模块回到"没有 Agent"的
+    # 状态, 所以失败后重试一次是安全的, 也是能救回来的.
+    $deployed = $null
+    foreach ($attempt in 1..2) {
+        if ($attempt -eq 2) {
+            Write-Warn "上一次部署失败; 等 30 秒后自动重试一次."
+            Start-Sleep -Seconds 30
+        }
+        $deployed = Invoke-PythonScript 'deploy_qdc507_windows.py' @('--confirm-persistent-deploy')
+        if ($deployed.Code -eq 0) { break }
+    }
+
+    Write-Host ""
+    if ($deployed.Code -eq 0) {
+        Write-Host "全部完成: USB 组合已生效, DJOneHub Agent 已永久部署." -ForegroundColor Green
+        Write-Host "接下来把模块插到已安装并授权 DJOneHub 的 iPhone / iPad 上即可."
+    } else {
+        Write-Fail "部署失败 (exit $($deployed.Code))."
+        Write-Host "失败时部署器会把模块回滚到没有 Agent 的状态, 所以模块现在是干净的,"
+        Write-Host "重新插拔后直接重跑本脚本即可再次尝试."
+    }
+    exit $deployed.Code
+}
+
+$targetScript = if ($Action -eq 'deploy') { 'deploy_qdc507_windows.py' } else { 'flash-usbcfg.py' }
+exit (Invoke-PythonScript $targetScript $ScriptArgs).Code

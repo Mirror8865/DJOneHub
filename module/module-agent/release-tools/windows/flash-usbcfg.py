@@ -370,6 +370,14 @@ def main() -> int:
     if not args.write:
         log("预检完成, 未写入任何内容. 加 --write 才会真正写入.")
         log(f"计划写入: {fmt(TARGET_VID, TARGET_PID, TARGET_FLAGS)}")
+        # 给上层脚本 (bootstrap.ps1 -Action flash) 的机器可读状态行: 纯 ASCII,
+        # 不经过控制台代码页, 换台机器也不会因为编码差异而解析失败.
+        print(
+            f"DJONEHUB_USBCFG current={fmt(*current)} "
+            f"target={fmt(TARGET_VID, TARGET_PID, TARGET_FLAGS)} "
+            f"already={1 if current == (TARGET_VID, TARGET_PID, TARGET_FLAGS) else 0}",
+            flush=True,
+        )
         return 0
 
     # ---- 写入 + 回读 + 回滚 ----
