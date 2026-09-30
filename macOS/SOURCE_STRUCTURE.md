@@ -80,3 +80,15 @@ go test -mod=mod ./...
 ## 注意
 
 当前 Go module 路径仍为 `github.com/iniwex5/vohive`，这是为了保持现有共享包导入路径及上游来源关系不变。确定最终 GitHub 仓库地址后，可以再进行一次独立的模块路径迁移，但这不是构建和发布 DJOneHub 的前置条件。
+
+---
+
+## 鸣谢、支持与免责声明
+
+感谢小红书博主 [「小吴折腾AI」](https://xhslink.cn/o/70Ecv4YqEvk) 的一同开发，感谢 [XUXU](https://xhslink.cn/o/AYJ2PKK9tyj)、[Jamie（@没错jamie就是我）](https://xhslink.cn/o/2CbGt9pN3AB) 与 [JieDen](https://xhslink.cn/o/5WQkSOfgE3i) 的支持。
+
+我的微信小程序售卖咖啡豆和茶叶；如果你喜欢本项目，欢迎扫码支持，感谢大家。
+
+![咖啡豆与茶叶小程序二维码](https://raw.githubusercontent.com/wzz04810-debug/DJOneHub/main/docs/assets/coffee-tea-miniprogram-qr.jpg)
+
+本项目仅用于学习、研究与合法的非商业用途。严禁将本项目、其源码、脚本或发布附件用于任何非法、侵权、规避安全限制、未经授权访问设备或违反运营商及平台规则的行为；不当使用造成的后果由使用者自行承担。

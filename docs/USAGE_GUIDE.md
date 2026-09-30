@@ -136,3 +136,15 @@ shasum -a 256 qdc507-agent
 ## 9. 数据与安全
 
 短信、通话、eSIM、GPS、联系人和录音均可能涉及个人或运营商数据。请遵守当地法律、运营商条款和设备授权范围；不要把日志、设备标识、签名私钥、部署 Token、签名 IPA 或 provisioning profile 上传到 Issue、仓库或截图中。
+
+---
+
+## 鸣谢、支持与免责声明
+
+感谢小红书博主 [「小吴折腾AI」](https://xhslink.cn/o/70Ecv4YqEvk) 的一同开发，感谢 [XUXU](https://xhslink.cn/o/AYJ2PKK9tyj)、[Jamie（@没错jamie就是我）](https://xhslink.cn/o/2CbGt9pN3AB) 与 [JieDen](https://xhslink.cn/o/5WQkSOfgE3i) 的支持。
+
+我的微信小程序售卖咖啡豆和茶叶；如果你喜欢本项目，欢迎扫码支持，感谢大家。
+
+![咖啡豆与茶叶小程序二维码](https://raw.githubusercontent.com/wzz04810-debug/DJOneHub/main/docs/assets/coffee-tea-miniprogram-qr.jpg)
+
+本项目仅用于学习、研究与合法的非商业用途。严禁将本项目、其源码、脚本或发布附件用于任何非法、侵权、规避安全限制、未经授权访问设备或违反运营商及平台规则的行为；不当使用造成的后果由使用者自行承担。
