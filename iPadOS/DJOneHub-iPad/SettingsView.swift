@@ -59,49 +59,51 @@ struct SettingsView: View {
 
     var body: some View {
         NavigationStack {
+            // 分组表单：iOS 26/27 由系统自动为每个 Section 渲染原生液态玻璃卡片，
+            // 按官方文档不再在内容层叠加自定义玻璃背景（会导致渲染异常变黑）。
             Form {
                 Section(L10n.t("状态")) {
-                    settingsCardRow(statusCard)
+                    statusCard
                 }
 
                 Section(L10n.t("外观")) {
-                    settingsCardRow(appearanceCard)
+                    appearanceCard
                 }
 
                 Section("通知") {
-                    settingsCardRow(notificationCard)
+                    notificationCard
                 }
 
                 Section("连接") {
-                    settingsCardRow(connectionCard)
+                    connectionCard
                 }
 
                 Section("通话支持") {
-                    settingsCardRow(voiceCard)
+                    voiceCard
                 }
 
                 Section(L10n.t("网络")) {
-                    settingsCardRow(networkCard)
+                    networkCard
                 }
 
                 Section("功率与温度") {
-                    settingsCardRow(powerCard)
+                    powerCard
                 }
 
                 Section(L10n.t("定位")) {
-                    settingsCardRow(gpsCard)
+                    gpsCard
                 }
 
                 Section(L10n.t("eSIM / 卡片")) {
-                    settingsCardRow(esimCard)
+                    esimCard
                 }
 
                 Section(L10n.t("AT 调试")) {
-                    settingsCardRow(atCard)
+                    atCard
                 }
 
                 Section("服务控制") {
-                    settingsCardRow(serviceCard)
+                    serviceCard
                 }
 
                 if !actionMessage.isEmpty {
@@ -182,26 +184,6 @@ struct SettingsView: View {
                 .zIndex(10)
             }
         }
-    }
-
-    /// 所有设置卡片统一为独立玻璃面板：iOS 26 用系统原生液态玻璃，旧系统回退浅色圆角卡。
-    @ViewBuilder
-    private var cardBackground: some View {
-        if #available(iOS 26.0, *) {
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-        } else {
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .fill(Color(uiColor: .secondarySystemGroupedBackground))
-        }
-    }
-
-    /// 让卡片在表单行中保持独立圆角边界，并铺上统一玻璃背景。
-    private func settingsCardRow<Content: View>(_ content: Content) -> some View {
-        content
-            .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
-            .listRowBackground(Color.clear)
-            .background(cardBackground)
     }
 
     private var statusCard: some View {
@@ -433,11 +415,6 @@ struct SettingsView: View {
             }
         }
         .padding(14)
-        .background(cardBackground)
-        .overlay {
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .strokeBorder(.primary.opacity(0.06))
-        }
         .scaleEffect(powerCardPressed ? 0.97 : 1)
         .animation(.easeOut(duration: 0.12), value: powerCardPressed)
         // 长按卡片才显示完整传感器列表；轻触仍保持设置页的普通滚动体验。
@@ -989,23 +966,13 @@ private struct PowerDetailsPopover: View {
         }
         .padding(16)
         .frame(width: 300, alignment: .leading)
-        .background(popoverBackground)
+        // 弹层内容视图按官方文档使用普通材质，自定义玻璃背景只留给真正的控制元素。
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .strokeBorder(.primary.opacity(0.08))
         }
         .shadow(color: .black.opacity(0.18), radius: 18, y: 8)
-    }
-
-    @ViewBuilder
-    private var popoverBackground: some View {
-        if #available(iOS 26.0, *) {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        } else {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(.regularMaterial)
-        }
     }
 
     private func readingText(_ reading: SystemPowerReading) -> String {

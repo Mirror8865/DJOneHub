@@ -45,7 +45,8 @@ struct FirstConnectionView: View {
                             .foregroundStyle(.secondary)
                     }
                     .padding(14)
-                    .background { nativeGlass(cornerRadius: 14) }
+                    // 首次部署提示属于内容层，按官方文档使用普通材质而非液态玻璃。
+                    .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
 
                     if case let .failed(message) = model.setupStage {
                         VStack(alignment: .leading, spacing: 6) {

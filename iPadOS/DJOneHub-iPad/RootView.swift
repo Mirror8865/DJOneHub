@@ -152,45 +152,7 @@ struct PhoneBackdrop: View {
     }
 }
 
-/// 内容表面保持不透明；玻璃材质只交给系统导航栏、标签栏和弹层。
-struct PhoneCard: ViewModifier {
-    @ViewBuilder
-    func body(content: Content) -> some View {
-        if #available(iOS 26.0, *) {
-            content
-                .padding(16)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .glassEffect(
-                    .regular,
-                    in: RoundedRectangle(cornerRadius: 18, style: .continuous)
-                )
-        } else {
-            content
-                .padding(16)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    Color(uiColor: .secondarySystemGroupedBackground),
-                    in: RoundedRectangle(cornerRadius: 14, style: .continuous)
-                )
-        }
-    }
-}
-
 extension View {
-    func phoneCard() -> some View { modifier(PhoneCard()) }
-
-    /// 全 App 统一的原生液态玻璃形状：iOS 26 用系统 glassEffect，旧系统回退半透明材质。
-    @ViewBuilder
-    func nativeGlass(cornerRadius: CGFloat) -> some View {
-        if #available(iOS 26.0, *) {
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .glassEffect(.regular, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-        } else {
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .fill(.regularMaterial)
-        }
-    }
-
     /// iOS 18 及以后以表单尺寸呈现弹层；旧系统保持大尺寸弹层。
     @ViewBuilder
     func presentationSizingIfAvailable() -> some View {

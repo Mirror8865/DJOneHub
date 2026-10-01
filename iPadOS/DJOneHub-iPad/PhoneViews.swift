@@ -96,11 +96,28 @@ struct DialPadView: View {
                         }
                         .padding(.horizontal, 12)
 
-                        VStack(spacing: rowSpacing) {
-                            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                                HStack(spacing: keySpacing) {
-                                    ForEach(row, id: \.0) { digit, letters in
-                                        DialKey(digit: digit, letters: letters)
+                        // 多个玻璃键放进系统容器，玻璃会正确采样背景并合并渲染（官方文档模式）。
+                        Group {
+                            if #available(iOS 26.0, *) {
+                                GlassEffectContainer(spacing: keySpacing) {
+                                    VStack(spacing: rowSpacing) {
+                                        ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                                            HStack(spacing: keySpacing) {
+                                                ForEach(row, id: \.0) { digit, letters in
+                                                    DialKey(digit: digit, letters: letters)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                VStack(spacing: rowSpacing) {
+                                    ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                                        HStack(spacing: keySpacing) {
+                                            ForEach(row, id: \.0) { digit, letters in
+                                                DialKey(digit: digit, letters: letters)
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -300,14 +317,28 @@ struct DialPadView: View {
             model.numberInput.append(digit)
             playDialKeySound()
         } label: {
-            VStack(spacing: 1) {
-                Text(digit).font(.system(size: isCompact ? 33 : 36, weight: .regular, design: .rounded))
-                Text(letters).font(.system(size: isCompact ? 10 : 11, weight: .semibold)).tracking(1.4)
+            Group {
+                if #available(iOS 26.0, *) {
+                    VStack(spacing: 1) {
+                        Text(digit).font(.system(size: isCompact ? 33 : 36, weight: .regular, design: .rounded))
+                        Text(letters).font(.system(size: isCompact ? 10 : 11, weight: .semibold)).tracking(1.4)
+                    }
+                    .foregroundStyle(.primary)
+                    .frame(width: keySize, height: keySize)
+                    // 系统液态玻璃按键：regular + interactive 让自定义键拥有和系统按钮一致的按压反馈。
+                    .glassEffect(.regular.interactive(), in: Circle())
+                    .contentShape(Circle())
+                } else {
+                    VStack(spacing: 1) {
+                        Text(digit).font(.system(size: isCompact ? 33 : 36, weight: .regular, design: .rounded))
+                        Text(letters).font(.system(size: isCompact ? 10 : 11, weight: .semibold)).tracking(1.4)
+                    }
+                    .foregroundStyle(.primary)
+                    .frame(width: keySize, height: keySize)
+                    .background(Color(uiColor: .secondarySystemFill), in: Circle())
+                    .contentShape(Circle())
+                }
             }
-            .foregroundStyle(.primary)
-            .frame(width: keySize, height: keySize)
-            .background(dialKeyBackground)
-            .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .simultaneousGesture(
@@ -319,16 +350,6 @@ struct DialPadView: View {
             }
         )
         .accessibilityLabel(letters.isEmpty ? digit : "\(digit) \(letters)")
-    }
-
-    // iOS 26 起使用系统原生液态玻璃框架；旧系统回退到近似系统电话的浅灰圆键。
-    @ViewBuilder
-    private var dialKeyBackground: some View {
-        if #available(iOS 26.0, *) {
-            Circle().glassEffect(.regular, in: Circle())
-        } else {
-            Circle().fill(Color(uiColor: .secondarySystemFill))
-        }
     }
 }
 
@@ -380,7 +401,8 @@ private struct ModuleStatusPopover: View {
         }
         .padding(16)
         .frame(width: 286, alignment: .leading)
-        .background { nativeGlass(cornerRadius: 18) }
+        // 弹层内容视图按官方文档不再叠加自定义玻璃背景，交给系统弹层材质呈现。
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .stroke(Color.primary.opacity(0.08), lineWidth: 1)
@@ -1062,30 +1084,64 @@ private struct DTMFKeypadView: View {
     var body: some View {
         let content = NavigationStack {
             VStack(spacing: isCompact ? 12 : 16) {
-                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                    HStack(spacing: keySpacing) {
-                        ForEach(row) { key in
-                            Button {
-                                Task { await model.sendDTMF(key.digit) }
-                            } label: {
-                                VStack(spacing: 1) {
-                                    Text(key.digit).font(digitFont)
-                                    if !key.letters.isEmpty {
-                                        Text(key.letters).font(lettersFont).tracking(1.2)
+                // 多个玻璃键放入系统容器：玻璃正确采样背景、合并渲染并流畅响应（官方文档模式）。
+                Group {
+                    if #available(iOS 26.0, *) {
+                        GlassEffectContainer(spacing: keySpacing) {
+                            VStack(spacing: keySpacing) {
+                                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                                    HStack(spacing: keySpacing) {
+                                        ForEach(row) { key in
+                                            Button {
+                                                Task { await model.sendDTMF(key.digit) }
+                                            } label: {
+                                                VStack(spacing: 1) {
+                                                    Text(key.digit).font(digitFont)
+                                                    if !key.letters.isEmpty {
+                                                        Text(key.letters).font(lettersFont).tracking(1.2)
+                                                    }
+                                                }
+                                                .foregroundStyle(.primary)
+                                                .frame(width: keySize, height: keySize)
+                                                .glassEffect(.regular.interactive(), in: Circle())
+                                                .contentShape(Circle())
+                                            }
+                                            .buttonStyle(.plain)
+                                            .accessibilityLabel(key.letters.isEmpty ? key.digit : "\(key.digit) \(key.letters)")
+                                        }
                                     }
                                 }
-                                .foregroundStyle(.primary)
-                                .frame(width: keySize, height: keySize)
-                                .background(keyBackground)
-                                .contentShape(Circle())
                             }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel(key.letters.isEmpty ? key.digit : "\(key.digit) \(key.letters)")
+                        }
+                    } else {
+                        VStack(spacing: keySpacing) {
+                            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                                HStack(spacing: keySpacing) {
+                                    ForEach(row) { key in
+                                        Button {
+                                            Task { await model.sendDTMF(key.digit) }
+                                        } label: {
+                                            VStack(spacing: 1) {
+                                                Text(key.digit).font(digitFont)
+                                                if !key.letters.isEmpty {
+                                                    Text(key.letters).font(lettersFont).tracking(1.2)
+                                                }
+                                            }
+                                            .foregroundStyle(.primary)
+                                            .frame(width: keySize, height: keySize)
+                                            .background(Color(uiColor: .tertiarySystemFill), in: Circle())
+                                            .contentShape(Circle())
+                                        }
+                                        .buttonStyle(.plain)
+                                        .accessibilityLabel(key.letters.isEmpty ? key.digit : "\(key.digit) \(key.letters)")
+                                    }
+                                }
+                            }
                         }
                     }
                 }
+                .frame(width: keypadWidth)
             }
-            .frame(width: keypadWidth)
             .padding(.vertical, 18)
             .padding(.horizontal, 28)
             .navigationTitle("DTMF")
@@ -1099,15 +1155,6 @@ private struct DTMFKeypadView: View {
             content.presentationDetents([.height(520)]).presentationDragIndicator(.visible)
         } else {
             content.presentationDetents([.medium]).presentationDragIndicator(.visible)
-        }
-    }
-
-    @ViewBuilder
-    private var keyBackground: some View {
-        if #available(iOS 26.0, *) {
-            Circle().glassEffect(.regular, in: Circle())
-        } else {
-            Circle().fill(Color(uiColor: .tertiarySystemFill))
         }
     }
 }
