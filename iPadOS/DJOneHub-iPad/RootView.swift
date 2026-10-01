@@ -179,10 +179,10 @@ struct PhoneCard: ViewModifier {
 extension View {
     func phoneCard() -> some View { modifier(PhoneCard()) }
 
-    /// iPadOS 26 及以后以表单尺寸呈现弹层；旧系统保持大尺寸弹层。
+    /// iOS 18 及以后以表单尺寸呈现弹层；旧系统保持大尺寸弹层。
     @ViewBuilder
     func presentationSizingIfAvailable() -> some View {
-        if #available(iOS 16.4, *) {
+        if #available(iOS 18.0, *) {
             self.presentationSizing(.form)
         } else {
             self
