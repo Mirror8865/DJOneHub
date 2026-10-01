@@ -15,6 +15,7 @@ struct SettingsView: View {
     @EnvironmentObject private var appSettings: AppSettings
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @AppStorage("djonehub.background-standby-enabled") private var backgroundStandbyEnabled = true
     @AppStorage("djonehub.low-power-mode-enabled") private var lowPowerModeEnabled = true
     @AppStorage("djonehub.live-activity-enabled") private var liveActivityEnabled = true
@@ -59,64 +60,15 @@ struct SettingsView: View {
 
     var body: some View {
         NavigationStack {
-            // 分组表单：iOS 26/27 由系统自动为每个 Section 渲染原生液态玻璃卡片，
-            // 按官方文档不再在内容层叠加自定义玻璃背景（会导致渲染异常变黑）。
-            Form {
-                Section(L10n.t("状态")) {
-                    statusCard
-                }
-
-                Section(L10n.t("外观")) {
-                    appearanceCard
-                }
-
-                Section("通知") {
-                    notificationCard
-                }
-
-                Section("连接") {
-                    connectionCard
-                }
-
-                Section("通话支持") {
-                    voiceCard
-                }
-
-                Section(L10n.t("网络")) {
-                    networkCard
-                }
-
-                Section("功率与温度") {
-                    powerCard
-                }
-
-                Section(L10n.t("定位")) {
-                    gpsCard
-                }
-
-                Section(L10n.t("eSIM / 卡片")) {
-                    esimCard
-                }
-
-                Section(L10n.t("AT 调试")) {
-                    atCard
-                }
-
-                Section("服务控制") {
-                    serviceCard
-                }
-
-                if !actionMessage.isEmpty {
-                    Section {
-                        Text(actionMessage)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
+            // iPad（regular）：双列卡片网格，充分利用屏宽、减少留白；
+            // iPhone（compact）：官方 grouped Form 单列范式。
+            Group {
+                if horizontalSizeClass == .regular {
+                    settingsGrid
+                } else {
+                    settingsForm
                 }
             }
-            .formStyle(.grouped)
-            // iPad 上限制表单宽度并居中，避免整页拉满后视觉松散、排版混乱。
-            .frame(maxWidth: 720)
             .navigationTitle(L10n.t("设置"))
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -184,6 +136,75 @@ struct SettingsView: View {
                 .zIndex(10)
             }
         }
+    }
+
+    // MARK: - iPhone 单列表单（官方 grouped Form）
+    private var settingsForm: some View {
+        Form {
+            Section(L10n.t("状态")) { statusCard }
+            Section(L10n.t("外观")) { appearanceCard }
+            Section("通知") { notificationCard }
+            Section("连接") { connectionCard }
+            Section("通话支持") { voiceCard }
+            Section(L10n.t("网络")) { networkCard }
+            Section("功率与温度") { powerCard }
+            Section(L10n.t("定位")) { gpsCard }
+            Section(L10n.t("eSIM / 卡片")) { esimCard }
+            Section(L10n.t("AT 调试")) { atCard }
+            Section("服务控制") { serviceCard }
+            if !actionMessage.isEmpty {
+                Section {
+                    Text(actionMessage).font(.footnote).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    // MARK: - iPad 双列卡片网格（液态玻璃卡片，充分利用屏宽）
+    private var settingsGrid: some View {
+        ScrollView {
+            LazyVGrid(
+                columns: [
+                    GridItem(.flexible(), spacing: 16, alignment: .top),
+                    GridItem(.flexible(), spacing: 16, alignment: .top),
+                ],
+                alignment: .center,
+                spacing: 16
+            ) {
+                settingsCard(L10n.t("状态")) { statusCard }
+                settingsCard(L10n.t("外观")) { appearanceCard }
+                settingsCard("通知") { notificationCard }
+                settingsCard("连接") { connectionCard }
+                settingsCard("通话支持") { voiceCard }
+                settingsCard(L10n.t("网络")) { networkCard }
+                settingsCard("功率与温度") { powerCard }
+                settingsCard(L10n.t("定位")) { gpsCard }
+                settingsCard(L10n.t("eSIM / 卡片")) { esimCard }
+                settingsCard(L10n.t("AT 调试")) { atCard }
+                settingsCard("服务控制") { serviceCard }
+                if !actionMessage.isEmpty {
+                    settingsCard("") {
+                        Text(actionMessage).font(.footnote).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .padding(16)
+        }
+    }
+
+    private func settingsCard<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if !title.isEmpty {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .modifier(SettingsCardGlass())
     }
 
     private var statusCard: some View {
@@ -1076,5 +1097,19 @@ private struct RingtoneSettingsView: View {
         }
         .navigationTitle("来电铃声")
         .onDisappear { model.audio.stopRingtonePreview() }
+    }
+}
+
+/// 设置页卡片玻璃：iOS 26 官方 glassEffect 圆角卡片，旧系统用 regularMaterial 回退。
+private struct SettingsCardGlass: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content.glassEffect(.regular, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        } else {
+            content.background(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(.regularMaterial)
+            )
+        }
     }
 }

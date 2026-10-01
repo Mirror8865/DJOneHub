@@ -67,11 +67,10 @@ struct RootView: View {
         .animation(.easeInOut(duration: 0.2), value: model.activeCall?.id)
         .preferredColorScheme(settings.appearance.colorScheme)
         .sheet(isPresented: $showingSettings) {
+            // iPad 全屏呈现双列卡片网格（不再用 form 小尺寸），iPhone 本来即全屏。
             SettingsView()
                 .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
-                // iPad 上以表单尺寸呈现，设置页不再整屏铺开，更贴合 iPadOS 设计规范。
-                .presentationSizingIfAvailable()
         }
         .fullScreenCover(isPresented: Binding(
             get: { !firstConnectionComplete },
