@@ -5,6 +5,7 @@ enum PhoneTab: String, CaseIterable, Identifiable {
     case recents = "最近通话"
     case messages = "短信"
     case contacts = "通讯录"
+    case settings = "设置"
 
     var id: String { rawValue }
 
@@ -14,6 +15,7 @@ enum PhoneTab: String, CaseIterable, Identifiable {
         case .recents: return "clock"
         case .messages: return "message"
         case .contacts: return "person.crop.circle"
+        case .settings: return "gearshape"
         }
     }
 
@@ -32,31 +34,35 @@ struct RootView: View {
     @EnvironmentObject private var settings: AppSettings
     @AppStorage("djonehub.selected-tab") private var selectedTabRawValue = PhoneTab.dial.rawValue
     @State private var pendingSMSRecipient: String?
-    @State private var showingSettings = false
     @AppStorage("djonehub.first-connection-complete") private var firstConnectionComplete = false
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
+            // 设置与拨号/最近/短信/联系人同级，作为顶层 tab，位置统一。
             TabView(selection: selectedTabBinding) {
-                DialPadView(onSettings: showSettings)
+                DialPadView()
                     .tag(PhoneTab.dial)
                     .tabItem { Label(L10n.t(PhoneTab.dial.tabTitle), systemImage: PhoneTab.dial.icon) }
 
-                RecentsView(onCall: dial, onMessage: composeMessage, onSettings: showSettings)
+                RecentsView(onCall: dial, onMessage: composeMessage)
                     .tag(PhoneTab.recents)
                     .tabItem { Label(L10n.t(PhoneTab.recents.tabTitle), systemImage: PhoneTab.recents.icon) }
 
-                MessagesView(pendingRecipient: $pendingSMSRecipient, onSettings: showSettings)
+                MessagesView(pendingRecipient: $pendingSMSRecipient)
                     .tag(PhoneTab.messages)
                     .tabItem { Label(L10n.t(PhoneTab.messages.tabTitle), systemImage: PhoneTab.messages.icon) }
 
-                ContactsView(onCall: dial, onMessage: composeMessage, onSettings: showSettings)
+                ContactsView(onCall: dial, onMessage: composeMessage)
                     .tag(PhoneTab.contacts)
                     .tabItem { Label(L10n.t(PhoneTab.contacts.tabTitle), systemImage: PhoneTab.contacts.icon) }
 
+                SettingsView()
+                    .tag(PhoneTab.settings)
+                    .tabItem { Label(L10n.t(PhoneTab.settings.tabTitle), systemImage: PhoneTab.settings.icon) }
             }
             .phoneTabBarMinimizeOnScroll()
-            .tint(.blue)
+            // tab 选中色：浅色黑、深色白（不用蓝色）。
+            .tint(Color.primary)
 
             if let call = model.activeCall {
                 ActiveCallView(call: call)
@@ -66,12 +72,6 @@ struct RootView: View {
         .background(PhoneBackdrop())
         .animation(.easeInOut(duration: 0.2), value: model.activeCall?.id)
         .preferredColorScheme(settings.appearance.colorScheme)
-        .sheet(isPresented: $showingSettings) {
-            // iPad 全屏呈现双列卡片网格（不再用 form 小尺寸），iPhone 本来即全屏。
-            SettingsView()
-                .presentationDetents([.large])
-                .presentationDragIndicator(.visible)
-        }
         .fullScreenCover(isPresented: Binding(
             get: { !firstConnectionComplete },
             set: { if !$0 { firstConnectionComplete = true } }
@@ -118,10 +118,6 @@ struct RootView: View {
     private func composeMessage(_ number: String) {
         pendingSMSRecipient = number
         selectedTab = .messages
-    }
-
-    private func showSettings() {
-        showingSettings = true
     }
 
 }

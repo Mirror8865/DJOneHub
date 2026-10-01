@@ -105,6 +105,17 @@ enum L10n {
         "暂无未知发件人": "No Unknown Senders", "暂无垃圾信息": "No Junk",
         "暂无最近删除": "No Recently Deleted", "选择信息开始聊天": "Select a conversation to start chatting",
         "姓名": "Name", "选择照片": "Choose Photo", "清除照片": "Remove Photo",
-        "今天": "Today", "昨天": "Yesterday"
+        "今天": "Today", "昨天": "Yesterday",
+        // v13 联系人信息面板
+        "电话": "Phone", "邮件": "Mail", "资料": "Info", "背景": "Background", "关闭": "Close",
+        "好": "OK", "输入号码或姓名": "Enter number or name",
+        "已新建联系人": "Contact Created", "需要通讯录权限": "Contacts Access Required",
+        "已添加到联系人": "Added to Contact", "保存失败": "Save Failed",
+        "联系人密钥验证": "Contact Key Verification",
+        "新建联系人": "New Contact", "添加到现有联系人": "Add to Existing Contact",
+        "取消屏蔽联系人": "Unblock Contact", "屏蔽联系人": "Block Contact",
+        "打开联系人密钥验证": "Open Contact Key Verification",
+        "隐藏提醒": "Hide Alerts", "发送已读回执": "Send Read Receipts",
+        "共享专注模式状态": "Share Focus Status", "暂无共享背景": "No Shared Background"
     ]
 }

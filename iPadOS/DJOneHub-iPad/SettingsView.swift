@@ -71,9 +71,12 @@ struct SettingsView: View {
             }
             .navigationTitle(L10n.t("设置"))
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button(L10n.t("完成")) { closeSettings() }
-                        .fontWeight(.semibold)
+                // 作为顶层 tab 时无“完成”按钮；仅 sheet/cover 模式（onClose 非空）显示。
+                if onClose != nil {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button(L10n.t("完成")) { closeSettings() }
+                            .fontWeight(.semibold)
+                    }
                 }
             }
             .task(id: scenePhase) {

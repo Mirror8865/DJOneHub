@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import PhotosUI
+import Contacts
 
 /// 仅在当天显示具体时分；更早的记录显示日期，避免长列表全部挤成相同的时间。
 enum RecentCallTimeFormatter {
@@ -42,7 +43,6 @@ enum DialPadDeletePolicy {
 struct DialPadView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
-    let onSettings: () -> Void
     @State private var deleteRepeatTask: Task<Void, Never>?
     @State private var zeroWasLongPressed = false
     @State private var showingModuleStatus = false
@@ -168,11 +168,6 @@ struct DialPadView: View {
             }
             // 导航栏只承担设置入口；标题和状态放在页面内容区，避免窄屏互相挤压。
             .navigationBarTitleDisplayMode(.inline)
-            .settingsToolbarButton {
-                // 设置入口与状态弹窗属于同一页面状态；跳转前收起，返回拨号页时不会残留。
-                dismissModuleStatusPopover()
-                onSettings()
-            }
             .onDisappear(perform: stopRepeatingDelete)
         }
     }
@@ -460,7 +455,6 @@ struct RecentsView: View {
     @EnvironmentObject private var model: AppModel
     let onCall: (String) -> Void
     let onMessage: (String) -> Void
-    let onSettings: () -> Void
 
     var body: some View {
         NavigationStack {
@@ -501,7 +495,6 @@ struct RecentsView: View {
             }
             .background(PhoneBackdrop())
             .navigationTitle(L10n.t("最近通话"))
-            .settingsToolbarButton(action: onSettings)
         }
     }
 
@@ -559,7 +552,6 @@ private enum MessagesCategory: String, CaseIterable, Identifiable {
 struct MessagesView: View {
     @EnvironmentObject private var model: AppModel
     @Binding var pendingRecipient: String?
-    let onSettings: () -> Void
 
     @State private var newMessageRecipient: String?
     @State private var showingClearConfirmation = false
@@ -649,16 +641,17 @@ struct MessagesView: View {
 
     var body: some View {
         NavigationSplitView {
-            sidebar
-                // 灰色背景贯穿整个左栏（含顶部导航栏区域），与原生 iMessage 一致。
-                .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
-                // 导航栏背景同样设为分组灰并强制可见，消除顶部白色留白。
-                .toolbarBackground(Color(uiColor: .systemGroupedBackground), for: .navigationBar)
-                .toolbarBackground(.visible, for: .navigationBar)
-                // iPad 左栏宽度（原生 iMessage 约 280-320）。
-                .navigationSplitViewColumnWidth(min: 270, ideal: 310, max: 400)
-                .searchable(text: $search, prompt: L10n.t("搜索"))
-                .toolbar { sidebarToolbar }
+            ZStack {
+                // 灰底在列最底层，贯穿整个 sidebar（含状态栏/导航栏），顶部无白色留白。
+                Color(uiColor: .systemGroupedBackground).ignoresSafeArea()
+                sidebar
+                    // 导航栏透明，让底层灰贯穿；搜索栏浮于灰底之上。
+                    .toolbarBackground(.hidden, for: .navigationBar)
+            }
+            // iPad 左栏加宽（原生 iMessage 全屏约 320-340）。
+            .navigationSplitViewColumnWidth(min: 300, ideal: 330, max: 430)
+            .searchable(text: $search, prompt: L10n.t("搜索"))
+            .toolbar { sidebarToolbar }
                 .task { await model.refreshMessages(silently: true) }
                 .onChange(of: pendingRecipient) { recipient in
                     // iMessage 流程：直接进入右侧新消息线程（不弹小窗口）。
@@ -696,7 +689,6 @@ struct MessagesView: View {
                 // iMessage 新消息流程：右侧直接是收件人+消息线程，发送后左栏新建会话。
                 NewMessageThread(
                     initialRecipient: draft,
-                    onSettings: onSettings,
                     onCancel: {
                         newMessageRecipient = nil
                         pendingRecipient = nil
@@ -713,21 +705,11 @@ struct MessagesView: View {
                     sender: sender,
                     messages: conversation.messages,
                     displayName: displayName(for: sender),
-                    photoData: photoData(for: sender),
-                    onSettings: onSettings
+                    photoData: photoData(for: sender)
                 )
             } else {
-                // 无会话占位页：设置按钮仍固定在右上角。
+                // 无会话占位页（设置已在顶层 tab，此处不再放设置图标）。
                 EmptyStateView(title: L10n.t("选择信息开始聊天"), systemImage: "message")
-                    .toolbar {
-                        ToolbarItem(placement: .topBarTrailing) {
-                            Button(action: onSettings) {
-                                Image(systemName: "gearshape")
-                            }
-                            .tint(Color.primary)
-                            .accessibilityLabel(L10n.t("设置"))
-                        }
-                    }
             }
         }
     }
@@ -782,9 +764,12 @@ struct MessagesView: View {
                 }
                 .buttonStyle(.plain)
             } else {
-                // 选中行：蓝色大圆角块在 label 内部，左右各留 10pt 边距（不贴列边缘，iMessage 图二）。
+                // 选中行：蓝色大圆角块在 label 内部，左右各留 10pt 边距（不贴列边缘，iMessage）。
                 Button {
-                    selection = conversation.sender
+                    // 选中块缓慢淡入出现（easeOut），不立即闪现。
+                    withAnimation(.easeOut(duration: 0.22)) {
+                        selection = conversation.sender
+                    }
                 } label: {
                     MessageConversationRow(
                         sender: conversation.sender,
@@ -797,7 +782,8 @@ struct MessagesView: View {
                     .padding(.horizontal, 12)
                     .padding(.vertical, 9)
                     .background(
-                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        // 圆角 20pt（原生 iMessage 选中块连续圆角）。
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
                             .fill(selection == conversation.sender ? Color(uiColor: .systemBlue) : Color.clear)
                     )
                     .padding(.horizontal, 10)
@@ -935,11 +921,25 @@ struct MessagesView: View {
                         .lineLimit(2)
                 }
                 Spacer()
-                Text(messages.last?.timestamp ?? .now, style: .time)
+                // 右侧最近消息时间：今天时分、本周星期几、更早日期（iMessage 规则）。
+                Text(rowTimestampText(messages.last?.timestamp ?? .now))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
             .padding(.vertical, 4)
+        }
+
+        /// 行右侧时间：今天显示时分；本周显示星期几；更早显示日期（与 iMessage 一致）。
+        private func rowTimestampText(_ date: Date) -> String {
+            let calendar = Calendar.current
+            if calendar.isDateInToday(date) {
+                return date.formatted(date: .omitted, time: .shortened)
+            }
+            if let weekInterval = calendar.dateInterval(of: .weekOfYear, for: Date()),
+               weekInterval.contains(date) {
+                return date.formatted(.dateTime.weekday(.wide))
+            }
+            return date.formatted(.dateTime.year().month().day())
         }
     }
 }
@@ -951,30 +951,35 @@ private struct MessageThreadView: View {
     let messages: [SMSMessage]
     let displayName: String
     let photoData: Data?
-    let onSettings: () -> Void
     @State private var reply = ""
+    @State private var showContactInfo = false
 
     var body: some View {
-        Group {
-            if #available(iOS 26.0, *) {
-                // 液态玻璃必须在 GlassEffectContainer 内才渲染真实玻璃材质（iOS 26 官方文档），
-                // 气泡、输入栏置于同一容器中相互融合，与 iMessage 一致。
-                GlassEffectContainer { threadContent }
-            } else {
-                threadContent
-            }
-        }
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            // 设置入口固定在聊天页右上角（系统自动玻璃圆形，tint 直接加按钮上）。
-            ToolbarItem(placement: .topBarTrailing) {
-                Button(action: onSettings) {
-                    Image(systemName: "gearshape")
+        ZStack(alignment: .trailing) {
+            Group {
+                if #available(iOS 26.0, *) {
+                    // 液态玻璃必须在 GlassEffectContainer 内才渲染真实玻璃材质（iOS 26 官方文档），
+                    // 气泡、输入栏置于同一容器中相互融合，与 iMessage 一致。
+                    GlassEffectContainer { threadContent }
+                } else {
+                    threadContent
                 }
-                .tint(Color.primary)
-                .accessibilityLabel(L10n.t("设置"))
+            }
+            if showContactInfo {
+                // 联系人信息面板从右侧滑出（结构严格按原生 iMessage）。
+                ContactInfoPanel(
+                    displayName: displayName,
+                    photoData: photoData,
+                    phone: sender,
+                    onClose: {
+                        withAnimation(.easeInOut(duration: 0.25)) { showContactInfo = false }
+                    }
+                )
+                .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
+        .clipped()
+        .navigationBarTitleDisplayMode(.inline)
     }
 
     private var threadContent: some View {
@@ -1049,17 +1054,23 @@ private struct MessageThreadView: View {
         VStack(spacing: -14) {
             // 头像在名字上方，尺寸 72（原生 iMessage 比例），名字胶囊与头像底部重叠。
             InitialAvatar(name: displayName, photoData: photoData, size: 72)
-            HStack(spacing: 4) {
-                Text(displayName)
-                    .font(.subheadline.weight(.semibold))
-                    .lineLimit(1)
-                Image(systemName: "chevron.right")
-                    .font(.caption2.weight(.bold))
-                    .foregroundStyle(.secondary)
+            // 名字玻璃胶囊可点（内含 chevron），点击右侧滑出联系人信息面板。
+            Button {
+                withAnimation(.easeInOut(duration: 0.25)) { showContactInfo = true }
+            } label: {
+                HStack(spacing: 4) {
+                    Text(displayName)
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                    Image(systemName: "chevron.right")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 7)
+                .modifier(HeaderNameGlass())
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 7)
-            .modifier(HeaderNameGlass())
+            .buttonStyle(.plain)
         }
     }
 
@@ -1076,13 +1087,408 @@ private struct MessageThreadView: View {
     }
 }
 
+// MARK: - 联系人信息面板（原生 iMessage 右侧滑出）
+
+/// 联系人信息面板：结构严格按原生 iMessage——顶部 xmark/编辑、头像名字、
+/// 电话/FaceTime/邮件三圆钮、资料/背景分段、资料卡、新建/添加联系人、
+/// 三个开关、屏蔽联系人、联系人密钥验证、端到端加密说明小字。
+private struct ContactInfoPanel: View {
+    let displayName: String
+    let photoData: Data?
+    let phone: String
+    let onClose: () -> Void
+
+    @State private var selectedSegment = 0
+    @State private var blockedSenders: Set<String> = Set(
+        (try? JSONDecoder().decode([String].self,
+            from: Data((UserDefaults.standard.string(forKey: "djonehub.blocked-senders") ?? "").utf8))) ?? []
+    )
+    @State private var showingExistingPicker = false
+    @State private var showingKeyVerification = false
+    @State private var saveNotice = ""
+
+    private var isBlocked: Bool { blockedSenders.contains(phone) }
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 14) {
+                InitialAvatar(name: displayName, photoData: photoData, size: 100)
+                Text(displayName)
+                    .font(.title2.weight(.bold))
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                // 电话 / FaceTime / 邮件三圆钮。
+                HStack(spacing: 22) {
+                    Button {
+                        if let url = URL(string: "tel:\(phone)") { UIApplication.shared.open(url) }
+                    } label: {
+                        Image(systemName: "phone.fill")
+                            .font(.system(size: 19))
+                            .frame(width: 52, height: 52)
+                            .background(Circle().fill(Color(uiColor: .systemGray5)))
+                            .foregroundStyle(.primary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(L10n.t("电话"))
+
+                    // FaceTime：本 app 不支持，灰圆禁用态。
+                    Image(systemName: "video.fill")
+                        .font(.system(size: 19))
+                        .frame(width: 52, height: 52)
+                        .background(Circle().fill(Color(uiColor: .systemGray5)))
+                        .foregroundStyle(.secondary)
+                        .opacity(0.6)
+                        .accessibilityLabel("FaceTime")
+
+                    // 邮件：无邮件地址，黑圆禁用态（与蓝本视觉一致）。
+                    Image(systemName: "envelope.fill")
+                        .font(.system(size: 18))
+                        .frame(width: 52, height: 52)
+                        .background(Circle().fill(Color(uiColor: .label)))
+                        .foregroundStyle(Color(uiColor: .systemBackground))
+                        .accessibilityLabel(L10n.t("邮件"))
+                }
+
+                // 资料 / 背景分段。
+                Picker("", selection: $selectedSegment) {
+                    Text(L10n.t("资料")).tag(0)
+                    Text(L10n.t("背景")).tag(1)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 190)
+
+                if selectedSegment == 0 {
+                    infoSection
+                } else {
+                    // 背景分段：iMessage 共享背景，本 app 不支持，空状态。
+                    VStack(spacing: 8) {
+                        Image(systemName: "photo.on.rectangle")
+                            .font(.system(size: 34))
+                            .foregroundStyle(.secondary)
+                        Text(L10n.t("暂无共享背景"))
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.top, 40)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 10)
+            .padding(.bottom, 28)
+        }
+        .frame(width: 360)
+        .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
+        // 面板内蓝字按钮（新建联系人等）恢复系统蓝，不被 TabView 的 primary tint 影响。
+        .tint(Color(uiColor: .systemBlue))
+        .safeAreaInset(edge: .top) {
+            HStack {
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 15, weight: .bold))
+                        .frame(width: 34, height: 34)
+                        .modifier(PanelCircleGlass())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(L10n.t("关闭"))
+                Spacer()
+                Button {
+                    Task {
+                        let ok = await ContactWriter.newContact(phone: phone)
+                        saveNotice = ok ? L10n.t("已新建联系人") : L10n.t("需要通讯录权限")
+                    }
+                } label: {
+                    Text(L10n.t("编辑"))
+                        .font(.subheadline.weight(.semibold))
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .modifier(PanelCapsuleGlass())
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 6)
+        }
+        .sheet(isPresented: $showingExistingPicker) {
+            ExistingContactPicker { identifier in
+                Task {
+                    let ok = await ContactWriter.add(to: identifier, phone: phone)
+                    saveNotice = ok ? L10n.t("已添加到联系人") : L10n.t("保存失败")
+                    showingExistingPicker = false
+                }
+            }
+            .presentationSizingIfAvailable()
+        }
+        .alert(L10n.t("联系人密钥验证"), isPresented: $showingKeyVerification) {
+            Button(L10n.t("好"), role: .cancel) {}
+        } message: {
+            Text("DJOneHub 短信经模块蜂窝网络传输，不支持 iMessage 联系人密钥验证。")
+        }
+        .alert("", isPresented: Binding(get: { !saveNotice.isEmpty }, set: { if !$0 { saveNotice = "" } })) {
+            Button(L10n.t("好"), role: .cancel) { saveNotice = "" }
+        } message: {
+            Text(saveNotice)
+        }
+    }
+
+    @ViewBuilder
+    private var infoSection: some View {
+        // 电话资料卡。
+        infoCard {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(L10n.t("电话"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(phone)
+                        .font(.subheadline)
+                        .foregroundStyle(.primary)
+                }
+                Spacer()
+                Image(systemName: "phone.fill")
+                    .font(.system(size: 17))
+                    .foregroundStyle(.secondary)
+            }
+        }
+
+        // 新建联系人 / 添加到现有联系人。
+        infoCard {
+            VStack(spacing: 0) {
+                Button {
+                    Task {
+                        let ok = await ContactWriter.newContact(phone: phone)
+                        saveNotice = ok ? L10n.t("已新建联系人") : L10n.t("需要通讯录权限")
+                    }
+                } label: {
+                    HStack {
+                        Text(L10n.t("新建联系人"))
+                        Spacer()
+                    }
+                }
+                .padding(.vertical, 10)
+                Divider()
+                Button {
+                    showingExistingPicker = true
+                } label: {
+                    HStack {
+                        Text(L10n.t("添加到现有联系人"))
+                        Spacer()
+                    }
+                }
+                .padding(.vertical, 10)
+            }
+        }
+
+        // 三个开关（隐藏提醒 / 发送已读回执 / 共享专注模式状态）。
+        infoCard {
+            ContactToggleCard(phone: phone)
+        }
+
+        // 屏蔽联系人（红字）。
+        infoCard {
+            Button {
+                var set = blockedSenders
+                if set.contains(phone) { set.remove(phone) } else { set.insert(phone) }
+                blockedSenders = set
+                if let data = try? JSONEncoder().encode(Array(set)) {
+                    UserDefaults.standard.set(String(decoding: data, as: UTF8.self),
+                                             forKey: "djonehub.blocked-senders")
+                }
+            } label: {
+                HStack {
+                    Text(isBlocked ? L10n.t("取消屏蔽联系人") : L10n.t("屏蔽联系人"))
+                    Spacer()
+                }
+            }
+            .padding(.vertical, 4)
+        }
+
+        // 打开联系人密钥验证（蓝字）。
+        infoCard {
+            Button {
+                showingKeyVerification = true
+            } label: {
+                HStack {
+                    Text(L10n.t("打开联系人密钥验证"))
+                    Spacer()
+                }
+            }
+            .padding(.vertical, 4)
+        }
+
+        // 端到端加密说明小字（DJOneHub 版本文案）。
+        Text("所有DJOneHub信息对话均未采用安全的端对端加密，在设备间发送时可能被读取。")
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 12)
+            .padding(.top, 2)
+    }
+
+    private func infoCard<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        content()
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 14)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color(uiColor: .systemGray5))
+            )
+    }
+}
+
+/// 三开关卡片：隐藏提醒 / 发送已读回执 / 共享专注模式状态（按号码持久化）。
+private struct ContactToggleCard: View {
+    let phone: String
+
+    @AppStorage private var hideAlerts: Bool
+    @AppStorage private var sendReadReceipts: Bool
+    @AppStorage private var shareFocus: Bool
+
+    init(phone: String) {
+        self.phone = phone
+        _hideAlerts = AppStorage(wrappedValue: false, "djonehub.contact.\(phone).hide-alerts")
+        _sendReadReceipts = AppStorage(wrappedValue: false, "djonehub.contact.\(phone).send-read-receipts")
+        _shareFocus = AppStorage(wrappedValue: false, "djonehub.contact.\(phone).share-focus")
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Toggle(L10n.t("隐藏提醒"), isOn: $hideAlerts)
+                .padding(.vertical, 4)
+            Divider()
+            Toggle(L10n.t("发送已读回执"), isOn: $sendReadReceipts)
+                .padding(.vertical, 4)
+            Divider()
+            Toggle(L10n.t("共享专注模式状态"), isOn: $shareFocus)
+                .padding(.vertical, 4)
+        }
+    }
+}
+
+/// 现有联系人选择列表（添加到现有联系人）。
+private struct ExistingContactPicker: View {
+    @EnvironmentObject private var model: AppModel
+    let onPick: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var search = ""
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(filtered) { contact in
+                    Button {
+                        onPick(contact.id)
+                    } label: {
+                        HStack(spacing: 12) {
+                            InitialAvatar(name: contact.name, photoData: contact.photoData, size: 40)
+                            Text(contact.name).font(.body)
+                            Spacer()
+                        }
+                    }
+                }
+            }
+            .navigationTitle(L10n.t("添加到现有联系人"))
+            .navigationBarTitleDisplayMode(.inline)
+            .searchable(text: $search, prompt: L10n.t("搜索"))
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button(L10n.t("取消")) { dismiss() }
+                }
+            }
+            .task { await model.contacts.loadIfNeeded() }
+        }
+    }
+
+    private var filtered: [ContactStore.Contact] {
+        guard !search.isEmpty else { return model.contacts.contacts }
+        return model.contacts.contacts.filter { $0.name.localizedCaseInsensitiveContains(search) }
+    }
+}
+
+/// 联系人写入工具（系统通讯录 CNContactStore）。
+@MainActor
+private enum ContactWriter {
+    /// 新建仅含该号码的联系人。
+    static func newContact(phone: String) async -> Bool {
+        let store = CNContactStore()
+        do {
+            let granted = try await requestAccess(store)
+            guard granted else { return false }
+            let contact = CNMutableContact()
+            contact.phoneNumbers = [
+                CNLabeledValue(label: CNLabelPhoneNumberMain, value: CNPhoneNumber(stringValue: phone))
+            ]
+            try store.add(contact)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// 把号码追加到指定现有联系人。
+    static func add(to identifier: String, phone: String) async -> Bool {
+        let store = CNContactStore()
+        do {
+            let granted = try await requestAccess(store)
+            guard granted else { return false }
+            let keys: [CNKeyDescriptor] = [CNContactPhoneNumbersKey as CNKeyDescriptor]
+            guard let contact = try store.unifiedContact(withIdentifier: identifier, keysToFetch: keys)
+                .mutableCopy() as? CNMutableContact else { return false }
+            var numbers = contact.phoneNumbers
+            numbers.append(CNLabeledValue(label: CNLabelPhoneNumberMain,
+                                          value: CNPhoneNumber(stringValue: phone)))
+            contact.phoneNumbers = numbers
+            let request = CNSaveRequest()
+            request.update(contact)
+            try store.execute(request)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private static func requestAccess(_ store: CNContactStore) async throws -> Bool {
+        try await withCheckedThrowingContinuation { continuation in
+            store.requestAccess(for: .contacts) { granted, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(returning: granted)
+                }
+            }
+        }
+    }
+}
+
+/// 面板顶部圆形玻璃按钮（xmark）。
+private struct PanelCircleGlass: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content.glassEffect(.regular.interactive(), in: Circle())
+        } else {
+            content.background(Circle().fill(.regularMaterial))
+        }
+    }
+}
+
+/// 面板顶部胶囊玻璃按钮（编辑）。
+private struct PanelCapsuleGlass: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content.glassEffect(.regular.interactive(), in: Capsule())
+        } else {
+            content.background(Capsule().fill(.regularMaterial))
+        }
+    }
+}
+
 // MARK: - iMessage 式新消息线程
 
 /// iMessage 式新消息线程：右侧直接输入收件人与消息，发送后左栏新建会话（不弹小窗口）。
 private struct NewMessageThread: View {
     @EnvironmentObject private var model: AppModel
     let initialRecipient: String
-    let onSettings: () -> Void
     let onCancel: () -> Void
     let onSend: (String, String) -> Void
 
@@ -1124,23 +1530,17 @@ private struct NewMessageThread: View {
         }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            // 仅保留左上角“取消”（iMessage 新消息页一致）。
             ToolbarItem(placement: .topBarLeading) {
                 Button(L10n.t("取消"), action: onCancel)
                     .tint(Color.primary)
-            }
-            ToolbarItem(placement: .topBarTrailing) {
-                Button(action: onSettings) {
-                    Image(systemName: "gearshape")
-                }
-                .tint(Color.primary)
-                .accessibilityLabel(L10n.t("设置"))
             }
         }
     }
 
     private var content: some View {
         VStack(spacing: 0) {
-            // 收件人行（iMessage 新消息顶部“收件人:”）。
+            // 收件人玻璃胶囊（与下方短信输入栏一致的液态玻璃）。
             HStack(spacing: 8) {
                 Text(L10n.t("收件人"))
                     .font(.subheadline)
@@ -1149,8 +1549,11 @@ private struct NewMessageThread: View {
                     .textFieldStyle(.plain)
                     .font(.subheadline)
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .modifier(InputBarGlass())
+            .padding(.horizontal)
+            .padding(.top, 10)
             // 匹配联系人列表。
             if !matches.isEmpty {
                 VStack(spacing: 0) {
@@ -1381,7 +1784,6 @@ struct ContactsView: View {
     @EnvironmentObject private var model: AppModel
     let onCall: (String) -> Void
     let onMessage: (String) -> Void
-    let onSettings: () -> Void
     @State private var search = ""
 
     private var filtered: [ContactStore.Contact] {
@@ -1422,7 +1824,6 @@ struct ContactsView: View {
                 }
             }
             .navigationTitle("\(L10n.t("通讯录")) · \(model.contacts.contacts.count)")
-            .settingsToolbarButton(action: onSettings)
             .searchable(text: $search, prompt: L10n.t("搜索姓名或号码"))
             .task { await model.contacts.loadIfNeeded() }
             .refreshable { await model.contacts.requestAccessAndLoad() }
@@ -1472,35 +1873,46 @@ struct InitialAvatar: View {
     var photoData: Data? = nil
     var size: CGFloat = 44
 
+    // iMessage / 系统联系人风格默认头像渐变组（按姓名稳定选取，不同联系人不同色）。
+    private static let gradientSets: [[Color]] = [
+        [Color(red: 0.25, green: 0.52, blue: 0.98), Color(red: 0.55, green: 0.42, blue: 0.95)],
+        [Color(red: 0.99, green: 0.45, blue: 0.52), Color(red: 0.98, green: 0.62, blue: 0.32)],
+        [Color(red: 0.20, green: 0.72, blue: 0.62), Color(red: 0.22, green: 0.55, blue: 0.92)],
+        [Color(red: 0.62, green: 0.45, blue: 0.95), Color(red: 0.92, green: 0.42, blue: 0.82)],
+        [Color(red: 0.30, green: 0.62, blue: 0.95), Color(red: 0.30, green: 0.82, blue: 0.78)],
+        [Color(red: 0.98, green: 0.72, blue: 0.30), Color(red: 0.95, green: 0.45, blue: 0.55)]
+    ]
+
+    private var gradientColors: [Color] {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hash = abs(trimmed.unicodeScalars.reduce(0) { $0 &+ Int($1.value) })
+        return Self.gradientSets[hash % Self.gradientSets.count]
+    }
+
     var body: some View {
         Group {
             if let photoData, let image = UIImage(data: photoData) {
                 Image(uiImage: image).resizable().scaledToFill()
             } else {
-                Circle().fill(Color.green.opacity(0.18)).overlay {
-                    Text(String(name.prefix(1))).font(.system(size: size * 0.4, weight: .semibold)).foregroundStyle(.green)
-                }
+                // 默认头像：渐变圆 + 白色 person.fill 小人（iMessage / 系统联系人效果）。
+                // 渐变与白色均为显式着色，不受选中蓝块的 foregroundStyle 影响。
+                Circle()
+                    .fill(
+                        LinearGradient(
+                            colors: gradientColors,
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .overlay {
+                        Image(systemName: "person.fill")
+                            .font(.system(size: size * 0.48, weight: .medium))
+                            .foregroundStyle(.white)
+                    }
             }
         }
         .frame(width: size, height: size)
         .clipShape(Circle())
-    }
-}
-
-extension View {
-    /// 所有主页面复用同一个设置入口，避免设置页在不同页面里位置不一致。
-    func settingsToolbarButton(action: @escaping () -> Void) -> some View {
-        toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button(action: action) {
-                    // 跟随系统内容色：浅色模式黑色、深色模式白色，不再使用默认蓝色强调色。
-                    Image(systemName: "gearshape")
-                        .foregroundStyle(.primary)
-                        .tint(.primary)
-                }
-                .accessibilityLabel(L10n.t("设置"))
-            }
-        }
     }
 }
 
