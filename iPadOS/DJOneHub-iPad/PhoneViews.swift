@@ -97,9 +97,11 @@ struct DialPadView: View {
                         .padding(.horizontal, 12)
 
                         // 多个玻璃键放进系统容器，玻璃会正确采样背景并合并渲染（官方文档模式）。
+                        // 官方文档：容器间距若大于内部 HStack/VStack 间距，静止时玻璃会提前相融，
+                        // 因此容器间距取 0，按键在静止时保持独立的纯圆形态。
                         Group {
                             if #available(iOS 26.0, *) {
-                                GlassEffectContainer(spacing: keySpacing) {
+                                GlassEffectContainer(spacing: 0) {
                                     VStack(spacing: rowSpacing) {
                                         ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
                                             HStack(spacing: keySpacing) {
@@ -129,14 +131,12 @@ struct DialPadView: View {
                             Button {
                                 Task { await model.dial() }
                             } label: {
-                                Circle()
-                                    .fill(.green)
+                                // 主操作键：绿色 tint 的交互式液态玻璃圆（官方文档组合 .regular.tint().interactive()）。
+                                Image(systemName: "phone.fill")
+                                    .font(.system(size: isCompact ? 27 : 30, weight: .semibold))
+                                    .foregroundStyle(.white)
                                     .frame(width: keySize, height: keySize)
-                                    .overlay {
-                                        Image(systemName: "phone.fill")
-                                            .font(.system(size: isCompact ? 27 : 30, weight: .semibold))
-                                            .foregroundStyle(.white)
-                                    }
+                                    .modifier(GlassCircle(tint: .green))
                             }
                             .buttonStyle(.plain)
                             .disabled(model.numberInput.isEmpty || model.isBusy || !model.isOnline)
@@ -360,6 +360,30 @@ private final class DialKeyFeedback {
     }
 }
 
+/// 圆形液态玻璃控件修饰器（官方文档组合：.regular.tint().interactive() + in: Circle()）。
+/// tint 为 nil 时使用无着色的交互式玻璃；iOS 26 以下回退为系统填充圆。
+private struct GlassCircle: ViewModifier {
+    var tint: Color? = nil
+
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            if let tint {
+                content
+                    .glassEffect(.regular.tint(tint).interactive(), in: Circle())
+                    .contentShape(Circle())
+            } else {
+                content
+                    .glassEffect(.regular.interactive(), in: Circle())
+                    .contentShape(Circle())
+            }
+        } else {
+            content
+                .background(Circle().fill(tint ?? Color(uiColor: .secondarySystemFill)))
+                .contentShape(Circle())
+        }
+    }
+}
+
 // MARK: - 模块状态
 
 private struct ModuleStatusPopover: View {
@@ -554,12 +578,15 @@ struct MessagesView: View {
                             Label(L10n.t("清空全部短信"), systemImage: "trash")
                         }
                     } label: {
+                        // 跟随系统内容色：浅色黑色、深色白色。
                         Image(systemName: "ellipsis.circle")
+                            .foregroundStyle(.primary)
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { showingComposer = true } label: {
                         Image(systemName: "square.and.pencil")
+                            .foregroundStyle(.primary)
                     }
                 }
             }
@@ -648,12 +675,14 @@ private struct MessageThreadView: View {
                 .onAppear { if let id = messages.last?.id { proxy.scrollTo(id) } }
             }
             Divider()
-            // iMessage 风格输入栏：发送键内嵌在原生液态玻璃胶囊里，与系统短信保持一致。
-            HStack(alignment: .bottom, spacing: 6) {
+            // iMessage 风格输入栏：整条输入栏是一个原生液态玻璃胶囊（两端全圆角），
+            // 输入框去掉自身背景、发送键与输入文本垂直居中对齐，与系统短信输入栏一致。
+            HStack(alignment: .center, spacing: 4) {
                 TextField(L10n.t("短信内容"), text: $reply, axis: .vertical)
                     .lineLimit(1...5)
+                    .textFieldStyle(.plain)
                     .padding(.horizontal, 14)
-                    .padding(.vertical, 9)
+                    .padding(.vertical, 10)
                 Button {
                     let body = reply
                     reply = ""
@@ -669,7 +698,8 @@ private struct MessageThreadView: View {
                 .disabled(reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 .accessibilityLabel(L10n.t("发送"))
             }
-            .padding(6)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
             .background(messageInputBackground)
             .padding(.horizontal)
             .padding(.vertical, 8)
@@ -680,12 +710,13 @@ private struct MessageThreadView: View {
 
     @ViewBuilder
     private var messageInputBackground: some View {
-        // 直接使用系统原生液态玻璃（iOS 26），不再叠加手动材质，保证与系统输入栏一致。
+        // 系统原生液态玻璃：Capsule 让输入栏两端呈完整圆角（iOS 26 官方文档 glassEffect 用法）。
         if #available(iOS 26.0, *) {
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+            Capsule()
+                .fill(.clear)
+                .glassEffect(.regular, in: Capsule())
         } else {
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
+            Capsule()
                 .fill(Color(uiColor: .secondarySystemBackground))
         }
     }
@@ -846,7 +877,9 @@ extension View {
         toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button(action: action) {
+                    // 跟随系统内容色：浅色模式黑色、深色模式白色，不再使用默认蓝色强调色。
                     Image(systemName: "gearshape")
+                        .foregroundStyle(.primary)
                 }
                 .accessibilityLabel(L10n.t("设置"))
             }
@@ -926,93 +959,141 @@ struct ActiveCallView: View {
             GeometryReader { geometry in
                 // 小屏或大字体下允许纵向滚动，保证接听、静音和挂断始终可达。
                 ScrollView {
-                    VStack(spacing: isCompact ? 16 : 26) {
-                Spacer()
-                InitialAvatar(name: model.contacts.displayName(for: call.number), size: avatarSize)
-                VStack(spacing: 6) {
-                    Text(model.contacts.displayName(for: call.number))
-                        .font(isCompact ? .title.weight(.semibold) : .largeTitle.weight(.semibold))
-                        .lineLimit(2)
-                        .minimumScaleFactor(0.7)
-                        .multilineTextAlignment(.center)
-                    Text(statusText).font(.headline).foregroundStyle(.secondary)
-                    if call.state == "active" {
-                        TimelineView(.periodic(from: .now, by: 1)) { context in
-                            Text(durationText(at: context.date)).monospacedDigit().foregroundStyle(.secondary)
+                    if isCompact {
+                        // 紧凑布局：拨号键盘在控制区下方同屏展开，不占全屏、不影响上方按钮。
+                        VStack(spacing: isCompact ? 18 : 26) {
+                            callControlsColumn
+                            if showingKeypad {
+                                DTMFKeypadPanel { showingKeypad = false }
+                                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+                            }
                         }
-                    }
-                    if model.audio.active, !model.audio.routeDescription.isEmpty {
-                        Text(model.audio.routeDescription)
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(2)
-                            .minimumScaleFactor(0.75)
-                            .multilineTextAlignment(.center)
-                    }
-                    if model.audio.active, !model.audio.diagnosticDescription.isEmpty {
-                        Text(model.audio.diagnosticDescription)
-                            .font(.caption2.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                            .minimumScaleFactor(0.75)
-                            .multilineTextAlignment(.center)
-                    }
-                    if model.audio.active, !model.audio.moduleDiagnosticDescription.isEmpty {
-                        Text(model.audio.moduleDiagnosticDescription)
-                            .font(.caption2.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                            .minimumScaleFactor(0.75)
-                            .multilineTextAlignment(.center)
-                    }
-                    if let audioError = model.audio.errorMessage, !audioError.isEmpty {
-                        Text(audioError)
-                            .font(.caption2)
-                            .foregroundStyle(.red)
-                            .multilineTextAlignment(.center)
-                            .lineLimit(2)
-                            .minimumScaleFactor(0.75)
-                    }
-                }
-
-                if call.direction == "incoming" && ["incoming", "waiting"].contains(call.state) {
-                    HStack(spacing: isCompact ? 54 : 84) {
-                        CallCircleButton(title: L10n.t("拒接"), icon: "phone.down.fill", color: .red, size: controlSize) {
-                            Task { await model.reject() }
+                        .frame(minHeight: geometry.size.height)
+                        .frame(maxWidth: .infinity)
+                    } else {
+                        // iPad 常规布局：拨号键盘在右侧“旁边”展开，通话控制始终可见可操作。
+                        HStack(alignment: .center, spacing: 28) {
+                            callControlsColumn
+                                .frame(minHeight: geometry.size.height)
+                            if showingKeypad {
+                                DTMFKeypadPanel { showingKeypad = false }
+                                    .transition(.opacity.combined(with: .move(edge: .trailing)))
+                            }
                         }
-                        CallCircleButton(title: L10n.t("接听"), icon: "phone.fill", color: .green, size: controlSize) {
-                            Task { await model.answer() }
-                        }
+                        .frame(maxWidth: .infinity)
                     }
-                } else {
-                    HStack(spacing: isCompact ? 12 : 28) {
-                        CallCircleButton(title: model.isMuted ? L10n.t("取消静音") : L10n.t("静音"), icon: model.isMuted ? "mic.slash.fill" : "mic.fill", color: model.isMuted ? .orange : .gray, size: controlSize) {
-                            Task { await model.toggleMute() }
-                        }
-                        CallCircleButton(title: L10n.t("扬声器"), icon: model.isSpeakerEnabled ? "speaker.wave.2.fill" : "speaker.fill", color: model.isSpeakerEnabled ? .blue : .gray, size: controlSize) {
-                            model.toggleSpeaker()
-                        }
-                        CallCircleButton(title: "键盘", icon: "circle.grid.3x3.fill", color: .gray, size: controlSize) {
-                            showingKeypad = true
-                        }
-                        CallCircleButton(title: model.isRecording ? L10n.t("停止录音") : L10n.t("录音"), icon: "record.circle", color: model.isRecording ? .red : .gray, size: controlSize) {
-                            Task { await model.toggleRecording() }
-                        }
-                    }
-                    CallCircleButton(title: L10n.t("挂断"), icon: "phone.down.fill", color: .red, size: controlSize) {
-                        Task { await model.hangup() }
-                    }
-                }
-                        Spacer()
-                    }
-                    .frame(minHeight: geometry.size.height)
-                    .frame(maxWidth: .infinity)
-                    .padding()
                 }
                 .scrollIndicators(.hidden)
             }
         }
-        .sheet(isPresented: $showingKeypad) { DTMFKeypadView() }
+        .animation(.easeInOut(duration: 0.25), value: showingKeypad)
+    }
+
+    private var callControlsColumn: some View {
+        VStack(spacing: isCompact ? 16 : 26) {
+            Spacer()
+            InitialAvatar(name: model.contacts.displayName(for: call.number), size: avatarSize)
+            VStack(spacing: 6) {
+                Text(model.contacts.displayName(for: call.number))
+                    .font(isCompact ? .title.weight(.semibold) : .largeTitle.weight(.semibold))
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.7)
+                    .multilineTextAlignment(.center)
+                Text(statusText).font(.headline).foregroundStyle(.secondary)
+                if call.state == "active" {
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        Text(durationText(at: context.date)).monospacedDigit().foregroundStyle(.secondary)
+                    }
+                }
+                if model.audio.active, !model.audio.routeDescription.isEmpty {
+                    Text(model.audio.routeDescription)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.75)
+                        .multilineTextAlignment(.center)
+                }
+                if model.audio.active, !model.audio.diagnosticDescription.isEmpty {
+                    Text(model.audio.diagnosticDescription)
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.75)
+                        .multilineTextAlignment(.center)
+                }
+                if model.audio.active, !model.audio.moduleDiagnosticDescription.isEmpty {
+                    Text(model.audio.moduleDiagnosticDescription)
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.75)
+                        .multilineTextAlignment(.center)
+                }
+                if let audioError = model.audio.errorMessage, !audioError.isEmpty {
+                    Text(audioError)
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.75)
+                }
+            }
+
+            if call.direction == "incoming" && ["incoming", "waiting"].contains(call.state) {
+                HStack(spacing: isCompact ? 54 : 84) {
+                    CallCircleButton(title: L10n.t("拒接"), icon: "phone.down.fill", color: .red, isActive: true, size: controlSize) {
+                        Task { await model.reject() }
+                    }
+                    CallCircleButton(title: L10n.t("接听"), icon: "phone.fill", color: .green, isActive: true, size: controlSize) {
+                        Task { await model.answer() }
+                    }
+                }
+            } else {
+                HStack(spacing: isCompact ? 12 : 28) {
+                    CallCircleButton(
+                        title: model.isMuted ? L10n.t("取消静音") : L10n.t("静音"),
+                        icon: model.isMuted ? "mic.slash.fill" : "mic.fill",
+                        color: .orange,
+                        isActive: model.isMuted,
+                        size: controlSize
+                    ) {
+                        Task { await model.toggleMute() }
+                    }
+                    CallCircleButton(
+                        title: L10n.t("扬声器"),
+                        icon: model.isSpeakerEnabled ? "speaker.wave.2.fill" : "speaker.fill",
+                        color: .blue,
+                        isActive: model.isSpeakerEnabled,
+                        size: controlSize
+                    ) {
+                        model.toggleSpeaker()
+                    }
+                    CallCircleButton(
+                        title: "键盘",
+                        icon: "circle.grid.3x3.fill",
+                        color: .green,
+                        isActive: showingKeypad,
+                        size: controlSize
+                    ) {
+                        showingKeypad.toggle()
+                    }
+                    CallCircleButton(
+                        title: model.isRecording ? L10n.t("停止录音") : L10n.t("录音"),
+                        icon: "record.circle",
+                        color: .red,
+                        isActive: model.isRecording,
+                        size: controlSize
+                    ) {
+                        Task { await model.toggleRecording() }
+                    }
+                }
+                CallCircleButton(title: L10n.t("挂断"), icon: "phone.down.fill", color: .red, isActive: true, size: controlSize) {
+                    Task { await model.hangup() }
+                }
+            }
+            Spacer()
+        }
+        .padding()
     }
 
     private var statusText: String {
@@ -1034,15 +1115,19 @@ private struct CallCircleButton: View {
     let title: String
     let icon: String
     let color: Color
+    var isActive: Bool = false
     var size: CGFloat = 68
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             VStack(spacing: 7) {
-                Circle().fill(color).frame(width: size, height: size).overlay {
-                    Image(systemName: icon).font(.title2.weight(.semibold)).foregroundStyle(.white)
-                }
+                // 液态玻璃圆：激活状态用 tint 着色 + 白色符号，未激活用无着色玻璃 + 系统内容色。
+                Image(systemName: icon)
+                    .font(.title2.weight(.semibold))
+                    .foregroundStyle(isActive ? .white : .primary)
+                    .frame(width: size, height: size)
+                    .modifier(GlassCircle(tint: isActive ? color : nil))
                 Text(title)
                     .font(.caption)
                     .foregroundStyle(.primary)
@@ -1055,10 +1140,10 @@ private struct CallCircleButton: View {
     }
 }
 
-private struct DTMFKeypadView: View {
-    @Environment(\.dismiss) private var dismiss
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+private struct DTMFKeypadPanel: View {
     @EnvironmentObject private var model: AppModel
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    let onClose: () -> Void
 
     private struct DTMFKey: Identifiable {
         let digit: String
@@ -1074,46 +1159,32 @@ private struct DTMFKeypadView: View {
     ]
 
     private var isCompact: Bool { horizontalSizeClass == .compact }
-    // 与系统拨号键盘一致：数字 + 字母，圆形液态玻璃键；iPad 放大按键避免误触。
-    private var keySize: CGFloat { isCompact ? 68 : 84 }
-    private var keySpacing: CGFloat { isCompact ? 18 : 28 }
+    // 比旧的全屏弹层紧凑：按键回归系统拨号键盘尺寸，面板宽度约 240-270pt，在 iPad 上作为侧边面板。
+    private var keySize: CGFloat { isCompact ? 56 : 64 }
+    private var keySpacing: CGFloat { isCompact ? 12 : 16 }
     private var keypadWidth: CGFloat { keySize * 3 + keySpacing * 2 }
-    private var digitFont: Font { .system(size: isCompact ? 27 : 33, weight: .regular, design: .rounded) }
-    private var lettersFont: Font { .system(size: isCompact ? 10 : 12, weight: .semibold) }
+    private var digitFont: Font { .system(size: isCompact ? 22 : 26, weight: .regular, design: .rounded) }
+    private var lettersFont: Font { .system(size: isCompact ? 9 : 10, weight: .semibold) }
 
     var body: some View {
-        let content = NavigationStack {
-            VStack(spacing: isCompact ? 12 : 16) {
-                // 多个玻璃键放入系统容器：玻璃正确采样背景、合并渲染并流畅响应（官方文档模式）。
-                Group {
-                    if #available(iOS 26.0, *) {
-                        GlassEffectContainer(spacing: keySpacing) {
-                            VStack(spacing: keySpacing) {
-                                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                                    HStack(spacing: keySpacing) {
-                                        ForEach(row) { key in
-                                            Button {
-                                                Task { await model.sendDTMF(key.digit) }
-                                            } label: {
-                                                VStack(spacing: 1) {
-                                                    Text(key.digit).font(digitFont)
-                                                    if !key.letters.isEmpty {
-                                                        Text(key.letters).font(lettersFont).tracking(1.2)
-                                                    }
-                                                }
-                                                .foregroundStyle(.primary)
-                                                .frame(width: keySize, height: keySize)
-                                                .glassEffect(.regular.interactive(), in: Circle())
-                                                .contentShape(Circle())
-                                            }
-                                            .buttonStyle(.plain)
-                                            .accessibilityLabel(key.letters.isEmpty ? key.digit : "\(key.digit) \(key.letters)")
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    } else {
+        VStack(spacing: 14) {
+            HStack {
+                Text("键盘")
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                Spacer()
+                Button(action: onClose) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(L10n.t("关闭"))
+            }
+            // 多个玻璃键放入系统容器（容器间距取 0，静止时保持独立纯圆，官方文档模式）。
+            Group {
+                if #available(iOS 26.0, *) {
+                    GlassEffectContainer(spacing: 0) {
                         VStack(spacing: keySpacing) {
                             ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
                                 HStack(spacing: keySpacing) {
@@ -1129,7 +1200,7 @@ private struct DTMFKeypadView: View {
                                             }
                                             .foregroundStyle(.primary)
                                             .frame(width: keySize, height: keySize)
-                                            .background(Color(uiColor: .tertiarySystemFill), in: Circle())
+                                            .glassEffect(.regular.interactive(), in: Circle())
                                             .contentShape(Circle())
                                         }
                                         .buttonStyle(.plain)
@@ -1139,22 +1210,41 @@ private struct DTMFKeypadView: View {
                             }
                         }
                     }
+                } else {
+                    VStack(spacing: keySpacing) {
+                        ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                            HStack(spacing: keySpacing) {
+                                ForEach(row) { key in
+                                    Button {
+                                        Task { await model.sendDTMF(key.digit) }
+                                    } label: {
+                                        VStack(spacing: 1) {
+                                            Text(key.digit).font(digitFont)
+                                            if !key.letters.isEmpty {
+                                                Text(key.letters).font(lettersFont).tracking(1.2)
+                                            }
+                                        }
+                                        .foregroundStyle(.primary)
+                                        .frame(width: keySize, height: keySize)
+                                        .background(Color(uiColor: .tertiarySystemFill), in: Circle())
+                                        .contentShape(Circle())
+                                    }
+                                    .buttonStyle(.plain)
+                                    .accessibilityLabel(key.letters.isEmpty ? key.digit : "\(key.digit) \(key.letters)")
+                                }
+                            }
+                        }
+                    }
                 }
-                .frame(width: keypadWidth)
             }
-            .padding(.vertical, 18)
-            .padding(.horizontal, 28)
-            .navigationTitle("DTMF")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { Button(L10n.t("取消")) { dismiss() } }
+            .frame(width: keypadWidth)
         }
-        // 弹层按内容自适应尺寸：iPad 上不再又宽又扁，四行按键完整可见。
-        if #available(iOS 18.0, *) {
-            content.presentationSizing(.form).presentationDragIndicator(.visible)
-        } else if #available(iOS 16.4, *) {
-            content.presentationDetents([.height(520)]).presentationDragIndicator(.visible)
-        } else {
-            content.presentationDetents([.medium]).presentationDragIndicator(.visible)
+        .padding(18)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
         }
+        .shadow(color: .black.opacity(0.15), radius: 20, y: 8)
     }
 }
