@@ -69,6 +69,7 @@ final class AppModel: ObservableObject {
     let callKit = CallKitController()
     let backgroundStandby = BackgroundStandbyController()
     let incomingNotifier = IncomingCallNotifier()
+    let smsNotifier = SMSNotifier()
     let liveActivity = LiveActivityController()
 
     private let historyStore = LocalHistoryStore()
@@ -102,8 +103,11 @@ final class AppModel: ObservableObject {
     private let backgroundStandbyKey = "djonehub.background-standby-enabled"
     private let lowPowerModeKey = "djonehub.low-power-mode-enabled"
     private let liveActivityKey = "djonehub.live-activity-enabled"
+    private let smsNotificationKey = "djonehub.sms-notifications-enabled"
     private let maxCallHistoryCount = 500
     private let maxMessageCount = 2_000
+    /// 已见过的呼入短信 ID 集合；后台刷新时只对集合外的新短信发通知，避免重复提醒。
+    private var seenIncomingSMSIDs: Set<String> = []
 
     init(api: DJOneHubAPI = DJOneHubAPI()) {
         self.api = api
@@ -128,6 +132,7 @@ final class AppModel: ObservableObject {
         backgroundStandby.setEnabled(storedValue ?? true)
         // 先加载手机副本，再启动轮询，避免模块暂时离线时界面显示为空。
         restoreLocalHistory()
+        captureSMSSnapshot()
         startCallEventBridgeIfNeeded()
         restartPolling()
     }
@@ -145,6 +150,8 @@ final class AppModel: ObservableObject {
         // 手机重启后 App 可能先在受保护数据尚不可读时被后台唤醒。
         // 每次解锁回到前台重新合并磁盘副本，不能让首次空读取一直占据界面。
         restoreLocalHistory()
+        // 回到前台把当前已知短信并入通知基线：用户正在看 App，不需要再为旧短信弹通知。
+        captureSMSSnapshot()
         // 休眠期间 USB ECM 可能重枚举。先取消旧请求并清空接口缓存，再创建全新的轮询与事件连接。
         api.resetLocalConnectionState()
         restartCallEventBridge()
@@ -172,6 +179,10 @@ final class AppModel: ObservableObject {
     func setLiveActivityEnabled(_ enabled: Bool) {
         UserDefaults.standard.set(enabled, forKey: liveActivityKey)
         liveActivity.setEnabled(enabled)
+    }
+
+    func setSMSNotificationsEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: smsNotificationKey)
     }
 
     private func restartPolling() {
@@ -387,9 +398,11 @@ final class AppModel: ObservableObject {
             }
         }
 
-        if appIsActive, Date() >= nextMessagesRefresh {
-            // 短信由模块端独立轮询；App 后台无需重复拉取完整列表。
-            nextMessagesRefresh = Date().addingTimeInterval(30)
+        if Date() >= nextMessagesRefresh {
+            // 前台保持原有节奏；后台也要定期拉取，否则新短信永远要等用户打开 App 才出现。
+            // 后台低频拉取即可兼顾及时性与耗电，短信本身不像来电那样要求秒级响应。
+            let active = appIsActive
+            nextMessagesRefresh = Date().addingTimeInterval(active ? 30 : 15)
             await refreshMessages(silently: true)
         }
     }
@@ -707,9 +720,37 @@ final class AppModel: ObservableObject {
             let mergedMessages = await mergeMessages(remoteMessages)
             if messages != mergedMessages { messages = mergedMessages }
             if !silently { errorMessage = nil }
+            handleIncomingSMSNotifications(mergedMessages)
         } catch {
             if !silently { errorMessage = error.localizedDescription }
         }
+    }
+
+    /// 记录当前已知短信作为后台新短信通知的基线；前台刷新同样并入，
+    /// 保证用户正在看 App 时不会为已显示的消息重复弹通知。
+    private func captureSMSSnapshot() {
+        seenIncomingSMSIDs.formUnion(messages.filter { !$0.isOutgoing }.map(\.id))
+    }
+
+    /// 前台把新短信直接并入已见集合；后台对未见过的呼入短信发送本地通知，
+    /// 发送后并入集合，避免同一会话里反复提醒同一条消息。
+    private func handleIncomingSMSNotifications(_ merged: [SMSMessage]) {
+        let incoming = merged.filter { !$0.isOutgoing }
+        if appIsActive {
+            seenIncomingSMSIDs.formUnion(incoming.map(\.id))
+            return
+        }
+        let smsNotificationsEnabled = UserDefaults.standard.object(forKey: smsNotificationKey) as? Bool ?? true
+        let freshMessages = incoming.filter { !seenIncomingSMSIDs.contains($0.id) }
+        if smsNotificationsEnabled {
+            for message in freshMessages {
+                smsNotifier.post(
+                    message: message,
+                    displayName: contacts.displayName(for: message.sender)
+                )
+            }
+        }
+        seenIncomingSMSIDs.formUnion(incoming.map(\.id))
     }
 
     func clearLocalMessages() {
@@ -718,6 +759,8 @@ final class AppModel: ObservableObject {
             return
         }
         messages = []
+        // 清空后重新拉回的短信不应再被旧通知基线吞掉。
+        seenIncomingSMSIDs.removeAll()
         errorMessage = nil
     }
 

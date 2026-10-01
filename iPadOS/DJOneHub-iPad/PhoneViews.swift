@@ -71,80 +71,84 @@ struct DialPadView: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(spacing: isCompact ? 16 : 22) {
-                    dialPageHeader
-                        // 弹窗需盖在号码输入区之上，不能被后续的拨号盘视图遮住。
-                        .zIndex(showingModuleStatus ? 1 : 0)
+            // 背景作为 ZStack 的第一层铺满整屏，iPad 上不会再出现安全区或导航栏外的黑边。
+            ZStack {
+                PhoneBackdrop()
+                ScrollView {
+                    VStack(spacing: isCompact ? 16 : 22) {
+                        dialPageHeader
+                            // 弹窗需盖在号码输入区之上，不能被后续的拨号盘视图遮住。
+                            .zIndex(showingModuleStatus ? 1 : 0)
 
-                    VStack(spacing: 2) {
-                        Text(model.numberInput.isEmpty ? L10n.t("输入号码") : model.numberInput)
-                            .font(.system(size: isCompact ? 36 : 42, weight: .light, design: .rounded))
-                            .monospacedDigit()
-                            .foregroundStyle(model.numberInput.isEmpty ? .secondary : .primary)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.45)
-                            .frame(height: 50)
+                        VStack(spacing: 2) {
+                            Text(model.numberInput.isEmpty ? L10n.t("输入号码") : model.numberInput)
+                                .font(.system(size: isCompact ? 36 : 42, weight: .light, design: .rounded))
+                                .monospacedDigit()
+                                .foregroundStyle(model.numberInput.isEmpty ? .secondary : .primary)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.45)
+                                .frame(height: 50)
 
-                        Text(matchedName ?? " ")
-                            .font(.subheadline.weight(.medium))
-                            .foregroundStyle(.green)
-                            .frame(height: 22)
-                    }
-                    .padding(.horizontal, 12)
+                            Text(matchedName ?? " ")
+                                .font(.subheadline.weight(.medium))
+                                .foregroundStyle(.green)
+                                .frame(height: 22)
+                        }
+                        .padding(.horizontal, 12)
 
-                    VStack(spacing: rowSpacing) {
-                        ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                            HStack(spacing: keySpacing) {
-                                ForEach(row, id: \.0) { digit, letters in
-                                    DialKey(digit: digit, letters: letters)
+                        VStack(spacing: rowSpacing) {
+                            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                                HStack(spacing: keySpacing) {
+                                    ForEach(row, id: \.0) { digit, letters in
+                                        DialKey(digit: digit, letters: letters)
+                                    }
                                 }
                             }
                         }
-                    }
-                    .frame(width: keypadWidth)
+                        .frame(width: keypadWidth)
 
-                    HStack(spacing: keySpacing) {
-                        Color.clear.frame(width: keySize, height: keySize)
-                        Button {
-                            Task { await model.dial() }
-                        } label: {
-                            Circle()
-                                .fill(.green)
+                        HStack(spacing: keySpacing) {
+                            Color.clear.frame(width: keySize, height: keySize)
+                            Button {
+                                Task { await model.dial() }
+                            } label: {
+                                Circle()
+                                    .fill(.green)
+                                    .frame(width: keySize, height: keySize)
+                                    .overlay {
+                                        Image(systemName: "phone.fill")
+                                            .font(.system(size: isCompact ? 27 : 30, weight: .semibold))
+                                            .foregroundStyle(.white)
+                                    }
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(model.numberInput.isEmpty || model.isBusy || !model.isOnline)
+                            .opacity(model.numberInput.isEmpty || !model.isOnline ? 0.4 : 1)
+
+                            Image(systemName: "delete.left")
+                                .font(.system(size: isCompact ? 22 : 24))
+                                .foregroundStyle(.secondary)
                                 .frame(width: keySize, height: keySize)
-                                .overlay {
-                                    Image(systemName: "phone.fill")
-                                        .font(.system(size: isCompact ? 27 : 30, weight: .semibold))
-                                        .foregroundStyle(.white)
-                                }
+                                .contentShape(Rectangle())
+                                // minimumDistance 为零可在手指落下时立即响应，避免长按识别造成迟滞。
+                                .gesture(deleteGesture)
+                                .allowsHitTesting(!model.numberInput.isEmpty)
+                                .opacity(model.numberInput.isEmpty ? 0.4 : 1)
+                                .accessibilityLabel(L10n.t("删除"))
+                                .accessibilityHint(L10n.t("轻点删除一位，长按连续删除"))
+                                .accessibilityAddTraits(.isButton)
                         }
-                        .buttonStyle(.plain)
-                        .disabled(model.numberInput.isEmpty || model.isBusy || !model.isOnline)
-                        .opacity(model.numberInput.isEmpty || !model.isOnline ? 0.4 : 1)
-
-                        Image(systemName: "delete.left")
-                            .font(.system(size: isCompact ? 22 : 24))
-                            .foregroundStyle(.secondary)
-                            .frame(width: keySize, height: keySize)
-                            .contentShape(Rectangle())
-                            // minimumDistance 为零可在手指落下时立即响应，避免长按识别造成迟滞。
-                            .gesture(deleteGesture)
-                            .allowsHitTesting(!model.numberInput.isEmpty)
-                            .opacity(model.numberInput.isEmpty ? 0.4 : 1)
-                            .accessibilityLabel(L10n.t("删除"))
-                            .accessibilityHint(L10n.t("轻点删除一位，长按连续删除"))
-                            .accessibilityAddTraits(.isButton)
+                        // 与数字键使用同一列距，视觉与点击位置都更接近系统电话。
+                        .frame(width: keypadWidth)
                     }
-                    // 与数字键使用同一列距，视觉与点击位置都更接近系统电话。
-                    .frame(width: keypadWidth)
+                    .frame(maxWidth: 520)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 12)
                 }
-                .frame(maxWidth: 520)
-                .padding(.horizontal, 16)
-                .padding(.bottom, 12)
+                .scrollIndicators(.hidden)
+                // 只在背景普通点击时收起，避免与状态标签的长按结束事件发生竞争。
+                .onTapGesture { dismissModuleStatusPopover() }
             }
-            .background(PhoneBackdrop())
-            // 只在背景普通点击时收起，避免与状态标签的长按结束事件发生竞争。
-            .onTapGesture { dismissModuleStatusPopover() }
             // 导航栏只承担设置入口；标题和状态放在页面内容区，避免窄屏互相挤压。
             .navigationBarTitleDisplayMode(.inline)
             .settingsToolbarButton {
@@ -612,22 +616,53 @@ private struct MessageThreadView: View {
                 .onAppear { if let id = messages.last?.id { proxy.scrollTo(id) } }
             }
             Divider()
-            HStack(spacing: 10) {
+            // iMessage 风格输入栏：发送键内嵌在液态玻璃胶囊里，iOS 26 用真液态玻璃材质。
+            HStack(alignment: .bottom, spacing: 8) {
                 TextField(L10n.t("短信内容"), text: $reply, axis: .vertical)
-                    .textFieldStyle(.roundedBorder)
+                    .lineLimit(1...5)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
                 Button {
                     let body = reply
                     reply = ""
                     Task { _ = await model.sendSMS(to: sender, content: body) }
                 } label: {
-                    Image(systemName: "arrow.up.circle.fill").font(.title2)
+                    Image(systemName: "arrow.up.circle.fill")
+                        .font(.title2)
+                        .foregroundStyle(Color.accentColor)
                 }
+                .buttonStyle(.plain)
                 .disabled(reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .accessibilityLabel(L10n.t("发送"))
             }
-            .padding()
+            .padding(.horizontal, 6)
+            .padding(.vertical, 6)
+            .background(messageInputBackground)
+            .padding(.horizontal)
+            .padding(.vertical, 8)
         }
         .navigationTitle(model.contacts.displayName(for: sender))
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    @ViewBuilder
+    private var messageInputBackground: some View {
+        if #available(iOS 26.0, *) {
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(.regularMaterial)
+                .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .strokeBorder(.primary.opacity(0.08), lineWidth: 1)
+                }
+        } else {
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(Color(uiColor: .secondarySystemBackground))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .strokeBorder(.primary.opacity(0.08), lineWidth: 1)
+                }
+        }
     }
 }
 
@@ -851,8 +886,8 @@ struct ActiveCallView: View {
     @State private var showingKeypad = false
 
     private var isCompact: Bool { horizontalSizeClass == .compact }
-    private var avatarSize: CGFloat { isCompact ? 88 : 112 }
-    private var controlSize: CGFloat { isCompact ? 60 : 68 }
+    private var avatarSize: CGFloat { isCompact ? 88 : 120 }
+    private var controlSize: CGFloat { isCompact ? 62 : 76 }
 
     var body: some View {
         ZStack {
@@ -916,7 +951,7 @@ struct ActiveCallView: View {
                 }
 
                 if call.direction == "incoming" && ["incoming", "waiting"].contains(call.state) {
-                    HStack(spacing: isCompact ? 54 : 70) {
+                    HStack(spacing: isCompact ? 54 : 84) {
                         CallCircleButton(title: L10n.t("拒接"), icon: "phone.down.fill", color: .red, size: controlSize) {
                             Task { await model.reject() }
                         }
@@ -925,7 +960,7 @@ struct ActiveCallView: View {
                         }
                     }
                 } else {
-                    HStack(spacing: isCompact ? 12 : 24) {
+                    HStack(spacing: isCompact ? 12 : 28) {
                         CallCircleButton(title: model.isMuted ? L10n.t("取消静音") : L10n.t("静音"), icon: model.isMuted ? "mic.slash.fill" : "mic.fill", color: model.isMuted ? .orange : .gray, size: controlSize) {
                             Task { await model.toggleMute() }
                         }
@@ -1001,19 +1036,22 @@ private struct DTMFKeypadView: View {
     @EnvironmentObject private var model: AppModel
     private let rows = [["1", "2", "3"], ["4", "5", "6"], ["7", "8", "9"], ["*", "0", "#"]]
 
-    private var keySize: CGFloat { horizontalSizeClass == .compact ? 62 : 70 }
+    // iPad 上放大按键，避免通话中误触；iPhone 保持单手可及。
+    private var keySize: CGFloat { horizontalSizeClass == .compact ? 68 : 88 }
+    private var keySpacing: CGFloat { horizontalSizeClass == .compact ? 20 : 32 }
+    private var digitFont: Font { .system(size: horizontalSizeClass == .compact ? 28 : 34, weight: .medium, design: .rounded) }
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 14) {
+            VStack(spacing: 16) {
                 ForEach(rows, id: \.description) { row in
-                    HStack(spacing: 24) {
+                    HStack(spacing: keySpacing) {
                         ForEach(row, id: \.self) { digit in
                             Button {
                                 Task { await model.sendDTMF(digit) }
                             } label: {
                                 Text(digit)
-                                    .font(.title)
+                                    .font(digitFont)
                                     .frame(width: keySize, height: keySize)
                                     .background(Color(uiColor: .tertiarySystemFill), in: Circle())
                             }
@@ -1023,6 +1061,8 @@ private struct DTMFKeypadView: View {
                 }
             }
             .padding()
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
             .navigationTitle("DTMF")
             .toolbar { Button(L10n.t("取消")) { dismiss() } }
         }

@@ -70,6 +70,8 @@ struct RootView: View {
             SettingsView()
                 .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
+                // iPad 上以表单尺寸呈现，设置页不再整屏铺开，更贴合 iPadOS 设计规范。
+                .presentationSizingIfAvailable()
         }
         .fullScreenCover(isPresented: Binding(
             get: { !firstConnectionComplete },
@@ -176,6 +178,16 @@ struct PhoneCard: ViewModifier {
 
 extension View {
     func phoneCard() -> some View { modifier(PhoneCard()) }
+
+    /// iPadOS 26 及以后以表单尺寸呈现弹层；旧系统保持大尺寸弹层。
+    @ViewBuilder
+    func presentationSizingIfAvailable() -> some View {
+        if #available(iOS 16.4, *) {
+            self.presentationSizing(.form)
+        } else {
+            self
+        }
+    }
 
     @ViewBuilder
     func phoneTabBarMinimizeOnScroll() -> some View {

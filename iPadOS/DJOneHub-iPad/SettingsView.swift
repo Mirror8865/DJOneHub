@@ -18,6 +18,7 @@ struct SettingsView: View {
     @AppStorage("djonehub.background-standby-enabled") private var backgroundStandbyEnabled = true
     @AppStorage("djonehub.low-power-mode-enabled") private var lowPowerModeEnabled = true
     @AppStorage("djonehub.live-activity-enabled") private var liveActivityEnabled = true
+    @AppStorage("djonehub.sms-notifications-enabled") private var smsNotificationsEnabled = true
 
     @State private var modem: ModemStatus?
     @State private var traffic: NetworkTrafficSnapshot?
@@ -63,8 +64,19 @@ struct SettingsView: View {
                     statusCard
                 }
 
-                Section(L10n.t("通用")) {
-                    generalCard
+                Section(L10n.t("外观")) {
+                    appearanceCard
+                }
+
+                Section("通知") {
+                    notificationCard
+                }
+
+                Section("连接") {
+                    connectionCard
+                }
+
+                Section("通话支持") {
                     voiceCard
                 }
 
@@ -213,28 +225,34 @@ struct SettingsView: View {
         return "\(version) (\(build))"
     }
 
-    private var generalCard: some View {
+    private var appearanceCard: some View {
         VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 6) {
+            HStack {
                 Label(L10n.t("显示模式"), systemImage: "circle.lefthalf.filled")
+                Spacer()
                 Picker(L10n.t("显示模式"), selection: $appSettings.appearance) {
                     ForEach(AppAppearance.allCases) { Text($0.title).tag($0) }
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            Divider().padding(.vertical, 8)
-            VStack(alignment: .leading, spacing: 6) {
+            .padding(.vertical, 4)
+            Divider()
+            HStack {
                 Label(L10n.t("语言"), systemImage: "globe")
+                Spacer()
                 Picker(L10n.t("语言"), selection: $appSettings.language) {
                     ForEach(AppLanguage.allCases) { Text($0.title).tag($0) }
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            Divider().padding(.vertical, 8)
+            .padding(.vertical, 4)
+        }
+    }
+
+    private var notificationCard: some View {
+        VStack(spacing: 0) {
             Toggle("锁屏收来电", isOn: $backgroundStandbyEnabled)
                 .onChange(of: backgroundStandbyEnabled) { enabled in
                     model.setBackgroundStandbyEnabled(enabled)
@@ -242,6 +260,26 @@ struct SettingsView: View {
             Text(backgroundStandbyEnabled
                  ? "可靠来电模式：后台维持必要的连接与音频准备，锁屏来电更及时，但耗电高于普通 App。"
                  : "低耗电模式：iOS 可挂起 App；锁屏来电可能延迟，甚至无法及时显示。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+            Divider().padding(.vertical, 8)
+            Toggle("短信通知", isOn: $smsNotificationsEnabled)
+                .onChange(of: smsNotificationsEnabled) { enabled in
+                    model.setSMSNotificationsEnabled(enabled)
+                }
+            Text("App 在后台时，新收到的短信会像来电一样弹出系统通知；关闭后仍可在 App 内查看。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+            Divider().padding(.vertical, 8)
+            Toggle("灵动岛", isOn: $liveActivityEnabled)
+                .onChange(of: liveActivityEnabled) { enabled in
+                    model.setLiveActivityEnabled(enabled)
+                }
+            Text("关闭后结束灵动岛和锁屏实时活动；普通来电通知仍然保留。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -259,24 +297,23 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
-            Divider().padding(.vertical, 8)
-            Toggle("灵动岛", isOn: $liveActivityEnabled)
-                .onChange(of: liveActivityEnabled) { enabled in
-                    model.setLiveActivityEnabled(enabled)
-                }
-            Text("关闭后结束灵动岛和锁屏实时活动；普通来电通知仍然保留。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .fixedSize(horizontal: false, vertical: true)
-            Divider().padding(.vertical, 8)
-            VStack(alignment: .leading, spacing: 4) {
+        }
+    }
+
+    private var connectionCard: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
                 Label("连接模式", systemImage: DeviceContext.symbolName)
+                Spacer()
                 Text(usbProfile?.mode == "mac" ? "Mac 完整模式" : "\(DeviceContext.displayName) 直连模式")
                     .font(.subheadline.weight(.semibold))
                     .fixedSize(horizontal: false, vertical: true)
-                Text("192.168.225.1").font(.caption2).foregroundStyle(.secondary)
             }
+            .padding(.vertical, 4)
+            Text("192.168.225.1")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
             Divider().padding(.vertical, 8)
             Button {
                 showingMacModeConfirmation = true

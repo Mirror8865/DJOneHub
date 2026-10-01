@@ -225,6 +225,30 @@ final class BackgroundStandbyController {
     }
 }
 
+/// App 在后台检测到模块新短信后发送本地通知；不依赖 APNs 或远程服务器。
+/// 与来电通知共用同一套通知授权，样式贴近 iMessage：标题显示联系人，正文显示短信内容。
+@MainActor
+final class SMSNotifier {
+    func post(message: SMSMessage, displayName: String) {
+        let sender = message.sender.isEmpty ? "未知号码" : message.sender
+        let name = displayName.isEmpty ? sender : displayName
+        let content = UNMutableNotificationContent()
+        content.title = name
+        if name != sender { content.subtitle = sender }
+        content.body = message.content
+        content.sound = .default
+        // 同一联系人按会话线程聚合，锁屏上相同发件人的通知会折叠成一组。
+        content.threadIdentifier = "djonehub.sms.\(sender)"
+        let request = UNNotificationRequest(
+            // 标识符不能包含短信 ID 中的控制字符，改用哈希加随机串保证唯一。
+            identifier: "djonehub.sms.\(abs(message.id.hashValue)).\(UUID().uuidString)",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request)
+    }
+}
+
 /// App 在后台检测到模块来电后发送本地通知；不依赖 APNs 或远程服务器。
 @MainActor
 final class IncomingCallNotifier {
