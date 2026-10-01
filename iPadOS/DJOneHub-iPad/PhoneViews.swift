@@ -922,7 +922,10 @@ private struct MessageThreadView: View {
                                     Text(message.content)
                                         .padding(.horizontal, 14)
                                         .padding(.vertical, 9)
-                                        .background(bubbleBackground(isOutgoing: message.isOutgoing), in: RoundedRectangle(cornerRadius: 18))
+                                        .background {
+                                            bubbleBackground(isOutgoing: message.isOutgoing)
+                                        }
+                                        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                                         .foregroundStyle(message.isOutgoing ? .white : .primary)
                                     if message.isOutgoing {
                                         Text(L10n.t("已发送"))
