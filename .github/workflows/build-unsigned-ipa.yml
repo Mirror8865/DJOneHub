@@ -1,0 +1,65 @@
+name: Build unsigned IPA
+
+# 在 GitHub 的 macOS 机器上编译 DJOneHub 的 iPadOS 工程，产出未签名 IPA。
+# 未签名 IPA 需用 Sideloadly / AltStore 在你自己的 Apple ID 下重签名后才能装进 iPad。
+# 推送 main 分支或手动触发都会执行。
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: macos-26
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Download module update package (required resource)
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 -o iPadOS/DJOneHub-iPad/Resources/module-update.djupdate \
+            https://github.com/wzz04810-debug/DJOneHub/releases/download/v1.0.0/module-update-0.3.21.djupdate
+          echo "b3554ad426a623e18dead9b80cfc3356d41f70934b99d0531dcf8dd3e2a17e2b  iPadOS/DJOneHub-iPad/Resources/module-update.djupdate" | shasum -a 256 -c -
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          xcodebuild -showsdks | grep -i 'iphoneos' || true
+          xcodebuild -version -sdk iphoneos | head -3
+
+      - name: Build (no code signing)
+        run: |
+          set -euo pipefail
+          cd iPadOS
+          xcodebuild \
+            -project DJOneHub-iPad.xcodeproj \
+            -scheme DJOneHub-iPad \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package unsigned IPA
+        run: |
+          set -euo pipefail
+          APP="iPadOS/build/Build/Products/Release-iphoneos/DJOneHub.app"
+          test -d "$APP"
+          rm -rf Payload DJOneHub-unsigned.ipa
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry DJOneHub-unsigned.ipa Payload
+          ls -l DJOneHub-unsigned.ipa
+          shasum -a 256 DJOneHub-unsigned.ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: DJOneHub-unsigned-ipa
+          path: DJOneHub-unsigned.ipa
+          if-no-files-found: error

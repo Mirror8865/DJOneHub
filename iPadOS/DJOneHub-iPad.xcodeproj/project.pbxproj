@@ -1,0 +1,572 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A10000000000000000000001 /* DJOneHubIPadApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000001 /* DJOneHubIPadApp.swift */; };
+		A10000000000000000000002 /* APIModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000002 /* APIModels.swift */; };
+		A10000000000000000000003 /* DJOneHubAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000003 /* DJOneHubAPI.swift */; };
+		A10000000000000000000004 /* AppSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000004 /* AppSettings.swift */; };
+		A10000000000000000000005 /* ContactStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000005 /* ContactStore.swift */; };
+		A10000000000000000000006 /* AudioSessionController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000006 /* AudioSessionController.swift */; };
+		A10000000000000000000007 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000007 /* AppModel.swift */; };
+		A10000000000000000000008 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000008 /* RootView.swift */; };
+		A10000000000000000000009 /* PhoneViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000009 /* PhoneViews.swift */; };
+		A1000000000000000000000A /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000A /* SettingsView.swift */; };
+		A1000000000000000000000B /* FirstConnectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000D /* FirstConnectionView.swift */; };
+		A1000000000000000000000C /* module-update.djupdate in Resources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000E /* module-update.djupdate */; };
+		A1000000000000000000000D /* EmbeddedModuleUpdate.json in Resources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000F /* EmbeddedModuleUpdate.json */; };
+		A1000000000000000000000E /* CallKitController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000010 /* CallKitController.swift */; };
+		A1000000000000000000000F /* WiredHTTPTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000011 /* WiredHTTPTransport.swift */; };
+		A10000000000000000000010 /* BackgroundStandbyController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000012 /* BackgroundStandbyController.swift */; };
+		A10000000000000000000011 /* DJOneHubLiveActivityShared.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000013 /* DJOneHubLiveActivityShared.swift */; };
+		A10000000000000000000012 /* LiveActivityController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000014 /* LiveActivityController.swift */; };
+		A10000000000000000000013 /* DJOneHubLiveActivityWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000015 /* DJOneHubLiveActivityWidget.swift */; };
+		A10000000000000000000014 /* DJOneHubLiveActivityShared.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000013 /* DJOneHubLiveActivityShared.swift */; };
+		A10000000000000000000015 /* WiredHTTPTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000011 /* WiredHTTPTransport.swift */; };
+		A10000000000000000000017 /* LocalHistoryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000018 /* LocalHistoryStore.swift */; };
+		A10000000000000000000018 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000019 /* Assets.xcassets */; };
+		A30000000000000000000001 /* CallKitOutgoingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B30000000000000000000001 /* CallKitOutgoingTests.swift */; };
+		A10000000000000000000016 /* DJOneHubLiveActivityExtension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = B10000000000000000000017 /* DJOneHubLiveActivityExtension.appex */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		G10000000000000000000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = E10000000000000000000002 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = E10000000000000000000003;
+			remoteInfo = DJOneHubLiveActivityExtension;
+		};
+		G30000000000000000000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = E10000000000000000000002 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = E10000000000000000000001;
+			remoteInfo = "DJOneHub-iPad";
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		C10000000000000000000007 /* Embed App Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				A10000000000000000000016 /* DJOneHubLiveActivityExtension.appex in Embed App Extensions */,
+			);
+			name = "Embed App Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		B10000000000000000000001 /* DJOneHubIPadApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DJOneHubIPadApp.swift; sourceTree = "<group>"; };
+		B10000000000000000000002 /* APIModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIModels.swift; sourceTree = "<group>"; };
+		B10000000000000000000003 /* DJOneHubAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DJOneHubAPI.swift; sourceTree = "<group>"; };
+		B10000000000000000000004 /* AppSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSettings.swift; sourceTree = "<group>"; };
+		B10000000000000000000005 /* ContactStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContactStore.swift; sourceTree = "<group>"; };
+		B10000000000000000000006 /* AudioSessionController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioSessionController.swift; sourceTree = "<group>"; };
+		B10000000000000000000007 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		B10000000000000000000008 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
+		B10000000000000000000009 /* PhoneViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneViews.swift; sourceTree = "<group>"; };
+		B1000000000000000000000A /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		B1000000000000000000000B /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		B1000000000000000000000C /* DJOneHub.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DJOneHub.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B1000000000000000000000D /* FirstConnectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FirstConnectionView.swift; sourceTree = "<group>"; };
+		B1000000000000000000000E /* module-update.djupdate */ = {isa = PBXFileReference; lastKnownFileType = archive; path = "Resources/module-update.djupdate"; sourceTree = "<group>"; };
+		B1000000000000000000000F /* EmbeddedModuleUpdate.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Resources/EmbeddedModuleUpdate.json"; sourceTree = "<group>"; };
+		B10000000000000000000010 /* CallKitController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallKitController.swift; sourceTree = "<group>"; };
+		B10000000000000000000011 /* WiredHTTPTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WiredHTTPTransport.swift; sourceTree = "<group>"; };
+		B10000000000000000000012 /* BackgroundStandbyController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundStandbyController.swift; sourceTree = "<group>"; };
+		B10000000000000000000013 /* DJOneHubLiveActivityShared.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DJOneHubLiveActivityShared.swift; sourceTree = "<group>"; };
+		B10000000000000000000014 /* LiveActivityController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveActivityController.swift; sourceTree = "<group>"; };
+		B10000000000000000000015 /* DJOneHubLiveActivityWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DJOneHubLiveActivityWidget.swift; sourceTree = "<group>"; };
+		B10000000000000000000016 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		B10000000000000000000017 /* DJOneHubLiveActivityExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = DJOneHubLiveActivityExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		B10000000000000000000018 /* LocalHistoryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalHistoryStore.swift; sourceTree = "<group>"; };
+		B10000000000000000000019 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		B30000000000000000000001 /* CallKitOutgoingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallKitOutgoingTests.swift; sourceTree = "<group>"; };
+		B30000000000000000000002 /* DJOneHubTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = DJOneHubTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		C10000000000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C10000000000000000000004 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C30000000000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		D10000000000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				D10000000000000000000002 /* DJOneHub-iPad */,
+				D10000000000000000000004 /* Shared */,
+				D10000000000000000000005 /* DJOneHubLiveActivityExtension */,
+				D30000000000000000000001 /* DJOneHub-iPadTests */,
+				D10000000000000000000003 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		D10000000000000000000002 /* DJOneHub-iPad */ = {
+			isa = PBXGroup;
+			children = (
+				B10000000000000000000001 /* DJOneHubIPadApp.swift */,
+				B10000000000000000000002 /* APIModels.swift */,
+				B10000000000000000000003 /* DJOneHubAPI.swift */,
+				B10000000000000000000011 /* WiredHTTPTransport.swift */,
+				B10000000000000000000012 /* BackgroundStandbyController.swift */,
+				B10000000000000000000014 /* LiveActivityController.swift */,
+				B10000000000000000000004 /* AppSettings.swift */,
+				B10000000000000000000005 /* ContactStore.swift */,
+				B10000000000000000000006 /* AudioSessionController.swift */,
+				B10000000000000000000007 /* AppModel.swift */,
+				B10000000000000000000010 /* CallKitController.swift */,
+				B10000000000000000000008 /* RootView.swift */,
+				B10000000000000000000009 /* PhoneViews.swift */,
+				B1000000000000000000000A /* SettingsView.swift */,
+				B1000000000000000000000D /* FirstConnectionView.swift */,
+				B10000000000000000000018 /* LocalHistoryStore.swift */,
+				B10000000000000000000019 /* Assets.xcassets */,
+				B1000000000000000000000E /* module-update.djupdate */,
+				B1000000000000000000000F /* EmbeddedModuleUpdate.json */,
+				B1000000000000000000000B /* Info.plist */,
+			);
+			path = "DJOneHub-iPad";
+			sourceTree = "<group>";
+		};
+		D10000000000000000000003 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				B1000000000000000000000C /* DJOneHub.app */,
+				B10000000000000000000017 /* DJOneHubLiveActivityExtension.appex */,
+				B30000000000000000000002 /* DJOneHubTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		D10000000000000000000004 /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				B10000000000000000000013 /* DJOneHubLiveActivityShared.swift */,
+			);
+			path = Shared;
+			sourceTree = "<group>";
+		};
+		D10000000000000000000005 /* DJOneHubLiveActivityExtension */ = {
+			isa = PBXGroup;
+			children = (
+				B10000000000000000000015 /* DJOneHubLiveActivityWidget.swift */,
+				B10000000000000000000016 /* Info.plist */,
+			);
+			path = DJOneHubLiveActivityExtension;
+			sourceTree = "<group>";
+		};
+		D30000000000000000000001 /* DJOneHub-iPadTests */ = {
+			isa = PBXGroup;
+			children = (
+				B30000000000000000000001 /* CallKitOutgoingTests.swift */,
+			);
+			path = "DJOneHub-iPadTests";
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		E10000000000000000000001 /* DJOneHub-iPad */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F10000000000000000000002 /* Build configuration list for PBXNativeTarget "DJOneHub-iPad" */;
+			buildPhases = (
+				C10000000000000000000002 /* Sources */,
+				C10000000000000000000001 /* Frameworks */,
+				C10000000000000000000003 /* Resources */,
+				C10000000000000000000007 /* Embed App Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				H10000000000000000000001 /* PBXTargetDependency */,
+			);
+			name = "DJOneHub-iPad";
+			productName = DJOneHub;
+			productReference = B1000000000000000000000C /* DJOneHub.app */;
+			productType = "com.apple.product-type.application";
+		};
+		E10000000000000000000003 /* DJOneHubLiveActivityExtension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F10000000000000000000003 /* Build configuration list for PBXNativeTarget "DJOneHubLiveActivityExtension" */;
+			buildPhases = (
+				C10000000000000000000005 /* Sources */,
+				C10000000000000000000004 /* Frameworks */,
+				C10000000000000000000006 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = DJOneHubLiveActivityExtension;
+			productName = DJOneHubLiveActivityExtension;
+			productReference = B10000000000000000000017 /* DJOneHubLiveActivityExtension.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+		E30000000000000000000001 /* DJOneHubTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F30000000000000000000001 /* Build configuration list for PBXNativeTarget "DJOneHubTests" */;
+			buildPhases = (
+				C30000000000000000000003 /* Sources */,
+				C30000000000000000000001 /* Frameworks */,
+				C30000000000000000000002 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				H30000000000000000000001 /* PBXTargetDependency */,
+			);
+			name = DJOneHubTests;
+			productName = DJOneHubTests;
+			productReference = B30000000000000000000002 /* DJOneHubTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		E10000000000000000000002 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2600;
+				LastUpgradeCheck = 2600;
+				TargetAttributes = {
+					E10000000000000000000001 = {
+						CreatedOnToolsVersion = 26.0;
+					};
+					E10000000000000000000003 = {
+						CreatedOnToolsVersion = 26.0;
+					};
+				};
+			};
+			buildConfigurationList = F10000000000000000000001 /* Build configuration list for PBXProject "DJOneHub-iPad" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = zh_CN;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				zh_CN,
+				en,
+				Base,
+			);
+			mainGroup = D10000000000000000000001;
+			productRefGroup = D10000000000000000000003 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				E10000000000000000000001 /* DJOneHub-iPad */,
+				E10000000000000000000003 /* DJOneHubLiveActivityExtension */,
+				E30000000000000000000001 /* DJOneHubTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		C10000000000000000000003 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000000000000000000018 /* Assets.xcassets in Resources */,
+				A1000000000000000000000C /* module-update.djupdate in Resources */,
+				A1000000000000000000000D /* EmbeddedModuleUpdate.json in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C10000000000000000000006 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C30000000000000000000002 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		C10000000000000000000002 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000000000000000000001 /* DJOneHubIPadApp.swift in Sources */,
+				A10000000000000000000002 /* APIModels.swift in Sources */,
+				A10000000000000000000003 /* DJOneHubAPI.swift in Sources */,
+				A1000000000000000000000F /* WiredHTTPTransport.swift in Sources */,
+				A10000000000000000000010 /* BackgroundStandbyController.swift in Sources */,
+				A10000000000000000000011 /* DJOneHubLiveActivityShared.swift in Sources */,
+				A10000000000000000000012 /* LiveActivityController.swift in Sources */,
+				A10000000000000000000004 /* AppSettings.swift in Sources */,
+				A10000000000000000000005 /* ContactStore.swift in Sources */,
+				A10000000000000000000006 /* AudioSessionController.swift in Sources */,
+				A10000000000000000000007 /* AppModel.swift in Sources */,
+				A10000000000000000000008 /* RootView.swift in Sources */,
+				A10000000000000000000009 /* PhoneViews.swift in Sources */,
+				A1000000000000000000000A /* SettingsView.swift in Sources */,
+				A1000000000000000000000B /* FirstConnectionView.swift in Sources */,
+				A1000000000000000000000E /* CallKitController.swift in Sources */,
+				A10000000000000000000017 /* LocalHistoryStore.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C10000000000000000000005 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000000000000000000013 /* DJOneHubLiveActivityWidget.swift in Sources */,
+				A10000000000000000000014 /* DJOneHubLiveActivityShared.swift in Sources */,
+				A10000000000000000000015 /* WiredHTTPTransport.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C30000000000000000000003 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A30000000000000000000001 /* CallKitOutgoingTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		H10000000000000000000001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = E10000000000000000000003 /* DJOneHubLiveActivityExtension */;
+			targetProxy = G10000000000000000000001 /* PBXContainerItemProxy */;
+		};
+		H30000000000000000000001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = E10000000000000000000001 /* DJOneHub-iPad */;
+			targetProxy = G30000000000000000000001 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		F20000000000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.1;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		F20000000000000000000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				COPY_PHASE_STRIP = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.1;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		F20000000000000000000003 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 42;
+				DEVELOPMENT_TEAM = VKFYN88RC6;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "DJOneHub-iPad/Info.plist";
+				IPHONEOS_DEPLOYMENT_TARGET = 16.1;
+				MARKETING_VERSION = 0.7.6;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jieden.djonehub.ipad;
+				PRODUCT_NAME = DJOneHub;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		F20000000000000000000004 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 42;
+				DEVELOPMENT_TEAM = VKFYN88RC6;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "DJOneHub-iPad/Info.plist";
+				IPHONEOS_DEPLOYMENT_TARGET = 16.1;
+				MARKETING_VERSION = 0.7.6;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jieden.djonehub.ipad;
+				PRODUCT_NAME = DJOneHub;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		F20000000000000000000005 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 42;
+				DEVELOPMENT_TEAM = VKFYN88RC6;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = DJOneHubLiveActivityExtension/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.1;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 0.7.6;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jieden.djonehub.ipad.liveactivity;
+				PRODUCT_NAME = DJOneHubLiveActivityExtension;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		F20000000000000000000006 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 42;
+				DEVELOPMENT_TEAM = VKFYN88RC6;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = DJOneHubLiveActivityExtension/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.1;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 0.7.6;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jieden.djonehub.ipad.liveactivity;
+				PRODUCT_NAME = DJOneHubLiveActivityExtension;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		F30000000000000000000002 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.1;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jieden.djonehub.ipad.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/DJOneHub.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/DJOneHub";
+			};
+			name = Debug;
+		};
+		F30000000000000000000003 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.1;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jieden.djonehub.ipad.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/DJOneHub.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/DJOneHub";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		F10000000000000000000001 /* Build configuration list for PBXProject "DJOneHub-iPad" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F20000000000000000000001 /* Debug */,
+				F20000000000000000000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		F10000000000000000000002 /* Build configuration list for PBXNativeTarget "DJOneHub-iPad" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F20000000000000000000003 /* Debug */,
+				F20000000000000000000004 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		F10000000000000000000003 /* Build configuration list for PBXNativeTarget "DJOneHubLiveActivityExtension" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F20000000000000000000005 /* Debug */,
+				F20000000000000000000006 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		F30000000000000000000001 /* Build configuration list for PBXNativeTarget "DJOneHubTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F30000000000000000000002 /* Debug */,
+				F30000000000000000000003 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = E10000000000000000000002 /* Project object */;
+}
