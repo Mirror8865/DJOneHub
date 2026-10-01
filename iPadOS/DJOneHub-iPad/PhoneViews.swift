@@ -650,6 +650,12 @@ struct MessagesView: View {
     var body: some View {
         NavigationSplitView {
             sidebar
+                // 灰色背景贯穿整个左栏（含顶部导航栏区域），与原生 iMessage 一致。
+                .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
+                // iPad 左栏宽度（原生 iMessage 约 280-320）。
+                .navigationSplitViewColumnWidth(min: 270, ideal: 310, max: 400)
+                // toolbar 自动玻璃按钮的着色：浅色黑、深色白，禁止蓝色 accent。
+                .tint(.primary)
                 .searchable(text: $search, prompt: L10n.t("搜索"))
                 .toolbar { sidebarToolbar }
                 .task { await model.refreshMessages(silently: true) }
@@ -700,14 +706,11 @@ struct MessagesView: View {
             } else {
                 // 无会话占位页：设置按钮仍固定在右上角。
                 EmptyStateView(title: L10n.t("选择信息开始聊天"), systemImage: "message")
+                    .tint(.primary)
                     .toolbar {
                         ToolbarItem(placement: .topBarTrailing) {
                             Button(action: onSettings) {
                                 Image(systemName: "gearshape")
-                                    .font(.system(size: 16, weight: .medium))
-                                    .foregroundStyle(.primary)
-                                    .frame(width: 34, height: 34)
-                                    .modifier(GlassCircle())
                             }
                             .accessibilityLabel(L10n.t("设置"))
                         }
@@ -738,8 +741,6 @@ struct MessagesView: View {
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
-        // 左栏背景跟随系统分组灰（iMessage 图三浅色为浅灰、深色为纯黑）。
-        .background(Color(uiColor: .systemGroupedBackground))
     }
 
     @ViewBuilder
@@ -768,7 +769,7 @@ struct MessagesView: View {
                 }
                 .buttonStyle(.plain)
             } else {
-                // 选中行：蓝色大圆角块填满两条分割线之间（iMessage 图三/图四），未选中行无背景。
+                // 选中行：蓝色大圆角块在 label 内部，左右各留 10pt 边距（不贴列边缘，iMessage 图二）。
                 Button {
                     selection = conversation.sender
                 } label: {
@@ -781,14 +782,16 @@ struct MessagesView: View {
                     )
                     .foregroundStyle(selection == conversation.sender ? .white : .primary)
                     .padding(.horizontal, 12)
-                    .padding(.vertical, 10)
+                    .padding(.vertical, 9)
+                    .background(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .fill(selection == conversation.sender ? Color.accentColor : Color.clear)
+                    )
+                    .padding(.horizontal, 10)
                 }
                 .buttonStyle(.plain)
-                .listRowInsets(EdgeInsets(top: 3, leading: 10, bottom: 3, trailing: 10))
-                .listRowBackground(
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .fill(selection == conversation.sender ? Color.accentColor : Color.clear)
-                )
+                .listRowInsets(EdgeInsets())
+                .listRowBackground(Color.clear)
             }
         }
         .tag(conversation.sender)
@@ -834,27 +837,18 @@ struct MessagesView: View {
                         Label(L10n.t("清空全部短信"), systemImage: "trash")
                     }
                 } label: {
-                    // iMessage 编辑按钮：玻璃胶囊背景，图标/文字跟随系统内容色（浅色黑、深色白）。
+                    // iOS 26 自动给 toolbar 按钮套单层液态玻璃（文字=胶囊），无需手动 glassEffect。
                     Text(L10n.t("编辑"))
-                        .font(.body)
-                        .foregroundStyle(.primary)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
-                        .modifier(GlassCapsule())
                 }
             }
-            // 新建信息：玻璃圆形按钮（iMessage 位置，右上角列边界处）。
+            // 新建信息：右上角（系统自动玻璃圆形按钮）。
             ToolbarItem(placement: .topBarTrailing) {
                 Button { showingComposer = true } label: {
                     Image(systemName: "square.and.pencil")
-                        .font(.system(size: 16, weight: .medium))
-                        .foregroundStyle(.primary)
-                        .frame(width: 34, height: 34)
-                        .modifier(GlassCircle())
                 }
                 .accessibilityLabel(L10n.t("新信息"))
             }
-            // 分类三条杠：玻璃胶囊按钮（信息 / 未知发件人 / 垃圾信息 / 最近删除）。
+            // 分类三条杠：信息 / 未知发件人 / 垃圾信息 / 最近删除（系统自动玻璃胶囊）。
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     Picker(selection: $category) {
@@ -866,11 +860,6 @@ struct MessagesView: View {
                     }
                 } label: {
                     Image(systemName: "line.3.horizontal.decrease")
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(.primary)
-                        .padding(.horizontal, 12)
-                        .frame(height: 34)
-                        .modifier(GlassCapsule())
                 }
                 .accessibilityLabel(L10n.t("筛选"))
             }
@@ -959,20 +948,18 @@ private struct MessageThreadView: View {
                 threadContent
             }
         }
+        // detail 列 toolbar 自动玻璃按钮着色：浅色黑、深色白（气泡/发送键用显式色不受影响）。
+        .tint(.primary)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             // 正中间上方：头像在上、名字玻璃胶囊在头像下方并部分重叠（iMessage 图三/图四）。
             ToolbarItem(placement: .principal) {
                 threadHeader
             }
-            // 设置入口固定在聊天页右上角（与其他主页面一致），玻璃圆形按钮。
+            // 设置入口固定在聊天页右上角（系统自动玻璃圆形，着色跟随 tint primary）。
             ToolbarItem(placement: .topBarTrailing) {
                 Button(action: onSettings) {
                     Image(systemName: "gearshape")
-                        .font(.system(size: 16, weight: .medium))
-                        .foregroundStyle(.primary)
-                        .frame(width: 34, height: 34)
-                        .modifier(GlassCircle())
                 }
                 .accessibilityLabel(L10n.t("设置"))
             }
@@ -1061,8 +1048,9 @@ private struct MessageThreadView: View {
     /// iMessage 式会话头部：仅名称文字，带长条形（胶囊）液态玻璃背景，位置居中。
     /// iMessage 式会话头部：头像在上，名字玻璃胶囊在头像下方并与头像底部部分重叠。
     private var threadHeader: some View {
-        VStack(spacing: -12) {
-            InitialAvatar(name: displayName, photoData: photoData, size: 56)
+        VStack(spacing: -14) {
+            // 头像在名字上方，尺寸 72（原生 iMessage 比例），名字胶囊与头像底部重叠。
+            InitialAvatar(name: displayName, photoData: photoData, size: 72)
             HStack(spacing: 4) {
                 Text(displayName)
                     .font(.subheadline.weight(.semibold))
@@ -1101,17 +1089,6 @@ private struct MessageThreadView: View {
 }
 
 // MARK: - 液态玻璃复用修饰器（iOS 26 官方 glassEffect，旧系统材质回退）
-
-/// 胶囊形玻璃（编辑、筛选按钮）。
-private struct GlassCapsule: ViewModifier {
-    func body(content: Content) -> some View {
-        if #available(iOS 26.0, *) {
-            content.glassEffect(.regular, in: Capsule())
-        } else {
-            content.background(Capsule().fill(.ultraThinMaterial))
-        }
-    }
-}
 
 /// 头部名字长条玻璃胶囊。
 private struct HeaderNameGlass: ViewModifier {
@@ -1491,12 +1468,15 @@ struct ActiveCallView: View {
                         .frame(minHeight: geometry.size.height)
                         .frame(maxWidth: .infinity)
                     } else {
-                        // iPad 常规布局：拨号键盘在右侧“旁边”展开，通话控制始终可见可操作。
-                        HStack(alignment: .center, spacing: 28) {
+                        // iPad 常规布局：控制列始终居中不动，拨号键盘以 overlay 在右侧覆盖弹出，
+                        // 不参与布局、不挤压按钮（避免按钮错位/重复）。
+                        ZStack(alignment: .trailing) {
                             callControlsColumn
                                 .frame(minHeight: geometry.size.height)
+                                .frame(maxWidth: .infinity)
                             if showingKeypad {
                                 DTMFKeypadPanel { showingKeypad = false }
+                                    .padding(.trailing, 24)
                                     .transition(.opacity.combined(with: .move(edge: .trailing)))
                             }
                         }
