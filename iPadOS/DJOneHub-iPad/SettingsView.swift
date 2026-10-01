@@ -9,6 +9,53 @@ enum SettingsRefreshPolicy {
     static func shouldRefresh(appIsActive: Bool) -> Bool { appIsActive }
 }
 
+/// iPad 设置页左栏分区。系统设置式「分区列表 + 详情」双栏：
+/// 左栏是等高的分区条目，右栏只显示当前分区，不存在两块卡片高度差造成的空白。
+private enum SettingsSection: String, CaseIterable, Identifiable {
+    case status
+    case appearance
+    case notification
+    case connection
+    case voice
+    case network
+    case power
+    case esim
+    case debugAT
+    case service
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .status: return "状态"
+        case .appearance: return "外观"
+        case .notification: return "通知"
+        case .connection: return "连接"
+        case .voice: return "通话支持"
+        case .network: return "网络"
+        case .power: return "功率与温度"
+        case .esim: return "eSIM / 卡片"
+        case .debugAT: return "AT 调试"
+        case .service: return "服务控制"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .status: return "info.circle"
+        case .appearance: return "paintbrush"
+        case .notification: return "bell"
+        case .connection: return "link"
+        case .voice: return "phone"
+        case .network: return "antenna.radiowaves.left.and.right"
+        case .power: return "bolt"
+        case .esim: return "simcard"
+        case .debugAT: return "terminal"
+        case .service: return "gearshape.2"
+        }
+    }
+}
+
 /// 设置页完整承载 Mac 版“状态 / 通用 / 网络 / GPS / eSIM / AT / 服务控制”功能。
 struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
@@ -52,6 +99,7 @@ struct SettingsView: View {
     @State private var showingShutdownConfirmation = false
     @State private var showingMacModeConfirmation = false
     @State private var busy = false
+    @State private var selectedSection: SettingsSection = .status
     let onClose: (() -> Void)?
 
     init(onClose: (() -> Void)? = nil) {
@@ -59,27 +107,20 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        NavigationStack {
-            // iPad（regular）：双列卡片网格，充分利用屏宽、减少留白；
-            // iPhone（compact）：官方 grouped Form 单列范式。
-            Group {
-                if horizontalSizeClass == .regular {
-                    settingsGrid
-                } else {
+        Group {
+            // iPad（regular）：系统设置式「分区列表 + 详情」双栏，左右都是整列内容，
+            // 不存在两块卡片高度差造成的空白；iPhone（compact）：官方 grouped Form 单列范式。
+            if horizontalSizeClass == .regular {
+                settingsSplitView
+            } else {
+                NavigationStack {
                     settingsForm
+                        .navigationTitle(L10n.t("设置"))
+                        .toolbar { settingsToolbar }
                 }
             }
-            .navigationTitle(L10n.t("设置"))
-            .toolbar {
-                // 作为顶层 tab 时无“完成”按钮；仅 sheet/cover 模式（onClose 非空）显示。
-                if onClose != nil {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button(L10n.t("完成")) { closeSettings() }
-                            .fontWeight(.semibold)
-                    }
-                }
-            }
-            .task(id: scenePhase) {
+        }
+        .task(id: scenePhase) {
                 guard SettingsRefreshPolicy.shouldRefresh(appIsActive: scenePhase == .active) else { return }
                 await runStatusLoop()
             }
@@ -111,7 +152,6 @@ struct SettingsView: View {
             } message: {
                 Text("只会写入已验证的 USB Audio 配置位。模块重启后，请把它从\(DeviceContext.displayName)拔出并连接到 Mac。")
             }
-        }
         // 弹窗放到整个设置页顶层，不能附在 Form 单行上，否则长内容会被列表裁切。
         .overlay {
             if showingPowerDetails {
@@ -163,34 +203,67 @@ struct SettingsView: View {
         .formStyle(.grouped)
     }
 
-    // MARK: - iPad 双列卡片网格（液态玻璃卡片，充分利用屏宽）
-    private var settingsGrid: some View {
-        ScrollView {
-            LazyVGrid(
-                columns: [
-                    GridItem(.flexible(), spacing: 16, alignment: .top),
-                    GridItem(.flexible(), spacing: 16, alignment: .top),
-                ],
-                alignment: .center,
-                spacing: 16
-            ) {
-                settingsCard(L10n.t("状态")) { statusCard }
-                settingsCard(L10n.t("外观")) { appearanceCard }
-                settingsCard("通知") { notificationCard }
-                settingsCard("连接") { connectionCard }
-                settingsCard("通话支持") { voiceCard }
-                settingsCard(L10n.t("网络")) { networkCard }
-                settingsCard("功率与温度") { powerCard }
-                settingsCard(L10n.t("eSIM / 卡片")) { esimCard }
-                settingsCard(L10n.t("AT 调试")) { atCard }
-                settingsCard("服务控制") { serviceCard }
-                if !actionMessage.isEmpty {
-                    settingsCard("") {
-                        Text(actionMessage).font(.footnote).foregroundStyle(.secondary)
+    // MARK: - iPad 分区列表 + 详情（系统设置式，左右各为一整列，无高度差空白）
+
+    /// 左栏分区列表，右栏只承载当前分区的全部内容；分区之间逻辑并列，不互相留白。
+    private var settingsSplitView: some View {
+        NavigationSplitView {
+            List(selection: $selectedSection) {
+                Section(L10n.t("设置")) {
+                    ForEach(SettingsSection.allCases) { section in
+                        Label(L10n.t(section.title), systemImage: section.icon)
+                            .tag(section)
                     }
                 }
             }
-            .padding(16)
+            .listStyle(.sidebar)
+            .navigationTitle(L10n.t("设置"))
+            .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 360)
+        } detail: {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    settingsCard("") { sectionContent(selectedSection) }
+                    if !actionMessage.isEmpty {
+                        settingsCard("") {
+                            Text(actionMessage).font(.footnote).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .frame(maxWidth: 760, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .top)
+                .padding(20)
+            }
+            .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
+            .navigationTitle(L10n.t(selectedSection.title))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { settingsToolbar }
+        }
+    }
+
+    @ViewBuilder
+    private func sectionContent(_ section: SettingsSection) -> some View {
+        switch section {
+        case .status: statusCard
+        case .appearance: appearanceCard
+        case .notification: notificationCard
+        case .connection: connectionCard
+        case .voice: voiceCard
+        case .network: networkCard
+        case .power: powerCard
+        case .esim: esimCard
+        case .debugAT: atCard
+        case .service: serviceCard
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var settingsToolbar: some ToolbarContent {
+        // 作为顶层 tab 时无“完成”按钮；仅 sheet/cover 模式（onClose 非空）显示。
+        if onClose != nil {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button(L10n.t("完成")) { closeSettings() }
+                    .fontWeight(.semibold)
+            }
         }
     }
 

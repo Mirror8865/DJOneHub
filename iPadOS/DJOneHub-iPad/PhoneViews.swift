@@ -714,7 +714,9 @@ struct MessagesView: View {
                         newMessageRecipient = nil
                         pendingRecipient = nil
                         selection = recipient
-                    }
+                    },
+                    // 收件人实时同步到左栏草稿行，左右两栏始终对应。
+                    onRecipientChange: { newMessageRecipient = $0 }
                 )
             } else if let sender = selection, let conversation = allConversations.first(where: { $0.sender == sender }) {
                 MessageThreadView(
@@ -735,6 +737,10 @@ struct MessagesView: View {
         // 下 NavigationLink 自动 push 详情，保证小窗可点进聊天。
         List(selection: $selection) {
             searchRow
+            // 新建消息时，左栏同步出现一条“新信息”草稿行（与右栏新消息窗口对应）。
+            if !isSelecting, let draft = newMessageRecipient {
+                newMessageDraftRow(draft)
+            }
             if isSelecting {
                 selectionModeContent
             } else if filteredConversations.isEmpty {
@@ -761,23 +767,57 @@ struct MessagesView: View {
         .animation(.easeOut(duration: 0.2), value: selection)
     }
 
-    /// 列表内搜索框（玻璃灰胶囊，带麦克风语音输入）。
+    /// 列表内搜索框：长条形液态玻璃，左端搜索图标、右端语音输入图标。
     private var searchRow: some View {
-        HStack(spacing: 7) {
+        HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.secondary)
             TextField(L10n.t("搜索"), text: $search)
                 .textFieldStyle(.plain)
                 .font(.subheadline)
-            Spacer()
+            Spacer(minLength: 0)
             DictationButton { text in search = text }
         }
-        .padding(.horizontal, 13)
-        .padding(.vertical, 9)
-        .background(Capsule().fill(Color(uiColor: .secondarySystemBackground)))
-        .listRowInsets(EdgeInsets(top: 4, leading: 10, bottom: 4, trailing: 10))
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .modifier(SearchFieldGlass())
+        .listRowInsets(EdgeInsets(top: 6, leading: 10, bottom: 6, trailing: 10))
+        // 搜索框上方不再出现列表分割线。
+        .listRowSeparator(.hidden)
         .listRowBackground(Color.clear)
+    }
+
+    /// 新消息草稿行：与选中会话一致的蓝色高亮，作为左栏的“新信息窗口”。
+    @ViewBuilder
+    private func newMessageDraftRow(_ draft: String) -> some View {
+        let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = trimmed.isEmpty ? L10n.t("新信息") : displayName(for: trimmed)
+        HStack(spacing: 12) {
+            InitialAvatar(
+                name: title,
+                photoData: trimmed.isEmpty ? nil : photoData(for: trimmed),
+                size: 52
+            )
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(Color.white)
+                    .lineLimit(1)
+                Text(trimmed.isEmpty ? L10n.t("输入收件人") : trimmed)
+                    .font(.subheadline)
+                    .foregroundStyle(Color.white.opacity(0.85))
+                    .lineLimit(1)
+            }
+            Spacer()
+        }
+        .padding(.vertical, 10)
+        .listRowInsets(EdgeInsets(top: 2, leading: 10, bottom: 2, trailing: 10))
+        .listRowSeparator(.hidden)
+        .listRowBackground(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(Color(uiColor: .systemBlue))
+        )
     }
 
     /// 选择模式：按"连续选中 / 连续未选中"把行分组，连续选中行融为一个大蓝色圆角矩形。
@@ -842,9 +882,11 @@ struct MessagesView: View {
             }
         } label: {
             HStack(spacing: 10) {
+                // 复选圈占位与普通态头像同宽（52pt），蓝块宽度与灰色行背景完全一致。
                 Image(systemName: inBlue ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 21))
+                    .font(.system(size: 22))
                     .foregroundStyle(inBlue ? Color.white : Color(uiColor: .systemGray3))
+                    .frame(width: 52)
                 MessageConversationRow(
                     sender: conversation.sender,
                     messages: conversation.messages,
@@ -855,7 +897,7 @@ struct MessagesView: View {
                 )
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 9)
+            .padding(.vertical, 10)
             .overlay(alignment: .bottom) {
                 // 融合块内行间细分割线（半透明白，缩进对齐文字）。
                 if !isLast {
@@ -1003,10 +1045,15 @@ struct MessagesView: View {
 
         var body: some View {
             HStack(spacing: 12) {
-                InitialAvatar(name: displayName, photoData: photoData)
+                // 行高按 iMessage 列表放大，头像与两行文字并排后不再显扁。
+                InitialAvatar(name: displayName, photoData: photoData, size: 52)
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 5) {
-                        Text(displayName).font(.body.weight(.semibold)).lineLimit(1)
+                        Text(displayName)
+                            .font(.body.weight(.semibold))
+                            // 蓝色选中块上姓名必须是白字（iOS 列表选中规范）。
+                            .foregroundStyle(highlighted ? Color.white : Color.primary)
+                            .lineLimit(1)
                         if isPinned {
                             Image(systemName: "pin.fill").font(.caption2)
                                 .foregroundStyle(highlighted ? Color.white.opacity(0.85) : .secondary)
@@ -1023,7 +1070,7 @@ struct MessagesView: View {
                     .font(.caption2)
                     .foregroundStyle(highlighted ? Color.white.opacity(0.85) : .secondary)
             }
-            .padding(.vertical, 4)
+            .padding(.vertical, 10)
         }
 
         /// 行右侧时间：今天显示时分；本周显示星期几；更早显示日期（与 iMessage 一致）。
@@ -1052,31 +1099,33 @@ private struct MessageThreadView: View {
     @State private var showContactInfo = false
 
     var body: some View {
-        ZStack(alignment: .trailing) {
-            Group {
-                if #available(iOS 26.0, *) {
-                    // 液态玻璃必须在 GlassEffectContainer 内才渲染真实玻璃材质（iOS 26 官方文档），
-                    // 气泡、输入栏置于同一容器中相互融合，与 iMessage 一致。
-                    GlassEffectContainer { threadContent }
-                } else {
-                    threadContent
-                }
-            }
-            if showContactInfo {
-                // 联系人信息面板从右侧滑出（结构严格按原生 iMessage）。
-                ContactInfoPanel(
-                    displayName: displayName,
-                    photoData: photoData,
-                    phone: sender,
-                    onClose: {
-                        withAnimation(.easeInOut(duration: 0.25)) { showContactInfo = false }
-                    }
-                )
-                .transition(.move(edge: .trailing).combined(with: .opacity))
+        Group {
+            if #available(iOS 26.0, *) {
+                // 液态玻璃必须在 GlassEffectContainer 内才渲染真实玻璃材质（iOS 26 官方文档），
+                // 气泡、输入栏置于同一容器中相互融合，与 iMessage 一致。
+                GlassEffectContainer { threadContent }
+            } else {
+                threadContent
             }
         }
         .clipped()
         .navigationBarTitleDisplayMode(.inline)
+        // 点击姓名：直接调用系统原生联系人卡片（ContactsUI），不再自绘信息面板。
+        .sheet(isPresented: $showContactInfo) {
+            NativeContactCard(
+                identifier: model.contacts.contact(for: sender)?.id,
+                phone: sender,
+                showsNavigationBar: true,
+                showsDoneButton: true,
+                onCall: { number in
+                    model.numberInput = number
+                    Task { await model.dial() }
+                },
+                onMessage: { _ in }
+            )
+            .presentationSizingIfAvailable()
+            .presentationDragIndicator(.visible)
+        }
     }
 
     private var threadContent: some View {
@@ -1113,6 +1162,8 @@ private struct MessageThreadView: View {
                     .padding()
                 }
                 .onAppear { if let id = messages.last?.id { proxy.scrollTo(id) } }
+                // 下滑即可收起键盘，输入栏与消息区不会因为键盘出现而跳动。
+                .scrollDismissesKeyboard(.interactively)
             }
             // iMessage 风格输入栏：直接在输入栏上调用官方 glassEffect，
             // interactive() 使玻璃在触摸时具备 Q 弹高光反应，胶囊两端全圆角。
@@ -1604,6 +1655,7 @@ private struct NewMessageThread: View {
     let initialRecipient: String
     let onCancel: () -> Void
     let onSend: (String, String) -> Void
+    let onRecipientChange: (String) -> Void
 
     @State private var recipient = ""
     @State private var bodyText = ""
@@ -1661,6 +1713,7 @@ private struct NewMessageThread: View {
                 TextField(L10n.t("输入号码或姓名"), text: $recipient)
                     .textFieldStyle(.plain)
                     .font(.subheadline)
+                    .onChange(of: recipient) { onRecipientChange($0) }
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
@@ -1689,7 +1742,6 @@ private struct NewMessageThread: View {
                     }
                 }
             }
-            Divider()
             Spacer()
             // 消息输入栏（收件人未解析时禁用发送）。
             HStack(alignment: .center, spacing: 4) {
@@ -1732,6 +1784,17 @@ private struct HeaderNameGlass: ViewModifier {
     func body(content: Content) -> some View {
         if #available(iOS 26.0, *) {
             content.glassEffect(.regular, in: Capsule())
+        } else {
+            content.background(Capsule().fill(Color(uiColor: .secondarySystemBackground)))
+        }
+    }
+}
+
+/// 搜索栏长条液态玻璃：整条胶囊，标签与语音图标分列两端。
+private struct SearchFieldGlass: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content.glassEffect(.regular.interactive(), in: Capsule())
         } else {
             content.background(Capsule().fill(Color(uiColor: .secondarySystemBackground)))
         }
@@ -1938,32 +2001,27 @@ struct ContactsView: View {
             .toolbar { contactSidebarToolbar }
             // compact 窄窗下 push 原生联系人详情。
             .navigationDestination(for: String.self) { identifier in
-                if let cnContact = fetchCNContact(identifier) {
-                    ContactNativeDetail(
-                        contact: cnContact,
-                        contactStore: cnStore,
-                        onCall: onCall,
-                        onMessage: onMessage
-                    )
-                } else {
-                    EmptyStateView(title: L10n.t("选择联系人查看详情"), systemImage: "person.crop.circle")
-                }
+                NativeContactDetail(
+                    identifier: identifier,
+                    phone: nil,
+                    onCall: onCall,
+                    onMessage: onMessage
+                )
             }
             .task {
                 await model.contacts.loadIfNeeded()
             }
         } detail: {
-            NavigationStack {
-                if let selection, let cnContact = fetchCNContact(selection) {
-                    ContactNativeDetail(
-                        contact: cnContact,
-                        contactStore: cnStore,
-                        onCall: onCall,
-                        onMessage: onMessage
-                    )
-                } else {
-                    EmptyStateView(title: L10n.t("选择联系人查看详情"), systemImage: "person.crop.circle")
-                }
+            // 详情列不再套 NavigationStack，避免与分栏导航叠加出两个返回按钮。
+            if let selection {
+                NativeContactDetail(
+                    identifier: selection,
+                    phone: nil,
+                    onCall: onCall,
+                    onMessage: onMessage
+                )
+            } else {
+                EmptyStateView(title: L10n.t("选择联系人查看详情"), systemImage: "person.crop.circle")
             }
         }
         .sheet(isPresented: $showNewContact, onDismiss: {
@@ -1982,45 +2040,51 @@ struct ContactsView: View {
 
     private var contactSidebar: some View {
         List(selection: $selection) {
-            // 搜索框（列表内，带麦克风语音输入）。
-            HStack(spacing: 7) {
+            // 搜索框（长条液态玻璃，左搜索图标 / 右语音输入图标）。
+            HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.secondary)
                 TextField(L10n.t("搜索"), text: $search)
                     .textFieldStyle(.plain)
                     .font(.subheadline)
-                Spacer()
+                Spacer(minLength: 0)
                 DictationButton { text in search = text }
             }
-            .padding(.horizontal, 13)
-            .padding(.vertical, 9)
-            .background(Capsule().fill(Color(uiColor: .secondarySystemBackground)))
-            .listRowInsets(EdgeInsets(top: 4, leading: 10, bottom: 4, trailing: 10))
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .modifier(SearchFieldGlass())
+            .listRowInsets(EdgeInsets(top: 6, leading: 10, bottom: 6, trailing: 10))
+            .listRowSeparator(.hidden)
             .listRowBackground(Color.clear)
 
-            // 我的名片（用户手动指定；未指定时显示设置入口）。
-            if let me = model.contacts.contacts.first(where: { $0.id == myCardId }) {
-                contactLink(me, isMe: true)
-            } else {
-                Button { showMyCardPicker = true } label: {
-                    HStack(spacing: 12) {
-                        Image(systemName: "person.crop.circle.badge.plus")
-                            .font(.system(size: 22))
-                            .foregroundStyle(.secondary)
-                        Text(L10n.t("设置我的名片"))
-                            .font(.body)
-                            .foregroundStyle(.primary)
+            // 我的名片单独成组，与下方联系人列表分开（不再挤在同一个列表块里）。
+            Section(L10n.t("我的名片")) {
+                if let me = model.contacts.contacts.first(where: { $0.id == myCardId }) {
+                    contactLink(me, isMe: true)
+                } else {
+                    Button { showMyCardPicker = true } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: "person.crop.circle.badge.plus")
+                                .font(.system(size: 22))
+                                .foregroundStyle(.secondary)
+                            Text(L10n.t("设置我的名片"))
+                                .font(.body)
+                                .foregroundStyle(.primary)
+                            Spacer(minLength: 0)
+                        }
                     }
+                    .buttonStyle(.plain)
+                    .listRowInsets(EdgeInsets(top: 2, leading: 10, bottom: 2, trailing: 10))
+                    .listRowBackground(Color.clear)
                 }
-                .buttonStyle(.plain)
-                .listRowInsets(EdgeInsets(top: 0, leading: 10, bottom: 0, trailing: 10))
-                .listRowBackground(Color.clear)
             }
 
             // 联系人列表（我的名片不重复显示）。
-            ForEach(filtered.filter { $0.id != myCardId }) { contact in
-                contactLink(contact, isMe: false)
+            Section(L10n.t("联系人")) {
+                ForEach(filtered.filter { $0.id != myCardId }) { contact in
+                    contactLink(contact, isMe: false)
+                }
             }
         }
         .listStyle(.plain)
@@ -2032,19 +2096,25 @@ struct ContactsView: View {
     private func contactLink(_ contact: ContactStore.Contact, isMe: Bool) -> some View {
         NavigationLink(value: contact.id) {
             HStack(spacing: 12) {
-                InitialAvatar(name: contact.name, photoData: contact.photoData)
-                VStack(alignment: .leading, spacing: 2) {
+                // 行高与头像放大，列表不再又紧又扁。
+                InitialAvatar(name: contact.name, photoData: contact.photoData, size: 52)
+                VStack(alignment: .leading, spacing: 3) {
                     Text(contact.name)
                         .font(.body.weight(.semibold))
+                        // 选中（蓝色）时姓名必须为白字。
+                        .foregroundStyle(selection == contact.id ? Color.white : Color.primary)
                         .lineLimit(1)
                     Text(isMe ? L10n.t("我的名片") : (contact.phones.first ?? ""))
-                        .font(.caption)
+                        .font(.subheadline)
                         .foregroundStyle(selection == contact.id ? Color.white.opacity(0.85) : .secondary)
                         .lineLimit(1)
                 }
+                Spacer(minLength: 0)
             }
+            .padding(.vertical, 9)
         }
-        .listRowInsets(EdgeInsets(top: 0, leading: 10, bottom: 0, trailing: 10))
+        .listRowInsets(EdgeInsets(top: 2, leading: 10, bottom: 2, trailing: 10))
+        .listRowSeparator(.hidden)
         .listRowBackground(
             RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .fill(selection == contact.id ? Color(uiColor: .systemBlue) : Color.clear)
@@ -2053,18 +2123,8 @@ struct ContactsView: View {
 
     @ToolbarContentBuilder
     private var contactSidebarToolbar: some ToolbarContent {
-        // 左上：侧栏显隐切换（系统联系人 app 同款 sidebar 按钮）。
-        ToolbarItem(placement: .topBarLeading) {
-            Button {
-                withAnimation(.easeInOut(duration: 0.25)) {
-                    columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
-                }
-            } label: {
-                Image(systemName: "sidebar.left")
-            }
-            .tint(Color.primary)
-            .accessibilityLabel(L10n.t("显示或隐藏列表"))
-        }
+        // 侧栏显隐由 NavigationSplitView 在 iPad 上自动提供系统按钮，
+        // 这里不再重复添加，避免同时出现两个侧拉按钮。
         // 右上：新建联系人（弹出系统原生新建窗口）。
         ToolbarItem(placement: .topBarTrailing) {
             Button { showNewContact = true } label: {
@@ -2076,24 +2136,81 @@ struct ContactsView: View {
     }
 }
 
-/// CNContactViewController 原生联系人详情（SwiftUI 包装）。
-/// 自动渲染系统头像、信息/电话/FaceTime/邮件圆钮、资料行与右上角编辑按钮。
-private struct ContactNativeDetail: UIViewControllerRepresentable {
-    let contact: CNContact
-    let contactStore: CNContactStore
+/// 联系人详情容器：regular 宽窗保留原生卡片自带导航栏（含“编辑”），
+/// compact 窄窗隐藏内层导航栏，只留分栏导航的返回按钮，避免出现两条返回栏。
+private struct NativeContactDetail: View {
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    let identifier: String?
+    let phone: String?
     let onCall: (String) -> Void
     let onMessage: (String) -> Void
 
-    func makeUIViewController(context: Context) -> CNContactViewController {
+    var body: some View {
+        NativeContactCard(
+            identifier: identifier,
+            phone: phone,
+            showsNavigationBar: horizontalSizeClass == .regular,
+            showsDoneButton: false,
+            onCall: onCall,
+            onMessage: onMessage
+        )
+        .ignoresSafeArea(.container, edges: .bottom)
+    }
+}
+
+/// 系统原生联系人卡片（CNContactViewController）。
+/// 传入通讯录 identifier 时直接展示该联系人；否则按号码构造临时卡片。
+/// 号码动作交给系统选择器，用户可明确“发信息 / 拨打电话”，不会被误路由成拨号。
+private struct NativeContactCard: UIViewControllerRepresentable {
+    let identifier: String?
+    let phone: String?
+    var showsNavigationBar: Bool = true
+    var showsDoneButton: Bool = false
+    let onCall: (String) -> Void
+    let onMessage: (String) -> Void
+
+    func makeUIViewController(context: Context) -> UINavigationController {
+        let store = CNContactStore()
+        let contact: CNContact
+        if let identifier,
+           let fetched = try? store.unifiedContact(
+               withIdentifier: identifier,
+               keysToFetch: [CNContactViewController.descriptorForRequiredKeys()]
+           ) {
+            contact = fetched
+        } else {
+            // 号码不在通讯录时构造一张未保存的临时卡片（与 iMessage 展示陌生号码一致）。
+            let draft = CNMutableContact()
+            if let phone, !phone.isEmpty {
+                draft.phoneNumbers = [
+                    CNLabeledValue(label: CNLabelPhoneNumberMain, value: CNPhoneNumber(stringValue: phone))
+                ]
+            }
+            contact = draft
+        }
+
         let vc = CNContactViewController(for: contact)
-        vc.contactStore = contactStore
+        vc.contactStore = store
         vc.delegate = context.coordinator
-        vc.allowsEditing = true
+        vc.allowsEditing = identifier != nil
         vc.allowsActions = true
-        return vc
+        context.coordinator.contactViewController = vc
+
+        let nav = UINavigationController(rootViewController: vc)
+        nav.navigationBar.prefersLargeTitles = false
+        nav.setNavigationBarHidden(!showsNavigationBar, animated: false)
+        if showsDoneButton {
+            vc.navigationItem.leftBarButtonItem = UIBarButtonItem(
+                title: L10n.t("完成"),
+                style: .done,
+                target: context.coordinator,
+                action: #selector(Coordinator.dismissCard)
+            )
+        }
+        return nav
     }
 
-    func updateUIViewController(_ vc: CNContactViewController, context: Context) {}
+    func updateUIViewController(_ nav: UINavigationController, context: Context) {}
 
     func makeCoordinator() -> Coordinator {
         Coordinator(onCall: onCall, onMessage: onMessage)
@@ -2102,22 +2219,45 @@ private struct ContactNativeDetail: UIViewControllerRepresentable {
     final class Coordinator: NSObject, CNContactViewControllerDelegate {
         let onCall: (String) -> Void
         let onMessage: (String) -> Void
+        weak var contactViewController: UIViewController?
 
         init(onCall: @escaping (String) -> Void, onMessage: @escaping (String) -> Void) {
             self.onCall = onCall
             self.onMessage = onMessage
         }
 
-        /// 拦截电话/信息属性动作，改走本 app 模块；其余动作走系统默认。
+        @objc func dismissCard() {
+            contactViewController?.dismiss(animated: true)
+        }
+
+        /// 号码动作先弹系统选择器：系统无法区分“呼叫 / 发信息”两个圆钮，
+        /// 因此这里让用户明确选择，保证“发信息”不会再直接拨号。
         func contactViewController(
             _ viewController: CNContactViewController,
             shouldPerformDefaultActionFor property: CNContactProperty
         ) -> Bool {
-            if let phone = property.value as? CNPhoneNumber {
-                onCall(phone.stringValue)
-                return false
+            guard let number = property.value as? CNPhoneNumber else { return true }
+            let phone = number.stringValue
+            let sheet = UIAlertController(title: phone, message: nil, preferredStyle: .actionSheet)
+            sheet.addAction(UIAlertAction(title: L10n.t("发送信息"), style: .default) { [weak self] _ in
+                self?.onMessage(phone)
+            })
+            sheet.addAction(UIAlertAction(title: L10n.t("拨打电话"), style: .default) { [weak self] _ in
+                self?.onCall(phone)
+            })
+            sheet.addAction(UIAlertAction(title: L10n.t("取消"), style: .cancel))
+            if let popover = sheet.popoverPresentationController {
+                popover.sourceView = viewController.view
+                popover.sourceRect = CGRect(
+                    x: viewController.view.bounds.midX,
+                    y: viewController.view.bounds.midY,
+                    width: 0,
+                    height: 0
+                )
+                popover.permittedArrowDirections = []
             }
-            return true
+            viewController.present(sheet, animated: true)
+            return false
         }
     }
 }
@@ -2303,27 +2443,25 @@ struct ActiveCallView: View {
             GeometryReader { geometry in
                 // 小屏或大字体下允许纵向滚动，保证接听、静音和挂断始终可达。
                 ScrollView {
-                    // 控制列始终居中不动（compact / regular 同一结构）。
-                    callControlsColumn
+                    Group {
+                        if showingKeypad {
+                            // 与系统通话界面一致：键盘整屏替换通话控件，
+                            // 大键、居中、不悬浮遮挡任何按钮；底部提供“隐藏键盘”。
+                            DTMFKeypadPanel {
+                                withAnimation(.easeInOut(duration: 0.22)) { showingKeypad = false }
+                            }
+                        } else {
+                            // 控制列始终居中不动（compact / regular 同一结构）。
+                            callControlsColumn
+                        }
+                    }
                         .frame(minHeight: geometry.size.height)
                         .frame(maxWidth: .infinity)
                 }
                 .scrollIndicators(.hidden)
-
-                // 拨号键盘：悬浮窗形式居中弹出（不贴右、不贴下、不参与布局、
-                // 不挤压/移动控制列），弹簧缩放+淡入，键盘自带关闭按钮。
-                if showingKeypad {
-                    DTMFKeypadPanel {
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
-                            showingKeypad = false
-                        }
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                    .transition(.opacity.combined(with: .scale(scale: 0.85, anchor: .center)))
-                }
             }
         }
-        .animation(.easeInOut(duration: 0.25), value: showingKeypad)
+        .animation(.easeInOut(duration: 0.22), value: showingKeypad)
     }
 
     private var callControlsColumn: some View {
@@ -2475,14 +2613,15 @@ private struct DTMFKeypadPanel: View {
     ]
 
     private var isCompact: Bool { horizontalSizeClass == .compact }
-    // 紧凑系统键盘尺寸：面板宽度约 220-240pt，居中悬浮不占位过大。
-    private var keySize: CGFloat { isCompact ? 56 : 60 }
-    private var keySpacing: CGFloat { isCompact ? 12 : 14 }
+    // 与系统通话键盘同尺寸：大键、宽间距，整屏替换通话控件后不再遮挡其它按钮。
+    private var keySize: CGFloat { isCompact ? 72 : 84 }
+    private var keySpacing: CGFloat { isCompact ? 20 : 26 }
     private var keypadWidth: CGFloat { keySize * 3 + keySpacing * 2 }
-    private var digitFont: Font { .system(size: isCompact ? 22 : 24, weight: .regular, design: .rounded) }
-    private var lettersFont: Font { .system(size: isCompact ? 9 : 10, weight: .semibold) }
+    private var digitFont: Font { .system(size: isCompact ? 29 : 33, weight: .regular, design: .rounded) }
+    private var lettersFont: Font { .system(size: isCompact ? 11 : 12, weight: .semibold) }
 
     var body: some View {
+      VStack(spacing: isCompact ? 14 : 18) {
         // 多个玻璃键放入系统容器（容器间距取 0，静止时保持独立纯圆，官方文档模式）。
         Group {
             if #available(iOS 26.0, *) {
@@ -2546,20 +2685,21 @@ private struct DTMFKeypadPanel: View {
             RoundedRectangle(cornerRadius: 26, style: .continuous)
                 .stroke(Color.primary.opacity(0.08), lineWidth: 1)
         }
-        // 关闭按钮在面板右上角（不额外占标题行，压缩整体高度）。
-        .overlay(alignment: .topTrailing) {
-            Button(action: onClose) {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.title3)
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-            .padding(8)
-            .accessibilityLabel(L10n.t("关闭"))
-        }
         .shadow(color: .black.opacity(0.15), radius: 20, y: 8)
         // 固定面板宽度（网格宽+内边距），防止卡片被撑成又宽又扁。
         .frame(width: keypadWidth + 32)
+
+        // 底部“隐藏键盘”胶囊：与系统通话键盘一致，不遮挡任何按键。
+        Button(action: onClose) {
+            Text(L10n.t("隐藏键盘"))
+                .font(.headline)
+                .padding(.horizontal, 26)
+                .padding(.vertical, 12)
+        }
+        .buttonStyle(.plain)
+        .modifier(InputBarGlass())
+        .accessibilityLabel(L10n.t("隐藏键盘"))
+      }
     }
 }
 
