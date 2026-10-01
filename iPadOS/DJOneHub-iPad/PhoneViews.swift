@@ -694,10 +694,24 @@ struct MessagesView: View {
                     sender: sender,
                     messages: conversation.messages,
                     displayName: displayName(for: sender),
-                    photoData: photoData(for: sender)
+                    photoData: photoData(for: sender),
+                    onSettings: onSettings
                 )
             } else {
+                // 无会话占位页：设置按钮仍固定在右上角。
                 EmptyStateView(title: L10n.t("选择信息开始聊天"), systemImage: "message")
+                    .toolbar {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button(action: onSettings) {
+                                Image(systemName: "gearshape")
+                                    .font(.system(size: 16, weight: .medium))
+                                    .foregroundStyle(.primary)
+                                    .frame(width: 34, height: 34)
+                                    .modifier(GlassCircle())
+                            }
+                            .accessibilityLabel(L10n.t("设置"))
+                        }
+                    }
             }
         }
     }
@@ -724,9 +738,8 @@ struct MessagesView: View {
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
-        .listRowSeparator(.hidden)
-        .listSectionSeparator(.hidden)
-        .background(PhoneBackdrop())
+        // 左栏背景跟随系统分组灰（iMessage 图三浅色为浅灰、深色为纯黑）。
+        .background(Color(uiColor: .systemGroupedBackground))
     }
 
     @ViewBuilder
@@ -755,7 +768,7 @@ struct MessagesView: View {
                 }
                 .buttonStyle(.plain)
             } else {
-                // 选中行：圆角矩形蓝色高亮（iMessage 会话选中样式）；未选中行无任何背景。
+                // 选中行：蓝色大圆角块填满两条分割线之间（iMessage 图三/图四），未选中行无背景。
                 Button {
                     selection = conversation.sender
                 } label: {
@@ -767,14 +780,15 @@ struct MessagesView: View {
                         isPinned: isPinned(conversation.sender)
                     )
                     .foregroundStyle(selection == conversation.sender ? .white : .primary)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 6)
-                    .background(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(selection == conversation.sender ? Color.accentColor : Color.clear)
-                    )
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
                 }
                 .buttonStyle(.plain)
+                .listRowInsets(EdgeInsets(top: 3, leading: 10, bottom: 3, trailing: 10))
+                .listRowBackground(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(selection == conversation.sender ? Color.accentColor : Color.clear)
+                )
             }
         }
         .tag(conversation.sender)
@@ -820,21 +834,27 @@ struct MessagesView: View {
                         Label(L10n.t("清空全部短信"), systemImage: "trash")
                     }
                 } label: {
+                    // iMessage 编辑按钮：玻璃胶囊背景，图标/文字跟随系统内容色（浅色黑、深色白）。
                     Text(L10n.t("编辑"))
+                        .font(.body)
                         .foregroundStyle(.primary)
-                        .tint(.primary)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .modifier(GlassCapsule())
                 }
             }
-            // 新建信息：右上角（iMessage 位置）。
+            // 新建信息：玻璃圆形按钮（iMessage 位置，右上角列边界处）。
             ToolbarItem(placement: .topBarTrailing) {
                 Button { showingComposer = true } label: {
                     Image(systemName: "square.and.pencil")
+                        .font(.system(size: 16, weight: .medium))
                         .foregroundStyle(.primary)
-                        .tint(.primary)
+                        .frame(width: 34, height: 34)
+                        .modifier(GlassCircle())
                 }
                 .accessibilityLabel(L10n.t("新信息"))
             }
-            // 分类三条杠：信息 / 未知发件人 / 垃圾信息 / 最近删除（iMessage 筛选按钮）。
+            // 分类三条杠：玻璃胶囊按钮（信息 / 未知发件人 / 垃圾信息 / 最近删除）。
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     Picker(selection: $category) {
@@ -846,19 +866,13 @@ struct MessagesView: View {
                     }
                 } label: {
                     Image(systemName: "line.3.horizontal.decrease")
+                        .font(.system(size: 15, weight: .medium))
                         .foregroundStyle(.primary)
-                        .tint(.primary)
+                        .padding(.horizontal, 12)
+                        .frame(height: 34)
+                        .modifier(GlassCapsule())
                 }
                 .accessibilityLabel(L10n.t("筛选"))
-            }
-            // 设置入口（所有主页面保持一致的设置按钮，浅色黑/深色白）。
-            ToolbarItem(placement: .topBarTrailing) {
-                Button(action: onSettings) {
-                    Image(systemName: "gearshape")
-                        .foregroundStyle(.primary)
-                        .tint(.primary)
-                }
-                .accessibilityLabel(L10n.t("设置"))
             }
         }
     }
@@ -932,13 +946,14 @@ private struct MessageThreadView: View {
     let messages: [SMSMessage]
     let displayName: String
     let photoData: Data?
+    let onSettings: () -> Void
     @State private var reply = ""
 
     var body: some View {
         Group {
             if #available(iOS 26.0, *) {
                 // 液态玻璃必须在 GlassEffectContainer 内才渲染真实玻璃材质（iOS 26 官方文档），
-                // 气泡、输入栏、头部名称条都置于同一容器中，相互融合，与 iMessage 一致。
+                // 气泡、输入栏置于同一容器中相互融合，与 iMessage 一致。
                 GlassEffectContainer { threadContent }
             } else {
                 threadContent
@@ -946,10 +961,20 @@ private struct MessageThreadView: View {
         }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            // 正中间上方：iMessage 会话头部 —— 名称居中，仅名称带长条形液态玻璃背景
-            // （位置与图三/图四一致：名称在上、最后消息时间小字在其下方）。
+            // 正中间上方：头像在上、名字玻璃胶囊在头像下方并部分重叠（iMessage 图三/图四）。
             ToolbarItem(placement: .principal) {
                 threadHeader
+            }
+            // 设置入口固定在聊天页右上角（与其他主页面一致），玻璃圆形按钮。
+            ToolbarItem(placement: .topBarTrailing) {
+                Button(action: onSettings) {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundStyle(.primary)
+                        .frame(width: 34, height: 34)
+                        .modifier(GlassCircle())
+                }
+                .accessibilityLabel(L10n.t("设置"))
             }
         }
     }
@@ -979,12 +1004,12 @@ private struct MessageThreadView: View {
                             HStack {
                                 if message.isOutgoing { Spacer(minLength: 48) }
                                 VStack(alignment: message.isOutgoing ? .trailing : .leading, spacing: 3) {
+                                    // 直接在 Text 上调用官方 glassEffect（与通话功能键同一可靠范式），
+                                    // 发出消息 tint 强调色、收到消息常规玻璃；文字完整多行显示。
                                     Text(message.content)
                                         .padding(.horizontal, 14)
                                         .padding(.vertical, 9)
-                                        .background {
-                                            bubbleBackground(isOutgoing: message.isOutgoing)
-                                        }
+                                        .modifier(MessageBubbleGlass(isOutgoing: message.isOutgoing))
                                         .foregroundStyle(message.isOutgoing ? .white : .primary)
                                     // iMessage 风格时间戳：气泡下方小字，发出消息显示“已发送 · 时间”，收到消息只显示时间。
                                     Text(message.isOutgoing
@@ -1002,8 +1027,8 @@ private struct MessageThreadView: View {
                 }
                 .onAppear { if let id = messages.last?.id { proxy.scrollTo(id) } }
             }
-            // iMessage 风格输入栏：整条输入栏是一个原生液态玻璃胶囊（两端全圆角），
-            // 输入框去掉自身背景、发送键与输入文本垂直居中对齐，与系统短信输入栏一致。
+            // iMessage 风格输入栏：直接在输入栏上调用官方 glassEffect，
+            // interactive() 使玻璃在触摸时具备 Q 弹高光反应，胶囊两端全圆角。
             HStack(alignment: .center, spacing: 4) {
                 TextField(L10n.t("短信内容"), text: $reply, axis: .vertical)
                     .lineLimit(1...5)
@@ -1027,45 +1052,28 @@ private struct MessageThreadView: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .background(messageInputBackground)
+            .modifier(InputBarGlass())
             .padding(.horizontal)
             .padding(.vertical, 8)
         }
     }
 
     /// iMessage 式会话头部：仅名称文字，带长条形（胶囊）液态玻璃背景，位置居中。
+    /// iMessage 式会话头部：头像在上，名字玻璃胶囊在头像下方并与头像底部部分重叠。
     private var threadHeader: some View {
-        Text(displayName)
-            .font(.subheadline.weight(.semibold))
-            .lineLimit(1)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-            .background {
-                if #available(iOS 26.0, *) {
-                    Capsule()
-                        .fill(.clear)
-                        .glassEffect(.regular, in: Capsule())
-                } else {
-                    Capsule()
-                        .fill(Color(uiColor: .secondarySystemBackground))
-                }
+        VStack(spacing: -12) {
+            InitialAvatar(name: displayName, photoData: photoData, size: 56)
+            HStack(spacing: 4) {
+                Text(displayName)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                Image(systemName: "chevron.right")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.secondary)
             }
-    }
-
-    @ViewBuilder
-    private func bubbleBackground(isOutgoing: Bool) -> some View {
-        // 原版液态玻璃 API：glassEffect 以气泡形状渲染（iOS 26 开发者文档），
-        // 发出消息用 tint 强调色玻璃，收到消息用常规玻璃。
-        if #available(iOS 26.0, *) {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(.clear)
-                .glassEffect(
-                    isOutgoing ? .regular.tint(Color.accentColor) : .regular,
-                    in: RoundedRectangle(cornerRadius: 18, style: .continuous)
-                )
-        } else {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(isOutgoing ? Color.accentColor : Color(uiColor: .secondarySystemBackground))
+            .padding(.horizontal, 14)
+            .padding(.vertical, 7)
+            .modifier(HeaderNameGlass())
         }
     }
 
@@ -1090,18 +1098,58 @@ private struct MessageThreadView: View {
     private func headerSubtitle(_ date: Date) -> String {
         date.formatted(.dateTime.weekday(.abbreviated).hour().minute())
     }
+}
 
-    @ViewBuilder
-    private var messageInputBackground: some View {
-        // 原版液态玻璃 API：glassEffect 以胶囊形状渲染（iOS 26 开发者文档），
-        // 输入栏两端完整圆角，与系统短信输入栏一致。
+// MARK: - 液态玻璃复用修饰器（iOS 26 官方 glassEffect，旧系统材质回退）
+
+/// 胶囊形玻璃（编辑、筛选按钮）。
+private struct GlassCapsule: ViewModifier {
+    func body(content: Content) -> some View {
         if #available(iOS 26.0, *) {
-            Capsule()
-                .fill(.clear)
-                .glassEffect(.regular, in: Capsule())
+            content.glassEffect(.regular, in: Capsule())
         } else {
-            Capsule()
-                .fill(Color(uiColor: .secondarySystemBackground))
+            content.background(Capsule().fill(.ultraThinMaterial))
+        }
+    }
+}
+
+/// 头部名字长条玻璃胶囊。
+private struct HeaderNameGlass: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content.glassEffect(.regular, in: Capsule())
+        } else {
+            content.background(Capsule().fill(Color(uiColor: .secondarySystemBackground)))
+        }
+    }
+}
+
+/// 聊天气泡玻璃：发出消息 tint 强调色，收到消息常规玻璃。
+private struct MessageBubbleGlass: ViewModifier {
+    let isOutgoing: Bool
+
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content.glassEffect(
+                isOutgoing ? .regular.tint(Color.accentColor) : .regular,
+                in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+            )
+        } else {
+            content.background(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(isOutgoing ? Color.accentColor : Color(uiColor: .secondarySystemBackground))
+            )
+        }
+    }
+}
+
+/// 输入栏玻璃：interactive() 提供触摸 Q 弹高光反应。
+private struct InputBarGlass: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content.glassEffect(.regular.interactive(), in: Capsule())
+        } else {
+            content.background(Capsule().fill(Color(uiColor: .secondarySystemBackground)))
         }
     }
 }
@@ -1477,30 +1525,6 @@ struct ActiveCallView: View {
                         Text(durationText(at: context.date)).monospacedDigit().foregroundStyle(.secondary)
                     }
                 }
-                if model.audio.active, !model.audio.routeDescription.isEmpty {
-                    Text(model.audio.routeDescription)
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(2)
-                        .minimumScaleFactor(0.75)
-                        .multilineTextAlignment(.center)
-                }
-                if model.audio.active, !model.audio.diagnosticDescription.isEmpty {
-                    Text(model.audio.diagnosticDescription)
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .minimumScaleFactor(0.75)
-                        .multilineTextAlignment(.center)
-                }
-                if model.audio.active, !model.audio.moduleDiagnosticDescription.isEmpty {
-                    Text(model.audio.moduleDiagnosticDescription)
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .minimumScaleFactor(0.75)
-                        .multilineTextAlignment(.center)
-                }
                 if let audioError = model.audio.errorMessage, !audioError.isEmpty {
                     Text(audioError)
                         .font(.caption2)
@@ -1543,7 +1567,7 @@ struct ActiveCallView: View {
                     CallCircleButton(
                         title: "键盘",
                         icon: "circle.grid.3x3.fill",
-                        color: .green,
+                        color: .blue,
                         isActive: showingKeypad,
                         size: controlSize
                     ) {
@@ -1718,5 +1742,7 @@ private struct DTMFKeypadPanel: View {
                 .stroke(Color.primary.opacity(0.08), lineWidth: 1)
         }
         .shadow(color: .black.opacity(0.15), radius: 20, y: 8)
+        // 固定面板宽度（网格宽+内边距），防止标题行 Spacer 把卡片撑成又宽又扁。
+        .frame(width: keypadWidth + 36)
     }
 }
