@@ -306,7 +306,7 @@ struct DialPadView: View {
             }
             .foregroundStyle(.primary)
             .frame(width: keySize, height: keySize)
-            .background(Color(uiColor: .secondarySystemFill), in: Circle())
+            .background(dialKeyBackground)
             .contentShape(Circle())
         }
         .buttonStyle(.plain)
@@ -319,6 +319,16 @@ struct DialPadView: View {
             }
         )
         .accessibilityLabel(letters.isEmpty ? digit : "\(digit) \(letters)")
+    }
+
+    // iOS 26 起使用系统原生液态玻璃框架；旧系统回退到近似系统电话的浅灰圆键。
+    @ViewBuilder
+    private var dialKeyBackground: some View {
+        if #available(iOS 26.0, *) {
+            Circle().glassEffect(.regular, in: Circle())
+        } else {
+            Circle().fill(Color(uiColor: .secondarySystemFill))
+        }
     }
 }
 
@@ -370,7 +380,7 @@ private struct ModuleStatusPopover: View {
         }
         .padding(16)
         .frame(width: 286, alignment: .leading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .background { nativeGlass(cornerRadius: 18) }
         .overlay {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .stroke(Color.primary.opacity(0.08), lineWidth: 1)
@@ -616,8 +626,8 @@ private struct MessageThreadView: View {
                 .onAppear { if let id = messages.last?.id { proxy.scrollTo(id) } }
             }
             Divider()
-            // iMessage 风格输入栏：发送键内嵌在液态玻璃胶囊里，iOS 26 用真液态玻璃材质。
-            HStack(alignment: .bottom, spacing: 8) {
+            // iMessage 风格输入栏：发送键内嵌在原生液态玻璃胶囊里，与系统短信保持一致。
+            HStack(alignment: .bottom, spacing: 6) {
                 TextField(L10n.t("短信内容"), text: $reply, axis: .vertical)
                     .lineLimit(1...5)
                     .padding(.horizontal, 14)
@@ -628,15 +638,16 @@ private struct MessageThreadView: View {
                     Task { _ = await model.sendSMS(to: sender, content: body) }
                 } label: {
                     Image(systemName: "arrow.up.circle.fill")
-                        .font(.title2)
+                        .font(.system(size: 26))
+                        .frame(width: 34, height: 34)
+                        .contentShape(Rectangle())
                         .foregroundStyle(Color.accentColor)
                 }
                 .buttonStyle(.plain)
                 .disabled(reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 .accessibilityLabel(L10n.t("发送"))
             }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 6)
+            .padding(6)
             .background(messageInputBackground)
             .padding(.horizontal)
             .padding(.vertical, 8)
@@ -647,21 +658,13 @@ private struct MessageThreadView: View {
 
     @ViewBuilder
     private var messageInputBackground: some View {
+        // 直接使用系统原生液态玻璃（iOS 26），不再叠加手动材质，保证与系统输入栏一致。
         if #available(iOS 26.0, *) {
             RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .fill(.regularMaterial)
                 .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 22, style: .continuous)
-                        .strokeBorder(.primary.opacity(0.08), lineWidth: 1)
-                }
         } else {
             RoundedRectangle(cornerRadius: 22, style: .continuous)
                 .fill(Color(uiColor: .secondarySystemBackground))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 22, style: .continuous)
-                        .strokeBorder(.primary.opacity(0.08), lineWidth: 1)
-                }
         }
     }
 }
@@ -1034,39 +1037,77 @@ private struct DTMFKeypadView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @EnvironmentObject private var model: AppModel
-    private let rows = [["1", "2", "3"], ["4", "5", "6"], ["7", "8", "9"], ["*", "0", "#"]]
 
-    // iPad 上放大按键，避免通话中误触；iPhone 保持单手可及。
-    private var keySize: CGFloat { horizontalSizeClass == .compact ? 68 : 88 }
-    private var keySpacing: CGFloat { horizontalSizeClass == .compact ? 20 : 32 }
-    private var digitFont: Font { .system(size: horizontalSizeClass == .compact ? 28 : 34, weight: .medium, design: .rounded) }
+    private struct DTMFKey: Identifiable {
+        let digit: String
+        let letters: String
+        var id: String { digit }
+    }
+
+    private let rows: [[DTMFKey]] = [
+        [DTMFKey(digit: "1", letters: ""), DTMFKey(digit: "2", letters: "ABC"), DTMFKey(digit: "3", letters: "DEF")],
+        [DTMFKey(digit: "4", letters: "GHI"), DTMFKey(digit: "5", letters: "JKL"), DTMFKey(digit: "6", letters: "MNO")],
+        [DTMFKey(digit: "7", letters: "PQRS"), DTMFKey(digit: "8", letters: "TUV"), DTMFKey(digit: "9", letters: "WXYZ")],
+        [DTMFKey(digit: "*", letters: ""), DTMFKey(digit: "0", letters: "+"), DTMFKey(digit: "#", letters: "")],
+    ]
+
+    private var isCompact: Bool { horizontalSizeClass == .compact }
+    // 与系统拨号键盘一致：数字 + 字母，圆形液态玻璃键；iPad 放大按键避免误触。
+    private var keySize: CGFloat { isCompact ? 68 : 84 }
+    private var keySpacing: CGFloat { isCompact ? 18 : 28 }
+    private var keypadWidth: CGFloat { keySize * 3 + keySpacing * 2 }
+    private var digitFont: Font { .system(size: isCompact ? 27 : 33, weight: .regular, design: .rounded) }
+    private var lettersFont: Font { .system(size: isCompact ? 10 : 12, weight: .semibold) }
 
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 16) {
-                ForEach(rows, id: \.description) { row in
+        let content = NavigationStack {
+            VStack(spacing: isCompact ? 12 : 16) {
+                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
                     HStack(spacing: keySpacing) {
-                        ForEach(row, id: \.self) { digit in
+                        ForEach(row) { key in
                             Button {
-                                Task { await model.sendDTMF(digit) }
+                                Task { await model.sendDTMF(key.digit) }
                             } label: {
-                                Text(digit)
-                                    .font(digitFont)
-                                    .frame(width: keySize, height: keySize)
-                                    .background(Color(uiColor: .tertiarySystemFill), in: Circle())
+                                VStack(spacing: 1) {
+                                    Text(key.digit).font(digitFont)
+                                    if !key.letters.isEmpty {
+                                        Text(key.letters).font(lettersFont).tracking(1.2)
+                                    }
+                                }
+                                .foregroundStyle(.primary)
+                                .frame(width: keySize, height: keySize)
+                                .background(keyBackground)
+                                .contentShape(Circle())
                             }
                             .buttonStyle(.plain)
+                            .accessibilityLabel(key.letters.isEmpty ? key.digit : "\(key.digit) \(key.letters)")
                         }
                     }
                 }
             }
-            .padding()
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
+            .frame(width: keypadWidth)
+            .padding(.vertical, 18)
+            .padding(.horizontal, 28)
             .navigationTitle("DTMF")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar { Button(L10n.t("取消")) { dismiss() } }
         }
-        .presentationDetents([.medium])
-        .presentationDragIndicator(.visible)
+        // 弹层按内容自适应尺寸：iPad 上不再又宽又扁，四行按键完整可见。
+        if #available(iOS 18.0, *) {
+            content.presentationSizing(.form).presentationDragIndicator(.visible)
+        } else if #available(iOS 16.4, *) {
+            content.presentationDetents([.height(520)]).presentationDragIndicator(.visible)
+        } else {
+            content.presentationDetents([.medium]).presentationDragIndicator(.visible)
+        }
+    }
+
+    @ViewBuilder
+    private var keyBackground: some View {
+        if #available(iOS 26.0, *) {
+            Circle().glassEffect(.regular, in: Circle())
+        } else {
+            Circle().fill(Color(uiColor: .tertiarySystemFill))
+        }
     }
 }

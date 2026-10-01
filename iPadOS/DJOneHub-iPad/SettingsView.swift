@@ -61,50 +61,47 @@ struct SettingsView: View {
         NavigationStack {
             Form {
                 Section(L10n.t("状态")) {
-                    statusCard
+                    settingsCardRow(statusCard)
                 }
 
                 Section(L10n.t("外观")) {
-                    appearanceCard
+                    settingsCardRow(appearanceCard)
                 }
 
                 Section("通知") {
-                    notificationCard
+                    settingsCardRow(notificationCard)
                 }
 
                 Section("连接") {
-                    connectionCard
+                    settingsCardRow(connectionCard)
                 }
 
                 Section("通话支持") {
-                    voiceCard
+                    settingsCardRow(voiceCard)
                 }
 
                 Section(L10n.t("网络")) {
-                    networkCard
+                    settingsCardRow(networkCard)
                 }
 
                 Section("功率与温度") {
-                    powerCard
-                        // 让监测卡保留独立圆角边界，不再占用整块设置列表的视觉空间。
-                        .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
-                        .listRowBackground(Color.clear)
+                    settingsCardRow(powerCard)
                 }
 
                 Section(L10n.t("定位")) {
-                    gpsCard
+                    settingsCardRow(gpsCard)
                 }
 
                 Section(L10n.t("eSIM / 卡片")) {
-                    esimCard
+                    settingsCardRow(esimCard)
                 }
 
                 Section(L10n.t("AT 调试")) {
-                    atCard
+                    settingsCardRow(atCard)
                 }
 
                 Section("服务控制") {
-                    serviceCard
+                    settingsCardRow(serviceCard)
                 }
 
                 if !actionMessage.isEmpty {
@@ -116,6 +113,8 @@ struct SettingsView: View {
                 }
             }
             .formStyle(.grouped)
+            // iPad 上限制表单宽度并居中，避免整页拉满后视觉松散、排版混乱。
+            .frame(maxWidth: 720)
             .navigationTitle(L10n.t("设置"))
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -129,14 +128,14 @@ struct SettingsView: View {
             }
             .sheet(isPresented: $showingDiagnostic) {
                 NetworkDiagnosticView(diagnostic: networkDiagnostic)
-                    .presentationDetents([.medium, .large])
+                    .presentationSizingIfAvailable()
                     .presentationDragIndicator(.visible)
             }
             .sheet(isPresented: $showingESIMDownload) {
                 ESIMDownloadView { smdp, matchingID, confirmationCode, imei, aid in
                     await downloadProfile(smdp, matchingID, confirmationCode, imei, aid)
                 }
-                .presentationDetents([.large])
+                .presentationSizingIfAvailable()
                 .presentationDragIndicator(.visible)
             }
             .confirmationDialog("确认完全退出模块服务？", isPresented: $showingShutdownConfirmation, titleVisibility: .visible) {
@@ -185,22 +184,41 @@ struct SettingsView: View {
         }
     }
 
+    /// 所有设置卡片统一为独立玻璃面板：iOS 26 用系统原生液态玻璃，旧系统回退浅色圆角卡。
+    private var cardBackground: some View {
+        if #available(iOS 26.0, *) {
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        } else {
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(Color(uiColor: .secondarySystemGroupedBackground))
+        }
+    }
+
+    /// 让卡片在表单行中保持独立圆角边界，并铺上统一玻璃背景。
+    private func settingsCardRow<Content: View>(_ content: Content) -> some View {
+        content
+            .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
+            .listRowBackground(Color.clear)
+            .background(cardBackground)
+    }
+
     private var statusCard: some View {
         VStack(spacing: 0) {
             infoRow(L10n.t("模块代理"), model.isOnline ? L10n.t("在线") : L10n.t("离线"), tint: model.isOnline ? .green : .red)
-            Divider()
+            Divider().padding(.vertical, 2)
             infoRow("App 版本", appVersionText)
-            Divider()
+            Divider().padding(.vertical, 2)
             infoRow("Agent 版本", model.agentVersion ?? (model.isOnline ? "读取中" : "--"))
-            Divider()
+            Divider().padding(.vertical, 2)
             infoRow(L10n.t("运营商"), operatorDisplayName(modem?.operatorName) ?? "--")
-            Divider()
+            Divider().padding(.vertical, 2)
             infoRow(L10n.t("SIM 卡"), modem?.simInserted == true ? "已接入" : "未接入")
-            Divider()
+            Divider().padding(.vertical, 2)
             infoRow(L10n.t("网络模式"), modem?.networkMode ?? "--")
-            Divider()
+            Divider().padding(.vertical, 2)
             infoRow(L10n.t("信号强度"), modem?.signalDBM.map { "\($0) dBm" } ?? "--")
-            Divider()
+            Divider().padding(.vertical, 4)
             HStack(spacing: 0) {
                 metric(L10n.t("下载速度"), rateText(downloadRate))
                 Divider().frame(height: 40)
@@ -208,14 +226,15 @@ struct SettingsView: View {
                 Divider().frame(height: 40)
                 metric(L10n.t("本次流量"), byteText(traffic?.sessionTotal))
             }
-            Divider()
+            Divider().padding(.vertical, 4)
             Button {
                 Task { await refreshAll() }
             } label: {
                 Label(L10n.t("刷新"), systemImage: "arrow.clockwise")
                     .frame(maxWidth: .infinity)
             }
-            .padding(.top, 8)
+            .buttonStyle(.bordered)
+            .padding(.top, 4)
         }
     }
 
@@ -413,10 +432,10 @@ struct SettingsView: View {
             }
         }
         .padding(14)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(cardBackground)
         .overlay {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(.primary.opacity(0.08))
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .strokeBorder(.primary.opacity(0.06))
         }
         .scaleEffect(powerCardPressed ? 0.97 : 1)
         .animation(.easeOut(duration: 0.12), value: powerCardPressed)
@@ -969,12 +988,23 @@ private struct PowerDetailsPopover: View {
         }
         .padding(16)
         .frame(width: 300, alignment: .leading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .background(popoverBackground)
         .overlay {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .strokeBorder(.primary.opacity(0.08))
         }
         .shadow(color: .black.opacity(0.18), radius: 18, y: 8)
+    }
+
+    @ViewBuilder
+    private var popoverBackground: some View {
+        if #available(iOS 26.0, *) {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        } else {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(.regularMaterial)
+        }
     }
 
     private func readingText(_ reading: SystemPowerReading) -> String {

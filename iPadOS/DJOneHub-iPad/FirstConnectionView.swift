@@ -45,7 +45,7 @@ struct FirstConnectionView: View {
                             .foregroundStyle(.secondary)
                     }
                     .padding(14)
-                    .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .background { nativeGlass(cornerRadius: 14) }
 
                     if case let .failed(message) = model.setupStage {
                         VStack(alignment: .leading, spacing: 6) {
