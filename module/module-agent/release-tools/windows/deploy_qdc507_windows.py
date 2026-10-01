@@ -42,6 +42,9 @@ MAC_FUNCTIONS = ("serial", "audio")
 # 网络模式决定 (usbnet=0 时 gadget 里是 rmnet), 只能在 AT 侧用 usbnet 改写.
 ECM_FUNCTION = "ecm"
 MAC_REPAIR_SCRIPT = "/data/local/tmp/djonehub-mac-profile.sh"
+# 部署器构建日期. 排错时先看启动输出里的这一行, 用来确认对方拿到的到底是不是新版分享包
+# (同版本号的老包和新包只能靠这行区分).
+BUILD_STAMP = "2026-10-01"
 
 
 def resolve_module_agent_directory() -> Path:
@@ -194,16 +197,20 @@ class AdbDeployTransport:
         position = output.rfind(marker)
         if position < 0:
             # 作者部署器遇到组合不符时用 `exit NN` 直接结束命令, 且不打印状态标记,
-            # 只看得到一句没有信息量的话; 顺手把模块当前的 USB 组合带出来.
+            # 只看得到一句没有信息量的话; 顺手把模块当前的 USB 组合和是哪个闸门带出来.
             try:
-                state = describe_usb_state(self.read_usb_state())
+                current = self.read_usb_state()
+                state = describe_usb_state(current)
+                gate = silent_gate_hint(current["functions"])
             except Exception as error:
                 state = f"读取模块 USB 状态也失败: {error}"
+                gate = ""
             raise RuntimeError(
                 "模块 shell 未返回退出状态 (作者部署器在组合不符时会静默 exit, 且不打印状态标记);\n"
                 f"  command={command[:240]!r}\n"
                 f"  output={output[-500:]!r}\n"
                 f"  模块当前: {state}"
+                + (f"\n  作者闸门: {gate}" if gate else "")
             )
         status = int(output[position + len(marker):].split("__", 1)[0])
         clean = output[:position].rstrip()
@@ -246,6 +253,29 @@ def describe_usb_state(state: dict) -> str:
     product = state.get("product") or "?"
     functions = state.get("functions") or "空"
     return f"USB ID={vendor}:{product} (期望 {MAC_USB_IDS}) functions={functions}"
+
+
+def silent_gate_hint(functions: str) -> str:
+    """作者部署器组合不符时只 `exit 41/42/43` 且不打印状态标记, 把是哪个闸门说清楚."""
+    items = {item.strip() for item in functions.split(",") if item.strip()}
+    if not items & {"diag", "ffs", ECM_FUNCTION}:
+        return (
+            f"读到的 USB 组合是 {functions!r}, 不像模块的组合 (多半是刚插上还没启动完); "
+            "等 10 秒重新插拔模块后重跑本脚本."
+        )
+    for name, code in (("audio", 41), ("serial", 42), (ECM_FUNCTION, 43)):
+        if name not in items:
+            if name == ECM_FUNCTION:
+                return (
+                    f"缺 {name}, 作者部署器静默 exit {code}: 模块是 usbnet=0 (RMNET/传统拨号) 模式; "
+                    "重新插拔后重跑 Flash-All.bat, 它会用 AT 把 usbnet 改成 1 (ECM) 并重启模块. "
+                    "只跑 Deploy-Module.bat 改不了这个."
+                )
+            return (
+                f"缺 {name}, 作者部署器静默 exit {code}; "
+                "重新插拔模块后重跑 Flash-All.bat 会自动补回 Mac 完整组合."
+            )
+    return "读到的组合其实是齐的, 多半是模块还没启动完; 等 10 秒重新插拔后重跑本脚本."
 
 
 def missing_mac_functions(functions: str) -> list[str]:
@@ -353,7 +383,11 @@ def main() -> int:
     module, digest = load_original()
     module.DeployTransport = AdbDeployTransport
     module.load_probe_module = lambda: None
-    print(f"复用作者原始部署器 (sha256 {digest[:16]}), 传输层 = adb.exe", flush=True)
+    print(
+        f"复用作者原始部署器 (sha256 {digest[:16]}), 传输层 = adb.exe, "
+        f"部署器构建 {BUILD_STAMP}",
+        flush=True,
+    )
 
     # 只给部署路径加 USB 预检: --inspect-* 必须保持只读, 不能顺手改模块状态.
     original_deploy = module.deploy
@@ -379,6 +413,10 @@ def self_test() -> None:
     assert not missing_ecm("diag,serial,ecm,ffs,audio")
     assert not missing_ecm("")
     assert not missing_ecm("hello")
+    assert "usbnet=0" in silent_gate_hint("diag,serial,rmnet,ffs,audio")
+    assert "audio" in silent_gate_hint("diag,serial,ecm,ffs")
+    assert "还没启动完" in silent_gate_hint("")
+    assert "组合其实是齐的" in silent_gate_hint("diag,serial,ecm,ffs,audio")
     assert "diag,serial,ecm,ffs,audio" in mac_repair_script("diag,serial,ecm,ffs,audio")
     print("self-test ok")
 

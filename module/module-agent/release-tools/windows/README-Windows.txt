@@ -104,9 +104,14 @@
 - "adb 未发现已授权的模块设备": USB 组合还没写成目标值, 或模块还没重新枚举;
   先重跑 Flash-All.bat (它会在需要时自动补做写组合这一步)。
 - "模块 shell 未返回退出状态": 作者部署器内的检查失败时会直接 exit, 所以没有任何输出;
-  报错里会附带模块当前的 USB ID 与 functions。functions 里没有 ecm 说明模块是
-  usbnet=0 (RMNET) 模式: 重新插拔后重跑 Flash-All.bat 即可 (它会把 usbnet 改成 1 再重启);
-  单跑 Deploy-Module.bat 修不好, 因为 ecm 由模块固件重启后的组合提供。
+  现在报错会多出两行 — "模块当前" 是模块实际的 USB ID 与 functions, "作者闸门" 直接
+  说明卡在哪一项 (缺 audio=exit 41, 缺 serial=exit 42, 缺 ecm=exit 43)。
+  functions 里没有 ecm 说明模块是 usbnet=0 (RMNET) 模式: 重新插拔后重跑 Flash-All.bat
+  即可 (它会把 usbnet 改成 1 再重启); 单跑 Deploy-Module.bat 修不好, 因为 ecm 由模块
+  固件重启后的组合提供。
+- 收到别人的报错日志时, 先看日志里有没有这两行: 部署器启动时会打印 "部署器构建
+  2026-10-01", Flash-All.bat 第二步会打印 "刷机脚本构建 2026-10-01"。都没有就是旧版
+  分享包, 让对方重新下载最新版再跑; 否则会重复踩已经修掉的老问题。
 - 杀毒软件报 module-agent\deploy-qdc507-agent.py: 该文件只是 Python 脚本,
   会被某些安全软件误判; 请把本目录加入信任区后重新解压。
 - 只想看当前状态不想部署: 直接跑

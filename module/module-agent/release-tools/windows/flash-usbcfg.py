@@ -49,6 +49,9 @@ TARGET_FLAGS = [1, 1, 1, 1, 1, 1, 1]
 # 0=RMNET(传统拨号), 1=ECM(4G 网卡), 2/3=实验模式. usbnet=0 时 gadget 里是 rmnet
 # 而不是 ecm, 作者部署器的组合闸门 (exit 43) 会直接失败.
 TARGET_USBNET = 1
+# 脚本构建日期. 排错时先看输出里的这一行, 用来确认对方拿到的到底是不是新版分享包
+# (同版本号的老包和新包只能靠这行区分).
+BUILD_STAMP = "2026-10-01"
 
 USBCFG_RE = re.compile(
     r'\+QCFG:\s*"usbcfg"\s*,\s*(0x[0-9A-Fa-f]+)\s*,\s*(0x[0-9A-Fa-f]+)'
@@ -362,6 +365,7 @@ def main() -> int:
         log("--write / --restore / --restore-file 只能选一个.")
         return 64
 
+    log(f"刷机脚本构建 {BUILD_STAMP}")
     log("步骤 1/6 定位 QDC507 AT 串口 ...")
     for _ in range(6):
         name, info = find_module(args.port)
