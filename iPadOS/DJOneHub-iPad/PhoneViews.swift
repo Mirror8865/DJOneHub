@@ -1043,7 +1043,8 @@ private struct MessageThreadView: View {
             .background {
                 if #available(iOS 26.0, *) {
                     Capsule()
-                        .fill(AnyShapeStyle(.glass))
+                        .fill(.clear)
+                        .glassEffect(.regular, in: Capsule())
                 } else {
                     Capsule()
                         .fill(Color(uiColor: .secondarySystemBackground))
@@ -1053,11 +1054,15 @@ private struct MessageThreadView: View {
 
     @ViewBuilder
     private func bubbleBackground(isOutgoing: Bool) -> some View {
-        // 原版液态玻璃 API：用系统 .glass 材质填充气泡形状（iOS 26 开发者文档 ShapeStyle.glass），
+        // 原版液态玻璃 API：glassEffect 以气泡形状渲染（iOS 26 开发者文档），
         // 发出消息用 tint 强调色玻璃，收到消息用常规玻璃。
         if #available(iOS 26.0, *) {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(isOutgoing ? AnyShapeStyle(.glass.tint(Color.accentColor)) : AnyShapeStyle(.glass))
+                .fill(.clear)
+                .glassEffect(
+                    isOutgoing ? .regular.tint(Color.accentColor) : .regular,
+                    in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+                )
         } else {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(isOutgoing ? Color.accentColor : Color(uiColor: .secondarySystemBackground))
@@ -1088,11 +1093,12 @@ private struct MessageThreadView: View {
 
     @ViewBuilder
     private var messageInputBackground: some View {
-        // 原版液态玻璃 API：用系统 .glass 材质填充胶囊形状（iOS 26 开发者文档 ShapeStyle.glass），
+        // 原版液态玻璃 API：glassEffect 以胶囊形状渲染（iOS 26 开发者文档），
         // 输入栏两端完整圆角，与系统短信输入栏一致。
         if #available(iOS 26.0, *) {
             Capsule()
-                .fill(AnyShapeStyle(.glass))
+                .fill(.clear)
+                .glassEffect(.regular, in: Capsule())
         } else {
             Capsule()
                 .fill(Color(uiColor: .secondarySystemBackground))
