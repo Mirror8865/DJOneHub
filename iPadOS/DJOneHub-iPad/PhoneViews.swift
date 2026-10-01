@@ -1049,7 +1049,6 @@ private struct MessageThreadView: View {
                         .fill(Color(uiColor: .secondarySystemBackground))
                 }
             }
-        }
     }
 
     @ViewBuilder
