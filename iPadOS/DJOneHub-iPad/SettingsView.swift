@@ -151,7 +151,6 @@ struct SettingsView: View {
             Section("通话支持") { voiceCard }
             Section(L10n.t("网络")) { networkCard }
             Section("功率与温度") { powerCard }
-            Section(L10n.t("定位")) { gpsCard }
             Section(L10n.t("eSIM / 卡片")) { esimCard }
             Section(L10n.t("AT 调试")) { atCard }
             Section("服务控制") { serviceCard }
@@ -182,7 +181,6 @@ struct SettingsView: View {
                 settingsCard("通话支持") { voiceCard }
                 settingsCard(L10n.t("网络")) { networkCard }
                 settingsCard("功率与温度") { powerCard }
-                settingsCard(L10n.t("定位")) { gpsCard }
                 settingsCard(L10n.t("eSIM / 卡片")) { esimCard }
                 settingsCard(L10n.t("AT 调试")) { atCard }
                 settingsCard("服务控制") { serviceCard }
@@ -211,29 +209,32 @@ struct SettingsView: View {
     }
 
     private var statusCard: some View {
-        VStack(spacing: 0) {
-            infoRow(L10n.t("模块代理"), model.isOnline ? L10n.t("在线") : L10n.t("离线"), tint: model.isOnline ? .green : .red)
-            Divider().padding(.vertical, 2)
-            infoRow("App 版本", appVersionText)
-            Divider().padding(.vertical, 2)
-            infoRow("Agent 版本", model.agentVersion ?? (model.isOnline ? "读取中" : "--"))
-            Divider().padding(.vertical, 2)
-            infoRow(L10n.t("运营商"), operatorDisplayName(modem?.operatorName) ?? "--")
-            Divider().padding(.vertical, 2)
-            infoRow(L10n.t("SIM 卡"), modem?.simInserted == true ? "已接入" : "未接入")
-            Divider().padding(.vertical, 2)
-            infoRow(L10n.t("网络模式"), modem?.networkMode ?? "--")
-            Divider().padding(.vertical, 2)
-            infoRow(L10n.t("信号强度"), modem?.signalDBM.map { "\($0) dBm" } ?? "--")
-            Divider().padding(.vertical, 4)
+        VStack(spacing: 12) {
+            // 状态字段两列紧凑网格（标签在上、值在下），消除每行独占的空白。
+            LazyVGrid(
+                columns: [
+                    GridItem(.flexible(), spacing: 12, alignment: .leading),
+                    GridItem(.flexible(), spacing: 12, alignment: .leading)
+                ],
+                spacing: 12
+            ) {
+                statusMetric(L10n.t("模块代理"), model.isOnline ? L10n.t("在线") : L10n.t("离线"),
+                             tint: model.isOnline ? .green : .red)
+                statusMetric("App 版本", appVersionText)
+                statusMetric("Agent 版本", model.agentVersion ?? (model.isOnline ? "读取中" : "--"))
+                statusMetric(L10n.t("运营商"), operatorDisplayName(modem?.operatorName) ?? "--")
+                statusMetric(L10n.t("SIM 卡"), modem?.simInserted == true ? "已接入" : "未接入")
+                statusMetric(L10n.t("网络模式"), modem?.networkMode ?? "--")
+                statusMetric(L10n.t("信号强度"), modem?.signalDBM.map { "\($0) dBm" } ?? "--")
+            }
+            Divider()
             HStack(spacing: 0) {
                 metric(L10n.t("下载速度"), rateText(downloadRate))
-                Divider().frame(height: 40)
+                Divider().frame(height: 36)
                 metric(L10n.t("上传速度"), rateText(uploadRate))
-                Divider().frame(height: 40)
+                Divider().frame(height: 36)
                 metric(L10n.t("本次流量"), byteText(traffic?.sessionTotal))
             }
-            Divider().padding(.vertical, 4)
             Button {
                 Task { await refreshAll() }
             } label: {
@@ -241,8 +242,22 @@ struct SettingsView: View {
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.bordered)
-            .padding(.top, 4)
         }
+    }
+
+    /// 状态字段单元（标签在上、值在下，两列网格用）。
+    private func statusMetric(_ title: String, _ value: String, tint: Color? = nil) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(tint ?? .primary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var appVersionText: String {
@@ -280,6 +295,8 @@ struct SettingsView: View {
     private var notificationCard: some View {
         VStack(spacing: 0) {
             Toggle("锁屏收来电", isOn: $backgroundStandbyEnabled)
+                // 开关保持系统绿色（TabView 的 primary tint 不得染到开关）。
+                .tint(Color(uiColor: .systemGreen))
                 .onChange(of: backgroundStandbyEnabled) { enabled in
                     model.setBackgroundStandbyEnabled(enabled)
                 }
@@ -292,6 +309,7 @@ struct SettingsView: View {
                 .fixedSize(horizontal: false, vertical: true)
             Divider().padding(.vertical, 8)
             Toggle("短信通知", isOn: $smsNotificationsEnabled)
+                .tint(Color(uiColor: .systemGreen))
                 .onChange(of: smsNotificationsEnabled) { enabled in
                     model.setSMSNotificationsEnabled(enabled)
                 }
@@ -302,6 +320,7 @@ struct SettingsView: View {
                 .fixedSize(horizontal: false, vertical: true)
             Divider().padding(.vertical, 8)
             Toggle("灵动岛", isOn: $liveActivityEnabled)
+                .tint(Color(uiColor: .systemGreen))
                 .onChange(of: liveActivityEnabled) { enabled in
                     model.setLiveActivityEnabled(enabled)
                 }
@@ -312,6 +331,7 @@ struct SettingsView: View {
                 .fixedSize(horizontal: false, vertical: true)
             Divider().padding(.vertical, 8)
             Toggle("省电模式", isOn: $lowPowerModeEnabled)
+                .tint(Color(uiColor: .systemGreen))
                 .onChange(of: lowPowerModeEnabled) { enabled in
                     model.setLowPowerModeEnabled(enabled)
                 }
@@ -385,6 +405,7 @@ struct SettingsView: View {
     private var networkCard: some View {
         VStack(spacing: 12) {
             Toggle(L10n.t("允许 4G 上网"), isOn: cellularAllowedBinding)
+                .tint(Color(uiColor: .systemGreen))
                 .disabled(isUpdatingCellularPolicy)
             Text("关闭后禁止\(DeviceContext.displayName)通过模块访问互联网；短信与来电监控不受影响。")
                 .font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
@@ -518,31 +539,7 @@ struct SettingsView: View {
         .frame(maxWidth: .infinity)
     }
 
-    private var gpsCard: some View {
-        VStack(spacing: 10) {
-            Toggle(L10n.t("GPS 定位"), isOn: gpsBinding)
-            if gps?.enabled == true {
-                Divider()
-                infoRow(L10n.t("坐标"), coordinateText)
-                infoRow(L10n.t("卫星"), gps?.lastFix?.satellites ?? "--")
-                infoRow("HDOP", gps?.lastFix?.hdop ?? "--")
-                Button("立即刷新") { Task { await refreshGPSFix() } }
-                    .buttonStyle(.bordered)
-                    .disabled(busy || !GPSRefreshPolicy.shouldRequest(isEnabled: gps?.enabled == true))
-                let message = gpsMessage.isEmpty ? (gps?.lastError ?? "") : gpsMessage
-                if !message.isEmpty {
-                    Text(message)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            } else {
-                Text("默认关闭；开启后仅在本机读取模块定位信息。")
-                    .font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
+    // 定位板块已移除（功能未实现，不保留占位）。
 
     private var esimCard: some View {
         VStack(alignment: .leading, spacing: 10) {

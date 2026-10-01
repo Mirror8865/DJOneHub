@@ -33,7 +33,9 @@
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>用于通过 USB 网络连接 QDC507 模块并控制电话、短信、4G、GPS 与 eSIM。</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>用于通过已连接的 QDC507 模块进行双向语音通话。</string>
+	<string>用于通过已连接的 QDC507 模块进行双向语音通话，以及搜索框的语音输入。</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>用于将语音输入识别为文字，填入联系人或短信搜索框。</string>
 	<key>NSSupportsLiveActivities</key>
 	<true/>
 	<key>UIBackgroundModes</key>
