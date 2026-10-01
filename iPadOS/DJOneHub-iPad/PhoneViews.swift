@@ -725,6 +725,25 @@ struct MessagesView: View {
         }
         .listStyle(.insetGrouped)
         .background(PhoneBackdrop())
+        .toolbar {
+            // 分类三条杠：信息 / 未知发件人 / 垃圾信息 / 最近删除（iMessage 筛选位于列表底部）。
+            if !isSelecting {
+                ToolbarItem(placement: .bottomBar) {
+                    Menu {
+                        Picker(selection: $category) {
+                            ForEach(MessagesCategory.allCases) { category in
+                                Text(L10n.t(category.rawValue)).tag(category)
+                            }
+                        } label: {
+                            Text(L10n.t("筛选"))
+                        }
+                    } label: {
+                        Image(systemName: "line.3.horizontal.decrease")
+                            .foregroundStyle(.primary)
+                    }
+                }
+            }
+        }
     }
 
     @ViewBuilder
@@ -782,7 +801,7 @@ struct MessagesView: View {
                 .foregroundStyle(.red)
             }
         } else {
-            // 编辑按钮：选择信息 / 编辑置顶 / 设置姓名与照片。
+            // 编辑按钮：选择信息 / 编辑置顶 / 设置姓名与照片（iMessage 编辑菜单）。
             ToolbarItem(placement: .topBarLeading) {
                 Menu {
                     Button {
@@ -806,35 +825,16 @@ struct MessagesView: View {
                     }
                 } label: {
                     Text(L10n.t("编辑"))
-                }
-            }
-            // 分类三条杠：信息 / 未知发件人 / 垃圾信息 / 最近删除。
-            ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    Picker(selection: $category) {
-                        ForEach(MessagesCategory.allCases) { category in
-                            Text(L10n.t(category.rawValue)).tag(category)
-                        }
-                    } label: {
-                        Text(L10n.t("筛选"))
-                    }
-                } label: {
-                    Image(systemName: "line.3.horizontal.decrease")
                         .foregroundStyle(.primary)
                 }
             }
+            // 新建信息：右上角（iMessage 位置，无设置/分类按钮在顶栏）。
             ToolbarItem(placement: .topBarTrailing) {
                 Button { showingComposer = true } label: {
                     Image(systemName: "square.and.pencil")
                         .foregroundStyle(.primary)
                 }
-            }
-            ToolbarItem(placement: .topBarTrailing) {
-                Button(action: onSettings) {
-                    Image(systemName: "gearshape")
-                        .foregroundStyle(.primary)
-                }
-                .accessibilityLabel(L10n.t("设置"))
+                .accessibilityLabel(L10n.t("新信息"))
             }
         }
     }
@@ -912,6 +912,14 @@ private struct MessageThreadView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // iMessage 式头部信息：消息流上方居中显示最后消息时间（如“星期六 22:11”）。
+            if let last = messages.last {
+                Text(headerSubtitle(last.timestamp))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 8)
+                    .padding(.bottom, 2)
+            }
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 9) {
@@ -1026,6 +1034,11 @@ private struct MessageThreadView: View {
     /// iMessage 风格时间戳：跟随系统本地化（如中文“上午 9:41”、英文“9:41 AM”）。
     private func messageTimestamp(_ date: Date) -> String {
         date.formatted(date: .omitted, time: .shortened)
+    }
+
+    /// iMessage 式头部时间：如中文“星期六 22:11”、英文“Sat 22:11”。
+    private func headerSubtitle(_ date: Date) -> String {
+        date.formatted(.dateTime.weekday(.abbreviated).hour().minute())
     }
 
     @ViewBuilder
