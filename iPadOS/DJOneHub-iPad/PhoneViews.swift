@@ -1905,8 +1905,10 @@ struct ContactsView: View {
     @State private var search = ""
     @State private var selection: String?
     @State private var showNewContact = false
+    @State private var showMyCardPicker = false
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
-    @State private var meIdentifier: String?
+    // iOS 公开 API 无法读取系统“我的名片”（macOS 专有），改为用户手动指定一个联系人作为我的名片。
+    @AppStorage("djonehub.my-card-id") private var myCardId = ""
 
     private let cnStore = CNContactStore()
 
@@ -1923,13 +1925,6 @@ struct ContactsView: View {
             withIdentifier: identifier,
             keysToFetch: [CNContactViewController.descriptorForRequiredKeys()]
         )
-    }
-
-    private func loadMeIdentifier() {
-        guard meIdentifier == nil else { return }
-        meIdentifier = try? cnStore.unifiedMeContact(
-            withKeysToFetch: [CNContactIdentifierKey as CNKeyDescriptor]
-        ).identifier
     }
 
     var body: some View {
@@ -1956,7 +1951,6 @@ struct ContactsView: View {
             }
             .task {
                 await model.contacts.loadIfNeeded()
-                loadMeIdentifier()
             }
         } detail: {
             NavigationStack {
@@ -1976,6 +1970,13 @@ struct ContactsView: View {
             Task { await model.contacts.requestAccessAndLoad() }
         }) {
             ContactNativeNew(contactStore: cnStore)
+        }
+        .sheet(isPresented: $showMyCardPicker) {
+            ExistingContactPicker { identifier in
+                myCardId = identifier
+                showMyCardPicker = false
+            }
+            .presentationSizingIfAvailable()
         }
     }
 
@@ -1998,13 +1999,27 @@ struct ContactsView: View {
             .listRowInsets(EdgeInsets(top: 4, leading: 10, bottom: 4, trailing: 10))
             .listRowBackground(Color.clear)
 
-            // 我的名片。
-            if let meIdentifier, let me = model.contacts.contacts.first(where: { $0.id == meIdentifier }) {
+            // 我的名片（用户手动指定；未指定时显示设置入口）。
+            if let me = model.contacts.contacts.first(where: { $0.id == myCardId }) {
                 contactLink(me, isMe: true)
+            } else {
+                Button { showMyCardPicker = true } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "person.crop.circle.badge.plus")
+                            .font(.system(size: 22))
+                            .foregroundStyle(.secondary)
+                        Text(L10n.t("设置我的名片"))
+                            .font(.body)
+                            .foregroundStyle(.primary)
+                    }
+                }
+                .buttonStyle(.plain)
+                .listRowInsets(EdgeInsets(top: 0, leading: 10, bottom: 0, trailing: 10))
+                .listRowBackground(Color.clear)
             }
 
             // 联系人列表（我的名片不重复显示）。
-            ForEach(filtered.filter { $0.id != meIdentifier }) { contact in
+            ForEach(filtered.filter { $0.id != myCardId }) { contact in
                 contactLink(contact, isMe: false)
             }
         }
