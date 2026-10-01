@@ -185,6 +185,7 @@ struct SettingsView: View {
     }
 
     /// 所有设置卡片统一为独立玻璃面板：iOS 26 用系统原生液态玻璃，旧系统回退浅色圆角卡。
+    @ViewBuilder
     private var cardBackground: some View {
         if #available(iOS 26.0, *) {
             RoundedRectangle(cornerRadius: 22, style: .continuous)
