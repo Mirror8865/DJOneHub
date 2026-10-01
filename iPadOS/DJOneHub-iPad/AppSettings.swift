@@ -104,6 +104,7 @@ enum L10n {
         "完成": "Done", "搜索": "Search", "删除所选会话": "Delete Selected Conversations",
         "暂无未知发件人": "No Unknown Senders", "暂无垃圾信息": "No Junk",
         "暂无最近删除": "No Recently Deleted", "选择信息开始聊天": "Select a conversation to start chatting",
-        "姓名": "Name", "选择照片": "Choose Photo", "清除照片": "Remove Photo"
+        "姓名": "Name", "选择照片": "Choose Photo", "清除照片": "Remove Photo",
+        "今天": "Today", "昨天": "Yesterday"
     ]
 }

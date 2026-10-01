@@ -915,7 +915,15 @@ private struct MessageThreadView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 9) {
-                        ForEach(messages) { message in
+                        ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
+                            if let header = dateHeader(for: message.timestamp, previous: index > 0 ? messages[index - 1].timestamp : nil) {
+                                // iMessage 风格日期分隔头：跨天时居中显示“今天 / 昨天 / 具体日期”。
+                                Text(header)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 6)
+                            }
                             HStack {
                                 if message.isOutgoing { Spacer(minLength: 48) }
                                 VStack(alignment: message.isOutgoing ? .trailing : .leading, spacing: 3) {
@@ -927,11 +935,12 @@ private struct MessageThreadView: View {
                                         }
                                         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                                         .foregroundStyle(message.isOutgoing ? .white : .primary)
-                                    if message.isOutgoing {
-                                        Text(L10n.t("已发送"))
-                                            .font(.caption2)
-                                            .foregroundStyle(.secondary)
-                                    }
+                                    // iMessage 风格时间戳：气泡下方小字，发出消息显示“已发送 · 时间”，收到消息只显示时间。
+                                    Text(message.isOutgoing
+                                        ? "\(L10n.t("已发送")) · \(messageTimestamp(message.timestamp))"
+                                        : messageTimestamp(message.timestamp))
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
                                 }
                                 if !message.isOutgoing { Spacer(minLength: 48) }
                             }
@@ -1000,6 +1009,23 @@ private struct MessageThreadView: View {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(isOutgoing ? Color.accentColor : Color(uiColor: .secondarySystemBackground))
         }
+    }
+
+    /// iMessage 风格日期分隔头：与上一条消息不同天时返回分隔文案（今天/昨天/本地化日期），否则返回 nil。
+    private func dateHeader(for date: Date, previous: Date?) -> String? {
+        let calendar = Calendar.current
+        if let previous, calendar.isDate(date, inSameDayAs: previous) { return nil }
+        if calendar.isDateInToday(date) { return L10n.t("今天") }
+        if calendar.isDateInYesterday(date) { return L10n.t("昨天") }
+        let formatter = DateFormatter()
+        formatter.locale = Locale.current
+        formatter.setLocalizedDateFormatFromTemplate("yMMMMdEEEE")
+        return formatter.string(from: date)
+    }
+
+    /// iMessage 风格时间戳：跟随系统本地化（如中文“上午 9:41”、英文“9:41 AM”）。
+    private func messageTimestamp(_ date: Date) -> String {
+        date.formatted(date: .omitted, time: .shortened)
     }
 
     @ViewBuilder
