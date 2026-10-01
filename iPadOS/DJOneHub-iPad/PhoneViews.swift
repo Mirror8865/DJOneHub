@@ -650,7 +650,6 @@ struct MessagesView: View {
     var body: some View {
         NavigationSplitView {
             sidebar
-                .navigationTitle(L10n.t("短信"))
                 .searchable(text: $search, prompt: L10n.t("搜索"))
                 .toolbar { sidebarToolbar }
                 .task { await model.refreshMessages(silently: true) }
@@ -723,27 +722,8 @@ struct MessagesView: View {
                 }
             }
         }
-        .listStyle(.insetGrouped)
+        .listStyle(.plain)
         .background(PhoneBackdrop())
-        .toolbar {
-            // 分类三条杠：信息 / 未知发件人 / 垃圾信息 / 最近删除（iMessage 筛选位于列表底部）。
-            if !isSelecting {
-                ToolbarItem(placement: .bottomBar) {
-                    Menu {
-                        Picker(selection: $category) {
-                            ForEach(MessagesCategory.allCases) { category in
-                                Text(L10n.t(category.rawValue)).tag(category)
-                            }
-                        } label: {
-                            Text(L10n.t("筛选"))
-                        }
-                    } label: {
-                        Image(systemName: "line.3.horizontal.decrease")
-                            .foregroundStyle(.primary)
-                    }
-                }
-            }
-        }
     }
 
     @ViewBuilder
@@ -828,13 +808,29 @@ struct MessagesView: View {
                         .foregroundStyle(.primary)
                 }
             }
-            // 新建信息：右上角（iMessage 位置，无设置/分类按钮在顶栏）。
+            // 新建信息：右上角（iMessage 位置）。
             ToolbarItem(placement: .topBarTrailing) {
                 Button { showingComposer = true } label: {
                     Image(systemName: "square.and.pencil")
                         .foregroundStyle(.primary)
                 }
                 .accessibilityLabel(L10n.t("新信息"))
+            }
+            // 分类三条杠：信息 / 未知发件人 / 垃圾信息 / 最近删除（iMessage 筛选按钮）。
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Picker(selection: $category) {
+                        ForEach(MessagesCategory.allCases) { category in
+                            Text(L10n.t(category.rawValue)).tag(category)
+                        }
+                    } label: {
+                        Text(L10n.t("筛选"))
+                    }
+                } label: {
+                    Image(systemName: "line.3.horizontal.decrease")
+                        .foregroundStyle(.primary)
+                }
+                .accessibilityLabel(L10n.t("筛选"))
             }
         }
     }
@@ -911,6 +907,26 @@ private struct MessageThreadView: View {
     @State private var reply = ""
 
     var body: some View {
+        Group {
+            if #available(iOS 26.0, *) {
+                // 液态玻璃必须在 GlassEffectContainer 内才渲染真实玻璃材质（iOS 26 官方文档），
+                // 气泡、输入栏、头部卡片都置于同一容器中，相互融合，与 iMessage 一致。
+                GlassEffectContainer { threadContent }
+            } else {
+                threadContent
+            }
+        }
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            // 正中间上方：iMessage 会话头部 —— 头像在上、名称在头像下方并与之部分重合，
+            // 整组以液态玻璃卡片作为背景。
+            ToolbarItem(placement: .principal) {
+                threadHeader
+            }
+        }
+    }
+
+    private var threadContent: some View {
         VStack(spacing: 0) {
             // iMessage 式头部信息：消息流上方居中显示最后消息时间（如“星期六 22:11”）。
             if let last = messages.last {
@@ -989,17 +1005,27 @@ private struct MessageThreadView: View {
             .padding(.horizontal)
             .padding(.vertical, 8)
         }
-        .navigationTitle(displayName)
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            // 正中间上方：头像 + 名称（iMessage 会话头部）。
-            ToolbarItem(placement: .principal) {
-                HStack(spacing: 8) {
-                    InitialAvatar(name: displayName, photoData: photoData, size: 32)
-                    Text(displayName)
-                        .font(.headline)
-                        .lineLimit(1)
-                }
+    }
+
+    /// iMessage 式会话头部：头像在上、名称在头像下方并与之部分重合（负间距），整组为液态玻璃卡片。
+    private var threadHeader: some View {
+        VStack(spacing: -14) {
+            InitialAvatar(name: displayName, photoData: photoData, size: 56)
+            Text(displayName)
+                .font(.subheadline.weight(.semibold))
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 10)
+        .padding(.bottom, 16)
+        .background {
+            if #available(iOS 26.0, *) {
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(.clear)
+                    .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            } else {
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(Color(uiColor: .secondarySystemBackground))
             }
         }
     }
