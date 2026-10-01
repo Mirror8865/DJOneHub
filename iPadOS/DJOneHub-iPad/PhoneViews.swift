@@ -1420,7 +1420,7 @@ private enum ContactWriter {
                 CNLabeledValue(label: CNLabelPhoneNumberMain, value: CNPhoneNumber(stringValue: phone))
             ]
             let request = CNSaveRequest()
-            request.add(contact)
+            request.add(contact, toContainerWithIdentifier: nil)
             try store.execute(request)
             return true
         } catch {
