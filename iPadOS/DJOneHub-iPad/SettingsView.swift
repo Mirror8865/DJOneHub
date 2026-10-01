@@ -99,7 +99,8 @@ struct SettingsView: View {
     @State private var showingShutdownConfirmation = false
     @State private var showingMacModeConfirmation = false
     @State private var busy = false
-    @State private var selectedSection: SettingsSection = .status
+    // List(selection:) 在 iOS 上要求可选绑定，因此这里用可选值，读取时回退到“状态”。
+    @State private var selectedSection: SettingsSection? = .status
     let onClose: (() -> Void)?
 
     init(onClose: (() -> Void)? = nil) {
@@ -222,7 +223,7 @@ struct SettingsView: View {
         } detail: {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    settingsCard("") { sectionContent(selectedSection) }
+                    settingsCard("") { sectionContent(selectedSection ?? .status) }
                     if !actionMessage.isEmpty {
                         settingsCard("") {
                             Text(actionMessage).font(.footnote).foregroundStyle(.secondary)
@@ -234,7 +235,7 @@ struct SettingsView: View {
                 .padding(20)
             }
             .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
-            .navigationTitle(L10n.t(selectedSection.title))
+            .navigationTitle(L10n.t((selectedSection ?? .status).title))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { settingsToolbar }
         }
