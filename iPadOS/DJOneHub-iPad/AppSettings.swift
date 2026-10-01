@@ -97,6 +97,13 @@ enum L10n {
         "发送 AT": "Send AT", "外观": "Appearance", "显示模式": "Display Mode", "语言": "Language", "跟随系统": "Follow System",
         "浅色": "Light", "深色": "Dark", "模块代理": "Module Agent", "在线": "Online", "离线": "Offline",
         "未接": "Missed", "呼入": "Incoming", "呼出": "Outgoing", "处理中": "Working", "保存": "Save",
-        "删除": "Delete", "切换": "Switch", "重命名": "Rename", "错误": "Error"
+        "删除": "Delete", "切换": "Switch", "重命名": "Rename", "错误": "Error",
+        "编辑": "Edit", "筛选": "Filter", "信息": "Messages", "未知发件人": "Unknown Senders",
+        "垃圾信息": "Junk", "最近删除": "Recently Deleted", "选择信息": "Select Messages",
+        "编辑置顶": "Edit Pins", "设置姓名与照片": "Edit Name & Photo", "置顶": "Pinned",
+        "完成": "Done", "搜索": "Search", "删除所选会话": "Delete Selected Conversations",
+        "暂无未知发件人": "No Unknown Senders", "暂无垃圾信息": "No Junk",
+        "暂无最近删除": "No Recently Deleted", "选择信息开始聊天": "Select a conversation to start chatting",
+        "姓名": "Name", "选择照片": "Choose Photo", "清除照片": "Remove Photo"
     ]
 }

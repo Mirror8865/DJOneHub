@@ -1,6 +1,6 @@
 import SwiftUI
 import UIKit
-import UIKit
+import PhotosUI
 
 /// 仅在当天显示具体时分；更早的记录显示日期，避免长列表全部挤成相同的时间。
 enum RecentCallTimeFormatter {
@@ -535,111 +535,379 @@ struct RecentsView: View {
 
 // MARK: - 短信
 
+/// iMessage 风格分类（与信息 App 的“三条杠”筛选菜单一致）。
+private enum MessagesCategory: String, CaseIterable, Identifiable {
+    case inbox = "信息"
+    case unknown = "未知发件人"
+    case junk = "垃圾信息"
+    case recentlyDeleted = "最近删除"
+
+    var id: String { rawValue }
+
+    var emptyTitle: String {
+        switch self {
+        case .inbox: return "暂无短信"
+        case .unknown: return "暂无未知发件人"
+        case .junk: return "暂无垃圾信息"
+        case .recentlyDeleted: return "暂无最近删除"
+        }
+    }
+}
+
+/// 会话列表 + 聊天详情：iPad 上用 NavigationSplitView 双栏呈现（iMessage 布局），
+/// 左侧为搜索框 + 编辑菜单 + 分类三条杠的会话列表，右侧为具体聊天界面。
 struct MessagesView: View {
     @EnvironmentObject private var model: AppModel
     @Binding var pendingRecipient: String?
     let onSettings: () -> Void
+
     @State private var showingComposer = false
     @State private var showingClearConfirmation = false
+    @State private var showingDeleteSelectionConfirmation = false
+    @State private var search = ""
+    @State private var category: MessagesCategory = .inbox
+    @State private var selection: String?
+    @State private var isSelecting = false
+    @State private var selectedSenders = Set<String>()
+    @State private var showingPinEditor = false
+    @State private var showingNamePhotoEditor = false
+    @AppStorage("djonehub.pinned-senders") private var pinnedSendersData = ""
+    @AppStorage("djonehub.display-name-overrides") private var displayNameOverridesData = ""
+    @AppStorage("djonehub.photo-overrides") private var photoOverridesData = ""
 
-    private var conversations: [(sender: String, messages: [SMSMessage])] {
+    private var allConversations: [(sender: String, messages: [SMSMessage])] {
         Dictionary(grouping: model.messages, by: \.sender)
             .map { ($0.key, $0.value.sorted { $0.timestamp < $1.timestamp }) }
             .sorted { ($0.messages.last?.timestamp ?? .distantPast) > ($1.messages.last?.timestamp ?? .distantPast) }
     }
 
+    /// 分类 + 搜索过滤后的会话（垃圾信息/最近删除模块暂不追踪，按 iMessage 显示为空状态）。
+    private var filteredConversations: [(sender: String, messages: [SMSMessage])] {
+        guard category != .junk, category != .recentlyDeleted else { return [] }
+        var list = allConversations
+        if !search.isEmpty {
+            list = list.filter { conversation in
+                let name = displayName(for: conversation.sender)
+                return name.localizedCaseInsensitiveContains(search)
+                    || conversation.sender.localizedCaseInsensitiveContains(search)
+            }
+        }
+        if category == .unknown {
+            list = list.filter { model.contacts.contact(for: $0.sender) == nil }
+        }
+        return list
+    }
+
+    private var pinnedConversations: [(sender: String, messages: [SMSMessage])] {
+        filteredConversations.filter { isPinned($0.sender) }
+    }
+
+    private var unpinnedConversations: [(sender: String, messages: [SMSMessage])] {
+        filteredConversations.filter { !isPinned($0.sender) }
+    }
+
+    private var pinnedSenders: Set<String> {
+        Set((try? JSONDecoder().decode([String].self, from: Data(pinnedSendersData.utf8))) ?? [])
+    }
+
+    private var displayNameOverrides: [String: String] {
+        (try? JSONDecoder().decode([String: String].self, from: Data(displayNameOverridesData.utf8))) ?? [:]
+    }
+
+    private var photoOverrides: [String: String] {
+        (try? JSONDecoder().decode([String: String].self, from: Data(photoOverridesData.utf8))) ?? [:]
+    }
+
+    private func displayName(for sender: String) -> String {
+        if let override = displayNameOverrides[sender], !override.isEmpty { return override }
+        return model.contacts.displayName(for: sender)
+    }
+
+    private func photoData(for sender: String) -> Data? {
+        guard let base64 = photoOverrides[sender], let data = Data(base64Encoded: base64) else { return nil }
+        return data
+    }
+
+    private func isPinned(_ sender: String) -> Bool { pinnedSenders.contains(sender) }
+
+    private func togglePin(_ sender: String) {
+        var pins = pinnedSenders
+        if pins.contains(sender) { pins.remove(sender) } else { pins.insert(sender) }
+        if let data = try? JSONEncoder().encode(Array(pins)) {
+            pinnedSendersData = String(decoding: data, as: UTF8.self)
+        }
+    }
+
+    private func deleteSelectedConversations() {
+        model.messages.removeAll { selectedSenders.contains($0.sender) }
+        if let selection, !model.messages.contains(where: { $0.sender == selection }) {
+            self.selection = nil
+        }
+        selectedSenders.removeAll()
+        isSelecting = false
+    }
+
     var body: some View {
-        NavigationStack {
-            List {
-                if conversations.isEmpty {
-                    EmptyStateView(title: L10n.t("暂无短信"), systemImage: "message")
-                        .listRowBackground(Color.clear)
-                } else {
-                    ForEach(conversations, id: \.sender) { conversation in
-                        NavigationLink {
-                            MessageThreadView(sender: conversation.sender, messages: conversation.messages)
-                        } label: {
-                            MessageConversationRow(sender: conversation.sender, messages: conversation.messages)
+        NavigationSplitView {
+            sidebar
+                .navigationTitle(L10n.t("短信"))
+                .searchable(text: $search, prompt: L10n.t("搜索"))
+                .toolbar { sidebarToolbar }
+                .task { await model.refreshMessages(silently: true) }
+                .onChange(of: pendingRecipient) { recipient in
+                    if recipient != nil { showingComposer = true }
+                }
+                .sheet(isPresented: $showingComposer, onDismiss: { pendingRecipient = nil }) {
+                    MessageComposer(initialRecipient: pendingRecipient ?? "")
+                        .presentationDetents([.medium, .large])
+                        .presentationDragIndicator(.visible)
+                }
+                .sheet(isPresented: $showingPinEditor) { pinEditorSheet }
+                .sheet(isPresented: $showingNamePhotoEditor) {
+                    if let sender = selection ?? allConversations.first?.sender {
+                        NamePhotoEditor(
+                            sender: sender,
+                            displayNameOverrides: $displayNameOverridesData,
+                            photoOverrides: $photoOverridesData
+                        )
+                    }
+                }
+                .confirmationDialog(L10n.t("删除所选会话"), isPresented: $showingDeleteSelectionConfirmation, titleVisibility: .visible) {
+                    Button(L10n.t("删除"), role: .destructive) { deleteSelectedConversations() }
+                    Button(L10n.t("取消"), role: .cancel) {}
+                } message: {
+                    Text("将删除选中的 \(selectedSenders.count) 条会话及其短信记录。")
+                }
+                .confirmationDialog(L10n.t("清空全部短信"), isPresented: $showingClearConfirmation, titleVisibility: .visible) {
+                    Button(L10n.t("删除"), role: .destructive) {
+                        Task {
+                            try? await model.api.clearModuleSMS()
+                            model.clearLocalMessages()
                         }
                     }
+                    Button(L10n.t("取消"), role: .cancel) {}
+                } message: {
+                    Text("这会删除本机短信以及尚未交付的模块短信，无法恢复。")
                 }
-            }
-            .listStyle(.insetGrouped)
-            .background(PhoneBackdrop())
-            .navigationTitle(L10n.t("短信"))
-            .settingsToolbarButton(action: onSettings)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        Button { Task { await model.refreshMessages() } } label: {
-                            Label(L10n.t("刷新"), systemImage: "arrow.clockwise")
-                        }
-                        Button(role: .destructive) { showingClearConfirmation = true } label: {
-                            Label(L10n.t("清空全部短信"), systemImage: "trash")
-                        }
-                    } label: {
-                        // 跟随系统内容色：浅色黑色、深色白色。
-                        Image(systemName: "ellipsis.circle")
-                            .foregroundStyle(.primary)
-                    }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { showingComposer = true } label: {
-                        Image(systemName: "square.and.pencil")
-                            .foregroundStyle(.primary)
-                    }
-                }
-            }
-            .task {
-                await model.refreshMessages(silently: true)
-            }
-            .onChange(of: pendingRecipient) { recipient in
-                if recipient != nil { showingComposer = true }
-            }
-            .sheet(isPresented: $showingComposer, onDismiss: { pendingRecipient = nil }) {
-                MessageComposer(initialRecipient: pendingRecipient ?? "")
-                    .presentationDetents([.medium, .large])
-                    .presentationDragIndicator(.visible)
-            }
-            .confirmationDialog(L10n.t("清空全部短信"), isPresented: $showingClearConfirmation, titleVisibility: .visible) {
-                Button(L10n.t("删除"), role: .destructive) {
-                    Task {
-                        try? await model.api.clearModuleSMS()
-                        model.clearLocalMessages()
-                    }
-                }
-                Button(L10n.t("取消"), role: .cancel) {}
-            } message: {
-                Text("这会删除本机短信以及尚未交付的模块短信，无法恢复。")
+        } detail: {
+            if let sender = selection, let conversation = allConversations.first(where: { $0.sender == sender }) {
+                MessageThreadView(
+                    sender: sender,
+                    messages: conversation.messages,
+                    displayName: displayName(for: sender),
+                    photoData: photoData(for: sender)
+                )
+            } else {
+                EmptyStateView(title: L10n.t("选择信息开始聊天"), systemImage: "message")
             }
         }
     }
 
+    private var sidebar: some View {
+        List(selection: $selection) {
+            if filteredConversations.isEmpty {
+                EmptyStateView(title: L10n.t(category.emptyTitle), systemImage: category == .inbox ? "message" : "tray")
+                    .listRowBackground(Color.clear)
+            } else {
+                if !pinnedConversations.isEmpty {
+                    Section(L10n.t("置顶")) {
+                        ForEach(pinnedConversations, id: \.sender) { conversation in
+                            conversationRow(conversation)
+                        }
+                    }
+                }
+                Section {
+                    ForEach(unpinnedConversations, id: \.sender) { conversation in
+                        conversationRow(conversation)
+                    }
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .background(PhoneBackdrop())
+    }
+
+    @ViewBuilder
+    private func conversationRow(_ conversation: (sender: String, messages: [SMSMessage])) -> some View {
+        Group {
+            if isSelecting {
+                Button {
+                    if selectedSenders.contains(conversation.sender) {
+                        selectedSenders.remove(conversation.sender)
+                    } else {
+                        selectedSenders.insert(conversation.sender)
+                    }
+                } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: selectedSenders.contains(conversation.sender) ? "checkmark.circle.fill" : "circle")
+                            .font(.title3)
+                            .foregroundStyle(selectedSenders.contains(conversation.sender) ? Color.accentColor : .secondary)
+                        MessageConversationRow(
+                            sender: conversation.sender,
+                            messages: conversation.messages,
+                            displayName: displayName(for: conversation.sender),
+                            photoData: photoData(for: conversation.sender),
+                            isPinned: isPinned(conversation.sender)
+                        )
+                    }
+                }
+                .buttonStyle(.plain)
+            } else {
+                MessageConversationRow(
+                    sender: conversation.sender,
+                    messages: conversation.messages,
+                    displayName: displayName(for: conversation.sender),
+                    photoData: photoData(for: conversation.sender),
+                    isPinned: isPinned(conversation.sender)
+                )
+            }
+        }
+        .tag(conversation.sender)
+    }
+
+    @ToolbarContentBuilder
+    private var sidebarToolbar: some ToolbarContent {
+        if isSelecting {
+            ToolbarItem(placement: .topBarLeading) {
+                Button(L10n.t("取消")) {
+                    isSelecting = false
+                    selectedSenders.removeAll()
+                }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button(role: .destructive) { showingDeleteSelectionConfirmation = true } label: {
+                    Text(selectedSenders.isEmpty ? L10n.t("删除") : "\(L10n.t("删除")) (\(selectedSenders.count))")
+                }
+                .disabled(selectedSenders.isEmpty)
+                .foregroundStyle(.red)
+            }
+        } else {
+            // 编辑按钮：选择信息 / 编辑置顶 / 设置姓名与照片。
+            ToolbarItem(placement: .topBarLeading) {
+                Menu {
+                    Button {
+                        isSelecting = true
+                        selectedSenders.removeAll()
+                    } label: {
+                        Label(L10n.t("选择信息"), systemImage: "checkmark.circle")
+                    }
+                    Button { showingPinEditor = true } label: {
+                        Label(L10n.t("编辑置顶"), systemImage: "pin")
+                    }
+                    Button { showingNamePhotoEditor = true } label: {
+                        Label(L10n.t("设置姓名与照片"), systemImage: "person.crop.circle.badge.plus")
+                    }
+                    Divider()
+                    Button { Task { await model.refreshMessages() } } label: {
+                        Label(L10n.t("刷新"), systemImage: "arrow.clockwise")
+                    }
+                    Button(role: .destructive) { showingClearConfirmation = true } label: {
+                        Label(L10n.t("清空全部短信"), systemImage: "trash")
+                    }
+                } label: {
+                    Text(L10n.t("编辑"))
+                }
+            }
+            // 分类三条杠：信息 / 未知发件人 / 垃圾信息 / 最近删除。
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Picker(selection: $category) {
+                        ForEach(MessagesCategory.allCases) { category in
+                            Text(L10n.t(category.rawValue)).tag(category)
+                        }
+                    } label: {
+                        Text(L10n.t("筛选"))
+                    }
+                } label: {
+                    Image(systemName: "line.3.horizontal.decrease")
+                        .foregroundStyle(.primary)
+                }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { showingComposer = true } label: {
+                    Image(systemName: "square.and.pencil")
+                        .foregroundStyle(.primary)
+                }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button(action: onSettings) {
+                    Image(systemName: "gearshape")
+                        .foregroundStyle(.primary)
+                }
+                .accessibilityLabel(L10n.t("设置"))
+            }
+        }
+    }
+
+    private var pinEditorSheet: some View {
+        NavigationStack {
+            List {
+                ForEach(allConversations, id: \.sender) { conversation in
+                    Button { togglePin(conversation.sender) } label: {
+                        HStack(spacing: 12) {
+                            InitialAvatar(name: displayName(for: conversation.sender), photoData: photoData(for: conversation.sender), size: 40)
+                            Text(displayName(for: conversation.sender))
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
+                            Spacer()
+                            Image(systemName: isPinned(conversation.sender) ? "pin.fill" : "pin")
+                                .foregroundStyle(isPinned(conversation.sender) ? Color.accentColor : .secondary)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .navigationTitle(L10n.t("编辑置顶"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(L10n.t("完成")) { showingPinEditor = false }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+    }
+
     private struct MessageConversationRow: View {
-        @EnvironmentObject private var model: AppModel
         let sender: String
         let messages: [SMSMessage]
+        let displayName: String
+        let photoData: Data?
+        let isPinned: Bool
 
         var body: some View {
             HStack(spacing: 12) {
-                InitialAvatar(name: model.contacts.displayName(for: sender))
+                InitialAvatar(name: displayName, photoData: photoData)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(model.contacts.displayName(for: sender)).font(.body.weight(.semibold))
-                    Text(messages.last?.content ?? "").font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+                    HStack(spacing: 5) {
+                        Text(displayName).font(.body.weight(.semibold)).lineLimit(1)
+                        if isPinned {
+                            Image(systemName: "pin.fill").font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
+                    Text(messages.last?.content ?? "")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
                 }
                 Spacer()
                 Text(messages.last?.timestamp ?? .now, style: .time)
-                    .font(.caption2).foregroundStyle(.secondary)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
             .padding(.vertical, 4)
         }
     }
 }
 
+/// 聊天详情：正中间上方显示头像与名称，聊天气泡使用原生液态玻璃（iOS 26 文档 glassEffect）。
 private struct MessageThreadView: View {
     @EnvironmentObject private var model: AppModel
     let sender: String
     let messages: [SMSMessage]
+    let displayName: String
+    let photoData: Data?
     @State private var reply = ""
 
     var body: some View {
@@ -654,10 +922,7 @@ private struct MessageThreadView: View {
                                     Text(message.content)
                                         .padding(.horizontal, 14)
                                         .padding(.vertical, 9)
-                                        .background(
-                                            message.isOutgoing ? Color.accentColor : Color(uiColor: .secondarySystemBackground),
-                                            in: RoundedRectangle(cornerRadius: 18)
-                                        )
+                                        .background(bubbleBackground(isOutgoing: message.isOutgoing), in: RoundedRectangle(cornerRadius: 18))
                                         .foregroundStyle(message.isOutgoing ? .white : .primary)
                                     if message.isOutgoing {
                                         Text(L10n.t("已发送"))
@@ -704,8 +969,34 @@ private struct MessageThreadView: View {
             .padding(.horizontal)
             .padding(.vertical, 8)
         }
-        .navigationTitle(model.contacts.displayName(for: sender))
+        .navigationTitle(displayName)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            // 正中间上方：头像 + 名称（iMessage 会话头部）。
+            ToolbarItem(placement: .principal) {
+                HStack(spacing: 8) {
+                    InitialAvatar(name: displayName, photoData: photoData, size: 32)
+                    Text(displayName)
+                        .font(.headline)
+                        .lineLimit(1)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func bubbleBackground(isOutgoing: Bool) -> some View {
+        if #available(iOS 26.0, *) {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(.clear)
+                .glassEffect(
+                    isOutgoing ? .regular.tint(Color.accentColor) : .regular,
+                    in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+                )
+        } else {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(isOutgoing ? Color.accentColor : Color(uiColor: .secondarySystemBackground))
+        }
     }
 
     @ViewBuilder
@@ -718,6 +1009,92 @@ private struct MessageThreadView: View {
         } else {
             Capsule()
                 .fill(Color(uiColor: .secondarySystemBackground))
+        }
+    }
+}
+
+/// “设置姓名与照片”：为会话覆盖显示姓名与头像（仅本应用内生效）。
+private struct NamePhotoEditor: View {
+    @Environment(\.dismiss) private var dismiss
+    let sender: String
+    @Binding var displayNameOverrides: String
+    @Binding var photoOverrides: String
+    @State private var name: String
+    @State private var selectedPhotoItem: PhotosPickerItem?
+    @State private var photoData: Data? = nil
+
+    init(sender: String, displayNameOverrides: Binding<String>, photoOverrides: Binding<String>) {
+        self.sender = sender
+        _displayNameOverrides = displayNameOverrides
+        _photoOverrides = photoOverrides
+        let names = (try? JSONDecoder().decode([String: String].self, from: Data(displayNameOverrides.wrappedValue.utf8))) ?? [:]
+        _name = State(initialValue: names[sender] ?? "")
+        let photos = (try? JSONDecoder().decode([String: String].self, from: Data(photoOverrides.wrappedValue.utf8))) ?? [:]
+        if let base64 = photos[sender], let data = Data(base64Encoded: base64) {
+            _photoData = State(initialValue: data)
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    HStack(spacing: 16) {
+                        InitialAvatar(name: name.isEmpty ? sender : name, photoData: photoData, size: 60)
+                        PhotosPicker(selection: $selectedPhotoItem, matching: .images) {
+                            Label(L10n.t("选择照片"), systemImage: "photo")
+                        }
+                        if photoData != nil {
+                            Button(L10n.t("清除照片")) { photoData = nil }
+                        }
+                    }
+                }
+                Section {
+                    TextField(L10n.t("姓名"), text: $name)
+                } footer: {
+                    Text("仅在本应用中显示，会覆盖通讯录里的名称。")
+                }
+            }
+            .navigationTitle(L10n.t("设置姓名与照片"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(L10n.t("取消")) { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(L10n.t("保存")) { save(); dismiss() }
+                }
+            }
+            .onChange(of: selectedPhotoItem) { _ in
+                Task {
+                    if let item = selectedPhotoItem,
+                       let data = try? await item.loadTransferable(type: Data.self) {
+                        photoData = data
+                    }
+                }
+            }
+        }
+    }
+
+    private func save() {
+        var names = (try? JSONDecoder().decode([String: String].self, from: Data(displayNameOverrides.utf8))) ?? [:]
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            names.removeValue(forKey: sender)
+        } else {
+            names[sender] = trimmed
+        }
+        if let data = try? JSONEncoder().encode(names) {
+            displayNameOverrides = String(decoding: data, as: UTF8.self)
+        }
+        var photos = (try? JSONDecoder().decode([String: String].self, from: Data(photoOverrides.utf8))) ?? [:]
+        if let photoData {
+            photos[sender] = photoData.base64EncodedString()
+        } else {
+            photos.removeValue(forKey: sender)
+        }
+        if let data = try? JSONEncoder().encode(photos) {
+            photoOverrides = String(decoding: data, as: UTF8.self)
         }
     }
 }
@@ -930,6 +1307,7 @@ private struct EmptyStateView: View {
         case "message": return "收到和发出的短信都会显示在这里。"
         case "phone.arrow.up.right": return "完成通话后，记录会显示在这里。"
         case "person.2": return "联系人会从系统通讯录同步。"
+        case "tray": return "这里暂时没有内容。"
         default: return "完成连接或授权后即可使用。"
         }
     }
