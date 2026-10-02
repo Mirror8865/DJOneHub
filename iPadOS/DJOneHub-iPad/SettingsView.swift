@@ -54,6 +54,22 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
         case .service: return "gearshape.2"
         }
     }
+
+    /// 系统设置 App 的侧栏图标底色：每类设置一个固定色块，方便快速定位。
+    var iconTint: Color {
+        switch self {
+        case .status: return .gray
+        case .appearance: return .blue
+        case .notification: return .red
+        case .connection: return .green
+        case .voice: return .teal
+        case .network: return .blue
+        case .power: return .orange
+        case .esim: return .purple
+        case .debugAT: return .indigo
+        case .service: return .pink
+        }
+    }
 }
 
 /// 左栏分组：和系统设置 App 一致，先分组标题、再列具体条目。
@@ -123,6 +139,8 @@ struct SettingsView: View {
     @State private var busy = false
     // List(selection:) 在 iOS 上要求可选绑定，因此这里用可选值，读取时回退到“状态”。
     @State private var selectedSection: SettingsSection? = .status
+    /// 系统设置 App 顶部的搜索框：按标题过滤左侧分类。
+    @State private var settingsSearch = ""
     let onClose: (() -> Void)?
 
     init(onClose: (() -> Void)? = nil) {
@@ -212,10 +230,10 @@ struct SettingsView: View {
     private var settingsSplitView: some View {
         NavigationSplitView {
             List(selection: $selectedSection) {
-                ForEach(SettingsGroup.allCases) { group in
+                ForEach(filteredGroups) { group in
                     Section(L10n.t(group.title)) {
                         ForEach(group.sections) { section in
-                            Label(L10n.t(section.title), systemImage: section.icon)
+                            SettingsSidebarRow(section: section)
                                 .tag(section)
                         }
                     }
@@ -225,6 +243,7 @@ struct SettingsView: View {
             // 侧栏选中高亮用系统蓝，避免父级 primary tint 把选中行染成黑色。
             .tint(Color(uiColor: .systemBlue))
             .navigationTitle(L10n.t("设置"))
+            .searchable(text: $settingsSearch, placement: .sidebar, prompt: Text(L10n.t("搜索")))
             .navigationSplitViewColumnWidth(min: 250, ideal: 290, max: 380)
         } detail: {
             // 右栏严格按系统设置 App 的分组表单呈现：没有卡片、没有玻璃底板。
@@ -240,6 +259,28 @@ struct SettingsView: View {
             .navigationTitle(L10n.t((selectedSection ?? .status).title))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { settingsToolbar }
+        }
+    }
+
+    /// 顶部搜索框过滤后的分组；搜索为空时保持系统设置 App 的完整分组顺序。
+    private var filteredGroups: [SettingsGroupView] {
+        let keyword = settingsSearch.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !keyword.isEmpty else {
+            return SettingsGroup.allCases.map {
+                SettingsGroupView(id: $0.id, title: $0.title, sections: $0.sections)
+            }
+        }
+        return SettingsGroup.allCases.compactMap { group in
+            let matched = group.sections.filter {
+                L10n.t($0.title).localizedCaseInsensitiveContains(keyword)
+            }
+            let groupMatched = L10n.t(group.title).localizedCaseInsensitiveContains(keyword)
+            guard groupMatched || !matched.isEmpty else { return nil }
+            return SettingsGroupView(
+                id: group.id,
+                title: group.title,
+                sections: matched.isEmpty ? group.sections : matched
+            )
         }
     }
 
@@ -1060,3 +1101,28 @@ private struct RingtoneSettingsView: View {
     }
 }
 
+/// 设置页左栏的分组模型（运行时按搜索关键字重新组合，所以不能直接用 SettingsGroup 枚举）。
+private struct SettingsGroupView: Identifiable {
+    let id: String
+    let title: String
+    let sections: [SettingsSection]
+}
+
+/// 系统设置 App 式侧栏行：彩色圆角图标 + 标题，选中高亮由系统 sidebar 列表提供。
+private struct SettingsSidebarRow: View {
+    let section: SettingsSection
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: section.icon)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 27, height: 27)
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(section.iconTint)
+                )
+            Text(L10n.t(section.title))
+        }
+    }
+}

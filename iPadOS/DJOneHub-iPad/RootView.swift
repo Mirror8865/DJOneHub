@@ -1,12 +1,12 @@
 import SwiftUI
 
-/// 顶层 tab。命名与顺序都对齐系统「电话」App 的信息层级：
-/// 拨号 / 最近 / 短信 / 联系人 / 设置，5 个以内不需要 More。
+/// 顶层导航的四个板块：通话 / 联系人 / 信息 / 设置。
+/// 命名与顺序对齐系统 App（「电话」「联系人」「信息」「设置」），
+/// 拨号与通话记录合并到同一个「通话」板块，符合 iOS 26 电话 App 的信息层级。
 enum PhoneTab: String, CaseIterable, Identifiable {
-    case dial
-    case recents
-    case messages
+    case calls
     case contacts
+    case messages
     case settings
 
     var id: String { rawValue }
@@ -14,10 +14,9 @@ enum PhoneTab: String, CaseIterable, Identifiable {
     /// HIG：tab 标签尽量用单个词，便于快速读取。
     var tabTitle: String {
         switch self {
-        case .dial: return L10n.t("拨号")
-        case .recents: return L10n.t("最近")
-        case .messages: return L10n.t("短信")
+        case .calls: return L10n.t("通话")
         case .contacts: return L10n.t("联系人")
+        case .messages: return L10n.t("信息")
         case .settings: return L10n.t("设置")
         }
     }
@@ -25,45 +24,42 @@ enum PhoneTab: String, CaseIterable, Identifiable {
     /// HIG：tab bar 图标优先使用填充变体，和系统 App 保持一致。
     var icon: String {
         switch self {
-        case .dial: return "circle.grid.3x3.fill"
-        case .recents: return "clock.fill"
-        case .messages: return "message.fill"
+        case .calls: return "phone.fill"
         case .contacts: return "person.crop.circle.fill"
+        case .messages: return "message.fill"
         case .settings: return "gearshape.fill"
         }
     }
 }
 
 /// App 外壳：只负责 tab 导航、沉浸式背景和前台通话覆盖层。
-/// 每个 tab 的内容视图自己带 NavigationStack / NavigationSplitView，
-/// 这样 iPad 顶部 tab bar 由系统渲染（Liquid Glass），并自动避开窗口左上角的
-/// 关闭 / 最大化 / 最小化控件，不需要任何自绘顶部条。
+///
+/// 顶部导航栏由系统渲染并常驻置顶（iPadOS 26 会把 tab bar 与 toolbar 合并到同一条顶栏），
+/// 下方内容始终全屏铺到屏幕边缘，并自动为顶栏留出安全区；
+/// 顶栏背景取自其下方滚动的功能内容，顶端是系统的滚动边缘渐变模糊
+/// （scroll edge effect），与系统「设置」App 顶部的效果一致。
 struct RootView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var settings: AppSettings
     @Environment(\.scenePhase) private var scenePhase
-    @AppStorage("djonehub.selected-tab") private var selectedTabRawValue = PhoneTab.dial.rawValue
+    @AppStorage("djonehub.selected-tab") private var selectedTabRawValue = PhoneTab.calls.rawValue
     @AppStorage("djonehub.first-connection-complete") private var firstConnectionComplete = false
     @State private var pendingSMSRecipient: String?
 
     var body: some View {
         ZStack {
             TabView(selection: selectedTabBinding) {
-                DialPadView()
-                    .tag(PhoneTab.dial)
-                    .tabItem { Label(PhoneTab.dial.tabTitle, systemImage: PhoneTab.dial.icon) }
-
-                RecentsView(onCall: dial, onMessage: composeMessage)
-                    .tag(PhoneTab.recents)
-                    .tabItem { Label(PhoneTab.recents.tabTitle, systemImage: PhoneTab.recents.icon) }
-
-                MessagesView(pendingRecipient: $pendingSMSRecipient)
-                    .tag(PhoneTab.messages)
-                    .tabItem { Label(PhoneTab.messages.tabTitle, systemImage: PhoneTab.messages.icon) }
+                CallsView(onMessage: composeMessage)
+                    .tag(PhoneTab.calls)
+                    .tabItem { Label(PhoneTab.calls.tabTitle, systemImage: PhoneTab.calls.icon) }
 
                 ContactsView(onCall: dial, onMessage: composeMessage)
                     .tag(PhoneTab.contacts)
                     .tabItem { Label(PhoneTab.contacts.tabTitle, systemImage: PhoneTab.contacts.icon) }
+
+                MessagesView(pendingRecipient: $pendingSMSRecipient)
+                    .tag(PhoneTab.messages)
+                    .tabItem { Label(PhoneTab.messages.tabTitle, systemImage: PhoneTab.messages.icon) }
 
                 SettingsView()
                     .tag(PhoneTab.settings)
@@ -89,10 +85,7 @@ struct RootView: View {
         .animation(.easeInOut(duration: 0.2), value: model.activeCall?.id)
         .animation(.easeInOut(duration: 0.2), value: model.callKitManagesCall)
         .preferredColorScheme(settings.appearance.colorScheme)
-        .fullScreenCover(isPresented: Binding(
-            get: { !firstConnectionComplete },
-            set: { if !$0 { firstConnectionComplete = true } }
-        )) {
+        .fullScreenCover(isPresented: firstConnectionBinding) {
             FirstConnectionView()
                 .environmentObject(model)
         }
@@ -114,21 +107,28 @@ struct RootView: View {
         )
     }
 
+    private var firstConnectionBinding: Binding<Bool> {
+        Binding(
+            get: { !firstConnectionComplete },
+            set: { if !$0 { firstConnectionComplete = true } }
+        )
+    }
+
     private var selectedTabBinding: Binding<PhoneTab> {
         Binding(
-            get: { PhoneTab(rawValue: selectedTabRawValue) ?? .dial },
+            get: { PhoneTab(rawValue: selectedTabRawValue) ?? .calls },
             set: { selectedTabRawValue = $0.rawValue }
         )
     }
 
     private var selectedTab: PhoneTab {
-        get { PhoneTab(rawValue: selectedTabRawValue) ?? .dial }
+        get { PhoneTab(rawValue: selectedTabRawValue) ?? .calls }
         nonmutating set { selectedTabRawValue = newValue.rawValue }
     }
 
     private func dial(_ number: String) {
         model.numberInput = number
-        selectedTab = .dial
+        selectedTab = .calls
         Task { await model.dial() }
     }
 
@@ -139,7 +139,7 @@ struct RootView: View {
 }
 
 /// 与系统 App 对齐：只使用系统背景色（浅色纯白、深色纯黑）并铺满安全区。
-/// 不再自绘渐变——自绘底色在深色下会和系统导航栏、状态栏、键盘底色对不上。
+/// 不额外自绘底色——自绘底色在深色下会和系统导航栏、状态栏、键盘底色对不上。
 struct PhoneBackdrop: View {
     var body: some View {
         Color(uiColor: .systemBackground)
@@ -163,6 +163,18 @@ extension View {
     func phoneTabBarMinimizeOnScroll() -> some View {
         if #available(iOS 26.0, *) {
             self.tabBarMinimizeBehavior(.onScrollDown)
+        } else {
+            self
+        }
+    }
+
+    /// 顶部导航栏的滚动边缘效果：栏底取自下方滚动的内容，并在顶端做渐变模糊。
+    /// HIG 建议优先用 automatic；这里按需求显式使用软渐变（soft），
+    /// 让顶栏像系统「设置」App 那样把内容柔和地渐隐到模糊里。
+    @ViewBuilder
+    func pinnedScrollEdgeEffect() -> some View {
+        if #available(iOS 26.0, *) {
+            self.scrollEdgeEffectStyle(.soft, for: .top)
         } else {
             self
         }
