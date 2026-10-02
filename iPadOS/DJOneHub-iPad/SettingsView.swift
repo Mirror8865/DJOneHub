@@ -157,6 +157,7 @@ struct SettingsView: View {
                 NavigationStack {
                     settingsForm
                         .navigationTitle(L10n.t("设置"))
+                        .immersiveBars()
                         .toolbar { settingsToolbar }
                 }
             }
@@ -258,6 +259,8 @@ struct SettingsView: View {
             .formStyle(.grouped)
             .navigationTitle(L10n.t((selectedSection ?? .status).title))
             .navigationBarTitleDisplayMode(.inline)
+            .immersiveBars()
+            .monochromeBarControls()
             .toolbar { settingsToolbar }
         }
     }
@@ -307,6 +310,7 @@ struct SettingsView: View {
             ToolbarItem(placement: .topBarTrailing) {
                 Button(L10n.t("完成")) { closeSettings() }
                     .fontWeight(.semibold)
+                    .tint(Color.primary)
             }
         }
     }
@@ -338,7 +342,19 @@ struct SettingsView: View {
             LabeledContent(L10n.t("网络模式"), value: modem?.networkMode ?? "--")
             LabeledContent(L10n.t("信号强度"), value: modem?.signalDBM.map { "\($0) dBm" } ?? "--")
         } header: {
-            Text(L10n.t("模块"))
+            HStack(spacing: 8) {
+                Text(L10n.t("模块"))
+                Spacer(minLength: 0)
+                Button {
+                    Task { await refreshAll() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 13, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .disabled(busy)
+                .accessibilityLabel(L10n.t("刷新"))
+            }
         }
         Section {
             LabeledContent(L10n.t("下载速度"), value: rateText(downloadRate))
@@ -346,14 +362,6 @@ struct SettingsView: View {
             LabeledContent(L10n.t("本次流量"), value: byteText(traffic?.sessionTotal))
         } header: {
             Text(L10n.t("流量"))
-        }
-        Section {
-            Button {
-                Task { await refreshAll() }
-            } label: {
-                Label(L10n.t("刷新"), systemImage: "arrow.clockwise")
-            }
-            .disabled(busy)
         }
     }
 
@@ -1115,12 +1123,22 @@ private struct SettingsSidebarRow: View {
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: section.icon)
-                .font(.system(size: 13, weight: .semibold))
+                .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(.white)
-                .frame(width: 27, height: 27)
+                .frame(width: 29, height: 29)
                 .background(
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .fill(section.iconTint)
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [section.iconTint.opacity(0.90), section.iconTint],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.18), lineWidth: 0.5)
                 )
             Text(L10n.t(section.title))
         }

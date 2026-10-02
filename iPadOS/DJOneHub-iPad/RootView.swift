@@ -45,9 +45,13 @@ struct RootView: View {
     @AppStorage("djonehub.selected-tab") private var selectedTabRawValue = PhoneTab.calls.rawValue
     @AppStorage("djonehub.first-connection-complete") private var firstConnectionComplete = false
     @State private var pendingSMSRecipient: String?
+    /// 系统通话界面正在承载这通电话时，App 不抢回前台显示自己的通话页。
+    @State private var inAppCallUISuppressed = false
 
     var body: some View {
         ZStack {
+            // 沉浸式：内容一直铺到屏幕边缘，顶栏不画不透明底板，
+            // 由系统滚动边缘效果在顶端做渐变模糊。
             TabView(selection: selectedTabBinding) {
                 CallsView(onMessage: composeMessage)
                     .tag(PhoneTab.calls)
@@ -66,19 +70,43 @@ struct RootView: View {
                     .tabItem { Label(PhoneTab.settings.tabTitle, systemImage: PhoneTab.settings.icon) }
             }
             .phoneTabBarMinimizeOnScroll()
+            .immersiveBars()
             // 强调色固定系统蓝：不能再把 tint 设成 primary，
             // 否则列表选中行会被描上黑（深色下为白）边，与系统 App 不一致。
             .tint(Color(uiColor: .systemBlue))
 
-            // 系统 CallKit 只负责锁屏、后台与状态栏那一层通话界面；
-            // App 在前台时必须自己把通话页铺满，否则呼出后屏幕上没有通话 UI。
-            // 退到后台后本视图自然消失，系统通话界面接管。
-            if let call = model.activeCall, scenePhase != .background {
+            // 前台通话界面：
+            // 1) App 内发起的呼出立即铺满通话页；
+            // 2) 由系统 CallKit 呼入并接通的电话不要抢回前台（isInAppCallUISuppressed），
+            //    只有用户自己回到 App（桌面 / 切回本 App）时才恢复 App 内通话页。
+            if let call = model.activeCall,
+               !call.hasEndedState,
+               scenePhase == .active,
+               !inAppCallUISuppressed {
                 ActiveCallView(call: call)
                     .transition(.opacity)
             }
         }
         .background(PhoneBackdrop())
+        .onChange(of: model.activeCall?.id) { newValue in
+            // 呼入电话交给系统 CallKit 界面承载：App 不抢前台显示自己的通话页，
+            // 只有用户自己回到 App（回桌面 / 切换其它 App 再切回）时才恢复。
+            // 呼出电话是用户在 App 内主动拨的，立即显示 App 内通话页。
+            if model.activeCall?.direction == "incoming" {
+                inAppCallUISuppressed = true
+            } else if newValue == nil {
+                inAppCallUISuppressed = false
+            } else {
+                inAppCallUISuppressed = false
+            }
+        }
+        .onChange(of: model.locallyDismissedCallID) { newValue in
+            if newValue != nil { inAppCallUISuppressed = true }
+        }
+        .onChange(of: scenePhase) { phase in
+            // 用户返回本 App（从桌面或其它 App 切回来）后，恢复 App 内通话页。
+            if phase == .active { inAppCallUISuppressed = false }
+        }
         // 沉浸式：状态栏保持可见（HIG 不主张永久隐藏），但内容一直铺到屏幕边缘。
         .statusBarHidden(false)
         .persistentSystemOverlays(.automatic)
@@ -168,15 +196,39 @@ extension View {
         }
     }
 
-    /// 顶部导航栏的滚动边缘效果：栏底取自下方滚动的内容，并在顶端做渐变模糊。
-    /// HIG 建议优先用 automatic；这里按需求显式使用软渐变（soft），
-    /// 让顶栏像系统「设置」App 那样把内容柔和地渐隐到模糊里。
+    /// 沉浸式顶栏：导航栏与 tab bar 都不再画不透明底板，内容一直滚动到屏幕最顶端，
+    /// 顶端交给系统的滚动边缘效果（scroll edge effect）做渐变模糊，
+    /// 和系统「设置」App 顶部那种「内容透到模糊里」的效果一致。
     @ViewBuilder
-    func pinnedScrollEdgeEffect() -> some View {
+    func immersiveBars() -> some View {
         if #available(iOS 26.0, *) {
-            self.scrollEdgeEffectStyle(.soft, for: .top)
-        } else {
             self
+                .toolbarBackgroundVisibility(.hidden, for: .navigationBar)
+                .toolbarBackgroundVisibility(.hidden, for: .tabBar)
+                .scrollEdgeEffectStyle(.soft, for: .top)
+        } else if #available(iOS 18.0, *) {
+            self
+                .toolbarBackgroundVisibility(.hidden, for: .navigationBar)
+                .toolbarBackgroundVisibility(.hidden, for: .tabBar)
+        } else {
+            self.toolbarBackground(.hidden, for: .navigationBar)
         }
+    }
+
+    /// 内容区顶部的滚动边缘渐变模糊（HIG 的 scroll edge effect）。
+    func pinnedScrollEdgeEffect() -> some View {
+        immersiveBars()
+    }
+
+    /// 顶栏小按钮统一用系统单色：浅色黑、深色白，而不是强调色蓝。
+    func monochromeBarControls() -> some View {
+        self.tint(Color.primary)
+    }
+}
+
+extension CallRecord {
+    /// 通话已经结束的状态；这些状态下 App 内通话页必须立刻退出。
+    var hasEndedState: Bool {
+        ["ended", "failed", "cancelled", "rejected", "disconnected"].contains(state)
     }
 }

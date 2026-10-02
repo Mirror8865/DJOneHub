@@ -486,6 +486,10 @@ private struct DialKey: View {
 /// 「通话」板块：左侧通话记录，右侧通话详情；顶栏左侧「编辑 + 分类」、
 /// 右侧「拨号键盘 + 搜索」，与参考图四的信息层级一致。
 /// 点拨号按钮呼出拨号键盘浮层，点键盘外任意区域即可关闭。
+///
+/// iPad 用页内分栏（`HStack`）而不是 `NavigationSplitView`：
+/// 顶层已有 tab 栏，再嵌一层分栏会多出整条导航栏和重复的侧栏按钮；
+/// 页内分栏只有一条顶栏，左「编辑 / 分类」、右「拨号 / 搜索」都在同一条上。
 struct CallsView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -513,86 +517,27 @@ struct CallsView: View {
     }
 
     var body: some View {
-        ZStack {
-            if isRegular {
-                splitBody
-            } else {
-                compactBody
+        NavigationStack {
+            Group {
+                if isRegular { regularBody } else { compactBody }
             }
-
-            if showingKeypad {
-                DialPadOverlay(onDismiss: { showingKeypad = false })
-                    .zIndex(2)
-            }
-        }
-        .animation(.easeInOut(duration: 0.2), value: showingKeypad)
-        .task { await model.contacts.loadIfNeeded() }
-    }
-
-    // MARK: iPad 双栏
-
-    private var splitBody: some View {
-        NavigationSplitView {
-            List(selection: $selection) {
-                callsRows
-            }
-            .listStyle(.sidebar)
             .navigationTitle(L10n.t("通话"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItemGroup(placement: .topBarLeading) {
-                    EditButton()
+                    EditButton().tint(Color.primary)
                     filterMenu
                 }
-            }
-            .navigationSplitViewColumnWidth(min: 320, ideal: 360, max: 460)
-            .pinnedScrollEdgeEffect()
-        } detail: {
-            Group {
-                if let call = selectedCall {
-                    CallDetailPane(call: call, onMessage: onMessage, onCall: dialNumber)
-                } else {
-                    EmptyStateView(title: L10n.t("选择通话记录查看详情"), systemImage: "phone")
-                        .background(Color(uiColor: .systemGroupedBackground))
-                }
-            }
-            .navigationTitle(selectedCall.map { model.contacts.displayName(for: $0.number) } ?? L10n.t("通话"))
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { showingKeypad = true } label: {
                         Image(systemName: "circle.grid.3x3.fill")
                     }
+                    .tint(Color.primary)
                     .accessibilityLabel(L10n.t("拨号键盘"))
                 }
             }
             .searchable(text: $search, placement: .toolbar, prompt: Text(L10n.t("搜索")))
-        }
-        .tint(Color(uiColor: .systemBlue))
-    }
-
-    // MARK: iPhone 单栏
-
-    private var compactBody: some View {
-        NavigationStack {
-            List {
-                compactCallsRows
-            }
-            .listStyle(.plain)
-            .navigationTitle(L10n.t("通话"))
-            .toolbar {
-                ToolbarItemGroup(placement: .topBarLeading) {
-                    EditButton()
-                    filterMenu
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { showingKeypad = true } label: {
-                        Image(systemName: "circle.grid.3x3.fill")
-                    }
-                    .accessibilityLabel(L10n.t("拨号键盘"))
-                }
-            }
-            .searchable(text: $search, prompt: Text(L10n.t("搜索")))
+            .immersiveBars()
             .navigationDestination(for: String.self) { identifier in
                 if let call = model.callHistory.first(where: { $0.id == identifier }) {
                     CallDetailPane(call: call, onMessage: onMessage, onCall: dialNumber)
@@ -601,6 +546,45 @@ struct CallsView: View {
                 }
             }
         }
+        .overlay {
+            if showingKeypad {
+                DialPadOverlay(onDismiss: { showingKeypad = false })
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: showingKeypad)
+        .task { await model.contacts.loadIfNeeded() }
+    }
+
+    // MARK: iPad 页内双栏（只有一条顶栏）
+
+    private var regularBody: some View {
+        HStack(spacing: 0) {
+            List {
+                callsRows
+            }
+            .listStyle(.plain)
+            .frame(width: 380)
+
+            Divider()
+
+            Group {
+                if let call = selectedCall {
+                    CallDetailPane(call: call, onMessage: onMessage, onCall: dialNumber)
+                } else {
+                    EmptyStateView(title: L10n.t("选择通话记录查看详情"), systemImage: "phone")
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    // MARK: iPhone 单栏（点按进入详情）
+
+    private var compactBody: some View {
+        List {
+            compactCallsRows
+        }
+        .listStyle(.plain)
     }
 
     // MARK: 子视图
@@ -616,8 +600,14 @@ struct CallsView: View {
             .listRowSeparator(.hidden)
         } else {
             ForEach(filteredCalls) { call in
-                RecentsRow(call: call, onCall: dialNumber)
-                    .tag(call.id)
+                Button {
+                    selection = call.id
+                } label: {
+                    RecentsRow(call: call, onCall: dialNumber, isSelected: selection == call.id)
+                }
+                .buttonStyle(.plain)
+                .listRowSeparator(.hidden)
+                .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
             }
         }
     }
@@ -634,7 +624,7 @@ struct CallsView: View {
         } else {
             ForEach(filteredCalls) { call in
                 NavigationLink(value: call.id) {
-                    RecentsRow(call: call, onCall: dialNumber)
+                    RecentsRow(call: call, onCall: dialNumber, isSelected: false)
                 }
             }
         }
@@ -650,6 +640,7 @@ struct CallsView: View {
         } label: {
             Image(systemName: "line.3.horizontal")
         }
+        .tint(Color.primary)
         .accessibilityLabel(L10n.t("筛选"))
     }
 
@@ -660,10 +651,12 @@ struct CallsView: View {
 }
 
 /// 通话记录行：头像 + 姓名 + 类型 + 时间，右侧是系统蓝的快捷呼叫圆钮。
+/// 选中态用系统列表选择的浅灰胶囊，和系统「电话」App 的最近通话一致。
 private struct RecentsRow: View {
     @EnvironmentObject private var model: AppModel
     let call: CallRecord
     let onCall: (String) -> Void
+    var isSelected: Bool = false
 
     private var name: String { model.contacts.displayName(for: call.number) }
     private var photo: Data? {
@@ -704,7 +697,13 @@ private struct RecentsRow: View {
                 .accessibilityLabel(L10n.t("呼叫"))
             }
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 8)
+        .padding(.horizontal, 16)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(isSelected ? Color(uiColor: .secondarySystemFill) : Color.clear)
+        )
+        .contentShape(Rectangle())
     }
 
     private var subtitle: String {
@@ -713,7 +712,8 @@ private struct RecentsRow: View {
     }
 }
 
-/// 通话记录详情：参考图四右栏——大卡片（头像 / 姓名 / 四个动作圆钮）+ 系统分组信息。
+/// 通话记录详情：严格按参考图四右栏——整块渐变背景铺满全屏，
+/// 头像、姓名、四个动作圆钮、分组信息全部落在这块渐变背景里。
 struct CallDetailPane: View {
     @EnvironmentObject private var model: AppModel
     let call: CallRecord
@@ -730,65 +730,44 @@ struct CallDetailPane: View {
     private var hueSeed: String { call.number ?? call.id }
 
     var body: some View {
-        List {
-            Section {
-                hero
-                    .listRowInsets(EdgeInsets())
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
-            }
+        ZStack {
+            ContactPalette.gradient(for: hueSeed)
+                .ignoresSafeArea()
 
-            Section {
-                LabeledContent(L10n.t("类型"), value: directionText)
-                LabeledContent(L10n.t("时间"), value: call.startedAt.formatted(date: .abbreviated, time: .shortened))
-                if let duration = durationText {
-                    LabeledContent(L10n.t("时长"), value: duration)
+            ScrollView {
+                VStack(spacing: 18) {
+                    hero
+                    infoCards
                 }
-            } header: {
-                Text(L10n.t("通话记录"))
+                .padding(.horizontal, 20)
+                .padding(.top, 24)
+                .padding(.bottom, 32)
+                .frame(maxWidth: 560)
+                .frame(maxWidth: .infinity)
             }
-
-            Section {
-                if let number = call.number {
-                    Button {
-                        onCall(number)
-                    } label: {
-                        Label(number, systemImage: "phone.fill")
-                    }
-                }
-                Button {
-                    showingAddName = true
-                } label: {
-                    Label(L10n.t("添加姓名"), systemImage: "person.crop.circle.badge.plus")
-                }
-            } header: {
-                Text(L10n.t("联系人"))
-            }
-
-            Section {
-                ShareLink(item: shareText) {
-                    Label(L10n.t("共享联系人"), systemImage: "square.and.arrow.up")
-                }
-            }
+            .scrollIndicators(.hidden)
         }
-        .listStyle(.insetGrouped)
         .navigationBarTitleDisplayMode(.inline)
+        .immersiveBars()
+        .monochromeBarControls()
         .sheet(isPresented: $showingAddName) {
             ContactNativeNew(contactStore: CNContactStore())
                 .ignoresSafeArea()
         }
     }
 
-    /// 图四右栏的大卡片：整块渐变底 + 头像 + 姓名 + 四个动作圆钮。
+    /// 图四大卡片：大头像 + 姓名 + 四个动作圆钮。
     private var hero: some View {
         VStack(spacing: 14) {
-            InitialAvatar(name: name, photoData: photo, size: 104)
+            InitialAvatar(name: name, photoData: photo, size: 124)
+                .overlay(Circle().strokeBorder(Color.white.opacity(0.35), lineWidth: 1))
+
             VStack(spacing: 4) {
                 Text(name)
-                    .font(.title2.weight(.semibold))
+                    .font(.largeTitle.weight(.bold))
                     .foregroundStyle(.white)
                     .lineLimit(2)
-                    .minimumScaleFactor(0.7)
+                    .minimumScaleFactor(0.6)
                     .multilineTextAlignment(.center)
                 if let number = call.number, number != name {
                     Text(number)
@@ -796,7 +775,7 @@ struct CallDetailPane: View {
                         .foregroundStyle(.white.opacity(0.85))
                 }
                 Text(directionText)
-                    .font(.caption)
+                    .font(.footnote)
                     .foregroundStyle(.white.opacity(0.75))
             }
 
@@ -836,18 +815,100 @@ struct CallDetailPane: View {
             }
             .padding(.top, 2)
         }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 26)
-        .padding(.horizontal, 12)
-        .background(ContactPalette.gradient(for: hueSeed))
-        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
+    }
+
+    /// 图四的分组信息：通话记录 / 添加姓名 / 电话 / 共享联系人。
+    private var infoCards: some View {
+        VStack(spacing: 14) {
+            InfoCard {
+                InfoCardRow(
+                    title: L10n.t("通话记录"),
+                    value: nil,
+                    systemImage: nil,
+                    showsChevron: true,
+                    isInteractive: false
+                ) {}
+                InfoCardDivider()
+                InfoCardRow(
+                    title: directionText,
+                    value: timeAndDurationText,
+                    systemImage: nil,
+                    showsChevron: false,
+                    isInteractive: false
+                ) {}
+            }
+
+            InfoCard {
+                InfoCardRow(
+                    title: L10n.t("添加姓名"),
+                    value: nil,
+                    systemImage: nil,
+                    showsChevron: true
+                ) {
+                    showingAddName = true
+                }
+            }
+
+            if let number = call.number {
+                InfoCard {
+                    InfoCardRow(
+                        title: L10n.t("电话"),
+                        value: number,
+                        systemImage: "phone.fill"
+                    ) {
+                        onCall(number)
+                    }
+                }
+            }
+
+            InfoCard {
+                InfoCardRow(
+                    title: L10n.t("共享联系人"),
+                    value: nil,
+                    systemImage: nil,
+                    showsChevron: true,
+                    isInteractive: false
+                ) {}
+                InfoCardDivider()
+                InfoCardRow(
+                    title: L10n.t("添加到个人收藏"),
+                    value: nil,
+                    systemImage: nil,
+                    showsChevron: true,
+                    isInteractive: false
+                ) {}
+            }
+
+            ShareLink(item: shareText) {
+                HStack(spacing: 10) {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.body.weight(.medium))
+                    Text(L10n.t("共享"))
+                        .font(.body)
+                    Spacer(minLength: 0)
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 14)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(Color.white.opacity(0.18))
+                )
+            }
+        }
     }
 
     private var directionText: String {
         if call.missed { return L10n.t("未接来电") }
         return call.direction == "incoming" ? L10n.t("呼入") : L10n.t("呼出")
+    }
+
+    private var timeAndDurationText: String {
+        let stamp = call.startedAt.formatted(date: .abbreviated, time: .shortened)
+        if let duration = durationText {
+            return stamp + " · " + duration
+        }
+        return stamp
     }
 
     private var durationText: String? {
@@ -868,8 +929,9 @@ struct CallDetailPane: View {
 }
 // MARK: - 联系人
 
-/// 「联系人」板块：左侧联系人列表（顶栏侧栏切换按钮 + 新建联系人按钮，下方搜索框），
-/// 右侧联系人详情（按参考图五：整块渐变底 + 大 monogram + 四个动作圆钮 + 分组信息）。
+/// 「联系人」板块：左侧联系人列表（顶栏「新建联系人」按钮、下方搜索框），
+/// 右侧联系人详情（参考图五：整块渐变底 + 大 monogram + 四个动作圆钮 + 分组信息）。
+/// iPad 用页内分栏，避免再嵌一层 NavigationSplitView 造成重复的侧栏按钮。
 struct ContactsView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -878,7 +940,6 @@ struct ContactsView: View {
 
     @State private var selection: String?
     @State private var search = ""
-    @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var showingNewContact = false
 
     private var isRegular: Bool { horizontalSizeClass == .regular }
@@ -916,72 +977,27 @@ struct ContactsView: View {
     }
 
     var body: some View {
-        if isRegular {
-            splitBody
-        } else {
-            compactBody
-        }
-    }
-
-    private var splitBody: some View {
-        NavigationSplitView(columnVisibility: $columnVisibility) {
-            List(selection: $selection) {
-                contactRows(linkRows: false)
+        NavigationStack {
+            Group {
+                if isRegular { regularBody } else { compactBody }
             }
-            .listStyle(.sidebar)
             .navigationTitle(L10n.t("联系人"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button { toggleSidebar() } label: {
-                        Image(systemName: "sidebar.leading")
-                    }
-                    .accessibilityLabel(L10n.t("显示或隐藏边栏"))
-                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { showingNewContact = true } label: {
                         Image(systemName: "plus")
                     }
+                    .tint(Color.primary)
                     .accessibilityLabel(L10n.t("新建联系人"))
                 }
             }
-            .searchable(text: $search, placement: .sidebar, prompt: Text(L10n.t("搜索")))
-            .navigationSplitViewColumnWidth(min: 300, ideal: 340, max: 440)
-            .pinnedScrollEdgeEffect()
-        } detail: {
-            if let contact = selectedContact {
-                ContactDetailPane(contact: contact, onCall: onCall, onMessage: onMessage)
-            } else {
-                EmptyStateView(title: L10n.t("选择联系人查看详情"), systemImage: "person.crop.circle")
-            }
-        }
-        .removingDefaultSidebarToggle()
-        .tint(Color(uiColor: .systemBlue))
-        .task { await model.contacts.loadIfNeeded() }
-        .sheet(isPresented: $showingNewContact) {
-            ContactNativeNew(contactStore: CNContactStore()) {
-                Task { await model.contacts.requestAccessAndLoad() }
-            }
-            .ignoresSafeArea()
-        }
-    }
-
-    private var compactBody: some View {
-        NavigationStack {
-            List {
-                contactRows(linkRows: true)
-            }
-            .listStyle(.plain)
-            .navigationTitle(L10n.t("联系人"))
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { showingNewContact = true } label: {
-                        Image(systemName: "plus")
-                    }
-                    .accessibilityLabel(L10n.t("新建联系人"))
-                }
-            }
-            .searchable(text: $search, prompt: Text(L10n.t("搜索")))
+            .searchable(
+                text: $search,
+                placement: .navigationBarDrawer(displayMode: .always),
+                prompt: Text(L10n.t("搜索"))
+            )
+            .immersiveBars()
             .navigationDestination(for: String.self) { identifier in
                 if let contact = contacts.first(where: { $0.id == identifier }) {
                     ContactDetailPane(contact: contact, onCall: onCall, onMessage: onMessage)
@@ -999,6 +1015,34 @@ struct ContactsView: View {
         }
     }
 
+    private var regularBody: some View {
+        HStack(spacing: 0) {
+            List {
+                contactRows(linkRows: false)
+            }
+            .listStyle(.plain)
+            .frame(width: 380)
+
+            Divider()
+
+            Group {
+                if let contact = selectedContact {
+                    ContactDetailPane(contact: contact, onCall: onCall, onMessage: onMessage)
+                } else {
+                    EmptyStateView(title: L10n.t("选择联系人查看详情"), systemImage: "person.crop.circle")
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private var compactBody: some View {
+        List {
+            contactRows(linkRows: true)
+        }
+        .listStyle(.plain)
+    }
+
     @ViewBuilder
     private func contactRows(linkRows: Bool) -> some View {
         if sections.isEmpty {
@@ -1014,17 +1058,18 @@ struct ContactsView: View {
                                 ContactRow(contact: contact)
                             }
                         } else {
-                            ContactRow(contact: contact).tag(contact.id)
+                            Button {
+                                selection = contact.id
+                            } label: {
+                                ContactRow(contact: contact, isSelected: selection == contact.id)
+                            }
+                            .buttonStyle(.plain)
+                            .listRowSeparator(.hidden)
+                            .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
                         }
                     }
                 }
             }
-        }
-    }
-
-    private func toggleSidebar() {
-        withAnimation {
-            columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
         }
     }
 
@@ -1044,15 +1089,25 @@ private struct ContactSection: Identifiable {
     let contacts: [ContactStore.Contact]
 }
 
+/// 联系人行：头像 + 姓名；选中态用系统列表选择的浅灰胶囊。
 private struct ContactRow: View {
     let contact: ContactStore.Contact
+    var isSelected: Bool = false
 
     var body: some View {
         HStack(spacing: 12) {
             InitialAvatar(name: contact.name, photoData: contact.photoData, size: 40)
             Text(contact.name)
                 .lineLimit(1)
+            Spacer(minLength: 0)
         }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 16)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(isSelected ? Color(uiColor: .secondarySystemFill) : Color.clear)
+        )
+        .contentShape(Rectangle())
     }
 }
 
@@ -1089,6 +1144,8 @@ struct ContactDetailPane: View {
             .pinnedScrollEdgeEffect()
         }
         .navigationBarTitleDisplayMode(.inline)
+        .immersiveBars()
+        .monochromeBarControls()
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button(L10n.t("编辑")) { showingEditor = true }
@@ -1329,6 +1386,10 @@ private struct Conversation: Identifiable {
 /// 「信息」板块：左侧消息列表（顶栏「三条杠分类 + 编辑」，下方搜索框），
 /// 右侧聊天窗口（左上角新消息按钮、正上方头像与昵称、下方输入框）。
 /// 点聊天窗口里的联系人名称会显示对方详细信息面板。
+///
+/// iPad 用两列各自的 `NavigationStack`（与系统「信息」App 一致）：
+/// 左列顶栏放「分类 / 编辑 / 搜索」，右列顶栏放「新信息 / 视频」，
+/// 两条顶栏等高并排，不会出现重复按钮。
 struct MessagesView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -1337,7 +1398,6 @@ struct MessagesView: View {
     @State private var selection: String?
     @State private var search = ""
     @State private var showsUnknownOnly = false
-    @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var showingCompose = false
     @State private var composeRecipient = ""
 
@@ -1363,11 +1423,7 @@ struct MessagesView: View {
 
     var body: some View {
         Group {
-            if isRegular {
-                splitBody
-            } else {
-                compactBody
-            }
+            if isRegular { regularBody } else { compactBody }
         }
         .task { await model.contacts.loadIfNeeded() }
         .onChange(of: pendingRecipient) { value in
@@ -1384,38 +1440,51 @@ struct MessagesView: View {
         }
     }
 
-    private var splitBody: some View {
-        NavigationSplitView(columnVisibility: $columnVisibility) {
-            List(selection: $selection) {
-                conversationRows(linkRows: false)
-            }
-            .listStyle(.sidebar)
-            .navigationTitle(L10n.t("信息"))
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItemGroup(placement: .topBarLeading) {
-                    filterMenu
-                    EditButton()
+    // MARK: iPad 双列
+
+    private var regularBody: some View {
+        HStack(spacing: 0) {
+            NavigationStack {
+                List {
+                    conversationRows(linkRows: false)
                 }
-            }
-            .searchable(text: $search, placement: .sidebar, prompt: Text(L10n.t("搜索")))
-            .navigationSplitViewColumnWidth(min: 320, ideal: 360, max: 460)
-            .pinnedScrollEdgeEffect()
-        } detail: {
-            if let handle = selection {
-                NavigationStack {
-                    ChatPane(handle: handle) {
-                        composeRecipient = ""
-                        showingCompose = true
+                .listStyle(.plain)
+                .navigationTitle(L10n.t("信息"))
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItemGroup(placement: .topBarLeading) {
+                        filterMenu
+                        EditButton().tint(Color.primary)
                     }
                 }
-            } else {
-                EmptyStateView(title: L10n.t("选择信息开始聊天"), systemImage: "message")
+                .searchable(
+                    text: $search,
+                    placement: .navigationBarDrawer(displayMode: .always),
+                    prompt: Text(L10n.t("搜索"))
+                )
+                .immersiveBars()
             }
+            .frame(width: 380)
+
+            Divider()
+
+            Group {
+                if let handle = selection {
+                    NavigationStack {
+                        ChatPane(handle: handle) {
+                            composeRecipient = ""
+                            showingCompose = true
+                        }
+                    }
+                } else {
+                    EmptyStateView(title: L10n.t("选择信息开始聊天"), systemImage: "message")
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .removingDefaultSidebarToggle()
-        .tint(Color(uiColor: .systemBlue))
     }
+
+    // MARK: iPhone 单栏
 
     private var compactBody: some View {
         NavigationStack {
@@ -1424,13 +1493,18 @@ struct MessagesView: View {
             }
             .listStyle(.plain)
             .navigationTitle(L10n.t("信息"))
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItemGroup(placement: .topBarLeading) {
                     filterMenu
-                    EditButton()
+                    EditButton().tint(Color.primary)
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    composeButton
                 }
             }
             .searchable(text: $search, prompt: Text(L10n.t("搜索")))
+            .immersiveBars()
             .navigationDestination(for: String.self) { handle in
                 ChatPane(handle: handle) {
                     composeRecipient = ""
@@ -1438,6 +1512,17 @@ struct MessagesView: View {
                 }
             }
         }
+    }
+
+    private var composeButton: some View {
+        Button {
+            composeRecipient = ""
+            showingCompose = true
+        } label: {
+            Image(systemName: "square.and.pencil")
+        }
+        .tint(Color.primary)
+        .accessibilityLabel(L10n.t("新信息"))
     }
 
     @ViewBuilder
@@ -1453,8 +1538,14 @@ struct MessagesView: View {
                         ConversationRow(conversation: conversation)
                     }
                 } else {
-                    ConversationRow(conversation: conversation)
-                        .tag(conversation.id)
+                    Button {
+                        selection = conversation.id
+                    } label: {
+                        ConversationRow(conversation: conversation, isSelected: selection == conversation.id)
+                    }
+                    .buttonStyle(.plain)
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
                 }
             }
         }
@@ -1470,14 +1561,17 @@ struct MessagesView: View {
         } label: {
             Image(systemName: "line.3.horizontal")
         }
+        .tint(Color.primary)
         .accessibilityLabel(L10n.t("筛选"))
     }
 }
 
 /// 会话行：头像 + 姓名 + 预览 + 右侧时间。
+/// 会话行：头像 + 姓名 + 预览 + 右侧时间；选中态是系统蓝胶囊（与系统「信息」App 一致）。
 private struct ConversationRow: View {
     @EnvironmentObject private var model: AppModel
     let conversation: Conversation
+    var isSelected: Bool = false
 
     private var displayName: String {
         model.contacts.contact(for: conversation.id)?.name ?? conversation.id
@@ -1493,20 +1587,27 @@ private struct ConversationRow: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(displayName)
                     .font(.body.weight(.semibold))
+                    .foregroundStyle(isSelected ? Color.white : Color.primary)
                     .lineLimit(1)
                 Text(conversation.last?.content ?? "")
                     .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(isSelected ? Color.white.opacity(0.85) : Color.secondary)
                     .lineLimit(2)
             }
             Spacer(minLength: 8)
             if let timestamp = conversation.last?.timestamp {
                 Text(Self.rowTimestampText(timestamp))
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(isSelected ? Color.white.opacity(0.85) : Color.secondary)
             }
         }
-        .padding(.vertical, 3)
+        .padding(.vertical, 8)
+        .padding(.horizontal, 14)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(isSelected ? Color(uiColor: .systemBlue) : Color.clear)
+        )
+        .contentShape(Rectangle())
     }
 
     /// iMessage 规则：今天显示时分，本周显示星期几，更早显示日期。
@@ -1523,7 +1624,9 @@ private struct ConversationRow: View {
     }
 }
 
-/// 聊天窗口：正上方是联系人头像与昵称（点击进入对方信息面板），下方是消息与输入框。
+/// 聊天窗口：正上方是联系人头像与昵称（点名称进入对方信息面板），
+/// 下方是消息与输入框。名称与输入框都是 iOS 26 的长条液态玻璃胶囊，
+/// 消息列表不画分割线；输入条固定在窗口底部，不随输入法键盘上移。
 struct ChatPane: View {
     @EnvironmentObject private var model: AppModel
     let handle: String
@@ -1547,66 +1650,77 @@ struct ChatPane: View {
     }
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: 4) {
-                    header
-                        .padding(.bottom, 10)
-                    ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
-                        if let day = dayHeader(for: message.timestamp, previous: index > 0 ? messages[index - 1].timestamp : nil) {
-                            Text(day)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 8)
+        ZStack(alignment: .bottom) {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 4) {
+                        header
+                            .padding(.bottom, 10)
+                        ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
+                            if let day = dayHeader(for: message.timestamp, previous: index > 0 ? messages[index - 1].timestamp : nil) {
+                                Text(day)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 8)
+                            }
+                            MessageBubble(message: message)
                         }
-                        MessageBubble(message: message)
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 12)
+                    .padding(.bottom, 76)
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
+                .scrollDismissesKeyboard(.interactively)
+                .onAppear { scrollToLast(proxy, animated: false) }
+                .onChange(of: messages.count) { _ in scrollToLast(proxy, animated: true) }
             }
-            .scrollDismissesKeyboard(.interactively)
-            .onAppear { scrollToLast(proxy, animated: false) }
-            .onChange(of: messages.count) { _ in scrollToLast(proxy, animated: true) }
+
+            composer
         }
         .background(Color(uiColor: .systemBackground))
+        .ignoresSafeArea(.keyboard, edges: .bottom)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
                 Button(action: onCompose) {
                     Image(systemName: "square.and.pencil")
                 }
+                .tint(Color.primary)
                 .accessibilityLabel(L10n.t("新信息"))
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Button {} label: {
                     Image(systemName: "video")
                 }
+                .tint(Color.primary)
                 .disabled(true)
                 .accessibilityLabel(L10n.t("视频"))
             }
         }
-        .safeAreaInset(edge: .bottom, spacing: 0) { composer }
+        .immersiveBars()
         .navigationDestination(isPresented: $showingContactInfo) {
             ChatContactInfoPanel(handle: handle)
         }
     }
 
-    /// 正上方居中的头像 + 昵称；点击进入对方信息面板（参考图三）。
+    /// 正上方居中的头像 + 长条液态玻璃昵称胶囊；点名称进入对方信息面板。
     private var header: some View {
         Button { showingContactInfo = true } label: {
-            VStack(spacing: 6) {
+            VStack(spacing: 8) {
                 InitialAvatar(name: displayName, photoData: photoData, size: 64)
-                HStack(spacing: 4) {
+                HStack(spacing: 5) {
                     Text(displayName)
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                     Image(systemName: "chevron.right")
                         .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(.secondary)
                 }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .modifier(GlassCapsuleBackground())
                 Text(L10n.t("iMessage 信息"))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -1618,6 +1732,7 @@ struct ChatPane: View {
         .accessibilityLabel(L10n.t("联系人信息"))
     }
 
+    /// 底部输入条：长条液态玻璃胶囊，固定在窗口底部，不随键盘上移。
     private var composer: some View {
         HStack(alignment: .bottom, spacing: 8) {
             Menu {
@@ -1635,7 +1750,7 @@ struct ChatPane: View {
                 Image(systemName: "plus")
                     .font(.system(size: 20, weight: .medium))
                     .foregroundStyle(.secondary)
-                    .frame(width: 32, height: 32)
+                    .frame(width: 34, height: 34)
             }
             .buttonStyle(.plain)
             .accessibilityLabel(L10n.t("更多"))
@@ -1643,12 +1758,9 @@ struct ChatPane: View {
             TextField(L10n.t("iMessage 信息"), text: $draft, axis: .vertical)
                 .lineLimit(1...5)
                 .textFieldStyle(.plain)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                .overlay(
-                    Capsule(style: .continuous)
-                        .strokeBorder(Color(uiColor: .separator), lineWidth: 1)
-                )
+                .padding(.horizontal, 16)
+                .padding(.vertical, 9)
+                .modifier(GlassCapsuleBackground())
 
             if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 DictationButton { recognized in
@@ -1659,7 +1771,7 @@ struct ChatPane: View {
                     Image(systemName: "arrow.up")
                         .font(.system(size: 15, weight: .bold))
                         .foregroundStyle(.white)
-                        .frame(width: 30, height: 30)
+                        .frame(width: 32, height: 32)
                         .background(Circle().fill(Color(uiColor: .systemBlue)))
                 }
                 .buttonStyle(.plain)
@@ -1668,7 +1780,6 @@ struct ChatPane: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(.bar)
     }
 
     private func send() {
@@ -1695,6 +1806,17 @@ struct ChatPane: View {
         if calendar.isDateInToday(date) { return L10n.t("今天") }
         if calendar.isDateInYesterday(date) { return L10n.t("昨天") }
         return date.formatted(.dateTime.year().month().day().weekday(.wide))
+    }
+}
+
+/// 长条液态玻璃胶囊底：iOS 26 用系统 glassEffect，旧系统用系统填充色。
+private struct GlassCapsuleBackground: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content.glassEffect(.regular, in: Capsule(style: .continuous))
+        } else {
+            content.background(Capsule(style: .continuous).fill(Color(uiColor: .secondarySystemFill)))
+        }
     }
 }
 
@@ -1734,6 +1856,7 @@ private struct MessageBubble: View {
 }
 /// 对方详细信息面板（参考图三）：× / 编辑、大头像、号码/邮箱、三个圆钮、
 /// 「资料 / 背景」分段、电子邮件、新建联系人、开关组、屏蔽与密钥验证说明。
+/// 带颜色的背景铺满全屏，所有内容都落在这块背景里。
 struct ChatContactInfoPanel: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
@@ -1752,35 +1875,39 @@ struct ChatContactInfoPanel: View {
     private var photoData: Data? { contact?.photoData }
 
     var body: some View {
-        List {
-            Section {
-                header
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
-            }
+        ZStack {
+            ContactPalette.gradient(for: handle)
+                .ignoresSafeArea()
 
-            Section {
-                Picker("", selection: $tab) {
-                    Text(L10n.t("资料")).tag(0)
-                    Text(L10n.t("背景")).tag(1)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-            }
+            ScrollView {
+                VStack(spacing: 16) {
+                    header
 
-            if tab == 0 {
-                detailsTab
-            } else {
-                Section {
-                    EmptyStateView(title: L10n.t("暂无共享背景"), systemImage: "photo")
-                        .frame(height: 180)
-                        .listRowBackground(Color.clear)
+                    Picker("", selection: $tab) {
+                        Text(L10n.t("资料")).tag(0)
+                        Text(L10n.t("背景")).tag(1)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+
+                    if tab == 0 {
+                        detailsTab
+                    } else {
+                        EmptyStateView(title: L10n.t("暂无共享背景"), systemImage: "photo")
+                            .frame(height: 180)
+                    }
                 }
+                .padding(.horizontal, 20)
+                .padding(.top, 20)
+                .padding(.bottom, 32)
+                .frame(maxWidth: 560)
+                .frame(maxWidth: .infinity)
             }
+            .scrollIndicators(.hidden)
         }
-        .listStyle(.insetGrouped)
-        .navigationTitle(displayName)
         .navigationBarTitleDisplayMode(.inline)
+        .immersiveBars()
+        .monochromeBarControls()
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
                 Button { dismiss() } label: {
@@ -1790,6 +1917,7 @@ struct ChatContactInfoPanel: View {
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Button(L10n.t("编辑")) { showingEditor = true }
+                    .fontWeight(.semibold)
             }
         }
         .sheet(isPresented: $showingEditor) {
@@ -1815,21 +1943,40 @@ struct ChatContactInfoPanel: View {
     private var header: some View {
         VStack(spacing: 12) {
             InitialAvatar(name: displayName, photoData: photoData, size: 110)
+                .overlay(Circle().strokeBorder(Color.white.opacity(0.35), lineWidth: 1))
             Text(displayName)
                 .font(.title2.weight(.bold))
+                .foregroundStyle(.white)
                 .multilineTextAlignment(.center)
                 .lineLimit(3)
                 .minimumScaleFactor(0.7)
 
             HStack(spacing: 24) {
-                DetailActionCircle(title: L10n.t("电话"), systemImage: "phone.fill") {
+                DetailActionCircle(
+                    title: L10n.t("电话"),
+                    systemImage: "phone.fill",
+                    foreground: .white,
+                    background: .white.opacity(0.22)
+                ) {
                     if let phone = contact?.phones.first {
                         model.numberInput = phone
                         Task { await model.dial() }
                     }
                 }
-                DetailActionCircle(title: L10n.t("视频"), systemImage: "video.fill", enabled: false) {}
-                DetailActionCircle(title: L10n.t("邮件"), systemImage: "envelope.fill", enabled: contact?.emails.isEmpty == false) {
+                DetailActionCircle(
+                    title: L10n.t("视频"),
+                    systemImage: "video.fill",
+                    foreground: .white,
+                    background: .white.opacity(0.22),
+                    enabled: false
+                ) {}
+                DetailActionCircle(
+                    title: L10n.t("邮件"),
+                    systemImage: "envelope.fill",
+                    foreground: .white,
+                    background: .white.opacity(0.22),
+                    enabled: contact?.emails.isEmpty == false
+                ) {
                     if let email = contact?.emails.first, let url = URL(string: "mailto:\(email)") {
                         UIApplication.shared.open(url)
                     }
@@ -1843,48 +1990,101 @@ struct ChatContactInfoPanel: View {
 
     @ViewBuilder
     private var detailsTab: some View {
-        Section {
-            if let emails = contact?.emails, !emails.isEmpty {
-                ForEach(Array(emails.enumerated()), id: \.offset) { _, email in
-                    LabeledContent(L10n.t("电子邮件"), value: email)
+        VStack(spacing: 14) {
+            InfoCard {
+                if let emails = contact?.emails, !emails.isEmpty {
+                    ForEach(Array(emails.enumerated()), id: \.offset) { index, email in
+                        if index > 0 { InfoCardDivider() }
+                        InfoCardRow(
+                            title: L10n.t("电子邮件"),
+                            value: email,
+                            systemImage: "envelope.fill"
+                        ) {
+                            if let url = URL(string: "mailto:\(email)") {
+                                UIApplication.shared.open(url)
+                            }
+                        }
+                    }
+                } else {
+                    InfoCardRow(
+                        title: L10n.t("电子邮件"),
+                        value: handle,
+                        systemImage: "envelope.fill",
+                        isInteractive: false
+                    ) {}
                 }
-            } else {
-                LabeledContent(L10n.t("电子邮件"), value: handle)
             }
-        }
 
-        Section {
-            Button { showingNewContact = true } label: {
-                Text(L10n.t("新建联系人"))
-            }
-            if contact != nil {
-                Button { showingEditor = true } label: {
-                    Text(L10n.t("添加到现有联系人"))
+            InfoCard {
+                InfoCardRow(title: L10n.t("新建联系人"), value: nil, systemImage: nil, showsChevron: true) {
+                    showingNewContact = true
+                }
+                if contact != nil {
+                    InfoCardDivider()
+                    InfoCardRow(title: L10n.t("添加到现有联系人"), value: nil, systemImage: nil, showsChevron: true) {
+                        showingEditor = true
+                    }
                 }
             }
-        }
 
-        Section {
-            Toggle(L10n.t("隐藏提醒"), isOn: $hideAlerts)
-            Toggle(L10n.t("发送已读回执"), isOn: $sendReadReceipts)
-            Toggle(L10n.t("共享专注模式状态"), isOn: $shareFocusStatus)
-        }
+            InfoCard {
+                InfoCardToggleRow(title: L10n.t("隐藏提醒"), isOn: $hideAlerts)
+                InfoCardDivider()
+                InfoCardToggleRow(title: L10n.t("发送已读回执"), isOn: $sendReadReceipts)
+                InfoCardDivider()
+                InfoCardToggleRow(title: L10n.t("共享专注模式状态"), isOn: $shareFocusStatus)
+            }
 
-        Section {
-            Button(role: .destructive) {
-                blocked.toggle()
-            } label: {
-                Text(blocked ? L10n.t("取消屏蔽联系人") : L10n.t("屏蔽联系人"))
+            InfoCard {
+                Button {
+                    blocked.toggle()
+                } label: {
+                    HStack(spacing: 8) {
+                        Text(blocked ? L10n.t("取消屏蔽联系人") : L10n.t("屏蔽联系人"))
+                            .font(.body)
+                            .foregroundStyle(.white)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 14)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+
+            InfoCard {
+                InfoCardRow(
+                    title: L10n.t("打开联系人密钥验证"),
+                    value: nil,
+                    systemImage: nil,
+                    showsChevron: true
+                ) {}
+                InfoCardDivider()
+                Text("所有 iMessage 信息对话均采用安全的端对端加密，以便其在设备间发送时无法被读取。")
+                    .font(.footnote)
+                    .foregroundStyle(.white.opacity(0.7))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
             }
         }
+    }
+}
 
-        Section {
-            Button {} label: {
-                Text(L10n.t("打开联系人密钥验证"))
-            }
-        } footer: {
-            Text("所有 iMessage 信息对话均采用安全的端对端加密，以便其在设备间发送时无法被读取。")
+/// 渐变信息卡里的开关行（系统设置式右对齐开关）。
+private struct InfoCardToggleRow: View {
+    let title: String
+    @Binding var isOn: Bool
+
+    var body: some View {
+        Toggle(isOn: $isOn) {
+            Text(title)
+                .font(.body)
+                .foregroundStyle(.white)
         }
+        .tint(Color(uiColor: .systemGreen))
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
     }
 }
 

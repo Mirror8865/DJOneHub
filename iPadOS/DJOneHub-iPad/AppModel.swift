@@ -48,6 +48,10 @@ enum ModuleSetupStage: Equatable {
 @MainActor
 final class AppModel: ObservableObject {
     @Published var activeCall: CallRecord?
+    /// 用户在本机确认挂断/拒接后立刻记录的通话 ID。
+    /// 模块状态轮询通常要慢一拍，这个标记让 App 内通话页马上退出，
+    /// 不再出现「电话已经挂了但界面卡在通话页」的情况。
+    @Published var locallyDismissedCallID: String?
     /// 当前通话是否由系统 CallKit 界面接管；它决定静音/DTMF 走系统事务还是模块直连。
     /// 注意：CallKit 只负责锁屏与后台的系统通话界面，App 在前台仍要自己呈现通话页。
     @Published private(set) var callKitManagesCall = false
@@ -340,7 +344,13 @@ final class AppModel: ObservableObject {
             guard !Task.isCancelled, generation == pollingGeneration else { return }
             let previousCall = activeCall
             let history = await mergeCallHistory(status.history ?? [])
-            if activeCall != status.active { activeCall = status.active }
+            if activeCall != status.active {
+                activeCall = status.active
+                // 模块确认通话已经换了一通（或已结束）后，清掉本机提前退出的标记。
+                if status.active?.id != locallyDismissedCallID {
+                    locallyDismissedCallID = nil
+                }
+            }
             if callHistory != history { callHistory = history }
             consecutivePollFailures = 0
 
@@ -560,31 +570,48 @@ final class AppModel: ObservableObject {
 
     func reject() async {
         audio.stopCallTone()
-        if callKit.managesCurrentCall {
-            await perform {
+        let dismissedID = activeCall?.id
+        // 拒接同样是关键操作，理由与挂断一致。
+        isBusy = true
+        defer { isBusy = false }
+        do {
+            if callKit.managesCurrentCall {
                 do {
-                    try await self.callKit.endCurrentCall()
+                    try await callKit.endCurrentCall()
                 } catch CallKitBridgeError.staleSystemCall {
-                    _ = try await self.api.rejectCall()
+                    _ = try await api.rejectCall()
                 }
+            } else {
+                _ = try await api.rejectCall()
             }
-        } else {
-            await perform { _ = try await api.rejectCall() }
+            locallyDismissedCallID = dismissedID
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
         }
     }
 
     func hangup() async {
         audio.stopCallTone()
-        if callKit.managesCurrentCall {
-            await perform {
+        let dismissedID = activeCall?.id
+        // 挂断是关键操作，不能受 isBusy 早退影响：否则界面点了没反应，
+        // 模块侧却已经挂断，就出现「电话挂了但界面停在通话页」。
+        isBusy = true
+        defer { isBusy = false }
+        do {
+            if callKit.managesCurrentCall {
                 do {
-                    try await self.callKit.endCurrentCall()
+                    try await callKit.endCurrentCall()
                 } catch CallKitBridgeError.staleSystemCall {
-                    try await self.api.hangupCall()
+                    try await api.hangupCall()
                 }
+            } else {
+                try await api.hangupCall()
             }
-        } else {
-            await perform { try await api.hangupCall() }
+            locallyDismissedCallID = dismissedID
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
         }
     }
     func sendDTMF(_ digit: String) async {
