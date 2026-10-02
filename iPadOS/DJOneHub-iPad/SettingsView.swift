@@ -271,16 +271,21 @@ struct SettingsView: View {
                 .background(Color(uiColor: .secondarySystemBackground).ignoresSafeArea())
                 .frame(width: 320)
 
-                // 右栏严格按系统设置 App 的分组表单呈现：没有卡片、没有玻璃底板。
+                // 右栏与通话 / 联系人 / 信息三个板块同一套底色：浅色纯白、深色纯黑；
+                // 分组卡片用 secondarySystemBackground，浅色淡灰、深色深灰，卡片始终可辨。
                 Form {
-                    sectionContent(selectedSection ?? .status)
+                    Group { sectionContent(selectedSection ?? .status) }
+                        .listRowBackground(Color(uiColor: .secondarySystemBackground))
                     if !actionMessage.isEmpty {
                         Section {
                             Text(actionMessage).font(.footnote).foregroundStyle(.secondary)
                         }
+                        .listRowBackground(Color(uiColor: .secondarySystemBackground))
                     }
                 }
                 .formStyle(.grouped)
+                .scrollContentBackground(.hidden)
+                .background(Color(uiColor: .systemBackground).ignoresSafeArea())
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .navigationTitle(L10n.t("设置"))

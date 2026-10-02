@@ -565,6 +565,21 @@ struct PhoneSelectionCircle: View {
     var onHighlight: Bool = false
 
     var body: some View {
+        symbol
+            .animation(.spring(response: 0.28, dampingFraction: 0.72), value: isSelected)
+    }
+
+    /// 圆环 → 蓝色对勾用系统符号替换过渡（iOS 17+ 用 symbolEffect），勾选不再生硬。
+    @ViewBuilder
+    private var symbol: some View {
+        if #available(iOS 17.0, *) {
+            icon.contentTransition(.symbolEffect(.replace))
+        } else {
+            icon.contentTransition(.opacity)
+        }
+    }
+
+    private var icon: some View {
         Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
             .font(.system(size: 22, weight: .regular))
             .foregroundStyle(selectionColor)
@@ -709,11 +724,13 @@ struct PhoneSplitDetailColumn<Content: View>: View {
 /// 详情页信息卡底：iOS 26 液态玻璃；旧系统回退为半透明卡片。
 struct GlassCardBackground: ViewModifier {
     var cornerRadius: CGFloat = 22
+    /// 可点击的卡片（如「共享」）需要交互式玻璃，按下时会有回弹。
+    var interactive: Bool = false
 
     func body(content: Content) -> some View {
         if #available(iOS 26.0, *) {
             content.glassEffect(
-                .regular,
+                interactive ? .regular.interactive() : .regular,
                 in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
             )
         } else {
@@ -916,6 +933,7 @@ struct CallsView: View {
                             if selection == call.id { selection = nil }
                         } label: {
                             Label(L10n.t("删除"), systemImage: "trash")
+                            .tint(Color.red)
                         }
                     }
                 }
@@ -960,6 +978,7 @@ struct CallsView: View {
                             if selection == call.id { selection = nil }
                         } label: {
                             Label(L10n.t("删除"), systemImage: "trash")
+                            .tint(Color.red)
                         }
                     }
                 }
@@ -996,10 +1015,12 @@ struct CallsView: View {
     }
 
     private func toggleCheck(_ id: String) {
-        if checkedIDs.contains(id) {
-            checkedIDs.remove(id)
-        } else {
-            checkedIDs.insert(id)
+        withAnimation(.spring(response: 0.30, dampingFraction: 0.78)) {
+            if checkedIDs.contains(id) {
+                checkedIDs.remove(id)
+            } else {
+                checkedIDs.insert(id)
+            }
         }
     }
 
@@ -1294,10 +1315,7 @@ struct CallDetailPane: View {
                 .foregroundStyle(.white)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 14)
-                .background(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(Color.white.opacity(0.18))
-                )
+                .modifier(GlassCardBackground(cornerRadius: 14, interactive: true))
             }
         }
     }
@@ -1533,6 +1551,7 @@ struct ContactsView: View {
                                     }
                                 } label: {
                                     Label(L10n.t("删除"), systemImage: "trash")
+                                    .tint(Color.red)
                                 }
                             }
                         }
@@ -1548,10 +1567,12 @@ struct ContactsView: View {
     }
 
     private func toggleCheck(_ id: String) {
-        if checkedIDs.contains(id) {
-            checkedIDs.remove(id)
-        } else {
-            checkedIDs.insert(id)
+        withAnimation(.spring(response: 0.30, dampingFraction: 0.78)) {
+            if checkedIDs.contains(id) {
+                checkedIDs.remove(id)
+            } else {
+                checkedIDs.insert(id)
+            }
         }
     }
 
@@ -1673,6 +1694,8 @@ struct ContactDetailPane: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button(L10n.t("编辑")) { showingEditor = true }
                         .fontWeight(.semibold)
+                        // 顶栏文字按钮统一系统单色（浅色黑 / 深色白），不用强调色蓝。
+                        .tint(Color.primary)
                 }
             }
         }
@@ -2112,6 +2135,7 @@ struct MessagesView: View {
                             if selection == conversation.id { selection = nil }
                         } label: {
                             Label(L10n.t("删除"), systemImage: "trash")
+                            .tint(Color.red)
                         }
                     }
                 }
@@ -2139,10 +2163,12 @@ struct MessagesView: View {
     }
 
     private func toggleCheck(_ id: String) {
-        if checkedIDs.contains(id) {
-            checkedIDs.remove(id)
-        } else {
-            checkedIDs.insert(id)
+        withAnimation(.spring(response: 0.30, dampingFraction: 0.78)) {
+            if checkedIDs.contains(id) {
+                checkedIDs.remove(id)
+            } else {
+                checkedIDs.insert(id)
+            }
         }
     }
 
@@ -2569,16 +2595,14 @@ struct ChatContactInfoPanel: View {
         .navigationBarTitleDisplayMode(.inline)
         .immersiveBars()
         .monochromeBarControls()
+        // 返回按钮已由系统导航栏提供，
+        // 不再重复放一个功能相同的关闭按钮（HIG：同一操作只留一个入口）。
         .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                Button { dismiss() } label: {
-                    Image(systemName: "xmark")
-                }
-                .accessibilityLabel(L10n.t("关闭"))
-            }
             ToolbarItem(placement: .topBarTrailing) {
                 Button(L10n.t("编辑")) { showingEditor = true }
                     .fontWeight(.semibold)
+                    // 顶栏文字按钮统一系统单色（浅色黑 / 深色白），不用强调色蓝。
+                    .tint(Color.primary)
             }
         }
 .sheet(isPresented: $showingEditor) {
@@ -2957,6 +2981,8 @@ private struct NativeContactCard: UIViewControllerRepresentable {
         guard showsNavigationBar else { return controller }
         let nav = UINavigationController(rootViewController: controller)
         nav.navigationBar.prefersLargeTitles = false
+        // 系统卡片的顶栏按钮也要遵守同一套单色规范：浅色黑、深色白，而不是强调色蓝。
+        nav.navigationBar.tintColor = .label
         if showsDoneButton {
             controller.navigationItem.leftBarButtonItem = UIBarButtonItem(
                 title: L10n.t("完成"),
@@ -3037,7 +3063,10 @@ struct ContactNativeNew: UIViewControllerRepresentable {
         let controller = CNContactViewController(forNewContact: nil)
         controller.contactStore = contactStore
         controller.delegate = context.coordinator
-        return UINavigationController(rootViewController: controller)
+        let nav = UINavigationController(rootViewController: controller)
+        // 新建联系人的 X / ✓ 也用系统单色（浅色黑 / 深色白）。
+        nav.navigationBar.tintColor = .label
+        return nav
     }
 
     func updateUIViewController(_ nav: UINavigationController, context: Context) {}
