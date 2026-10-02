@@ -28,13 +28,13 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .status: return "状态"
-        case .appearance: return "外观"
-        case .notification: return "通知"
+        case .appearance: return "外观与语言"
+        case .notification: return "后台与保活"
         case .connection: return "连接"
         case .voice: return "通话支持"
         case .network: return "网络"
         case .power: return "功率与温度"
-        case .esim: return "eSIM / 卡片"
+        case .esim: return "eSIM 与卡片"
         case .debugAT: return "AT 调试"
         case .service: return "服务控制"
         }
@@ -52,6 +52,31 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
         case .esim: return "simcard"
         case .debugAT: return "terminal"
         case .service: return "gearshape.2"
+        }
+    }
+}
+
+/// 左栏分组：和系统设置 App 一致，先分组标题、再列具体条目。
+private enum SettingsGroup: String, CaseIterable, Identifiable {
+    case djonehub
+    case module
+    case advanced
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .djonehub: return "DJOneHub 设置"
+        case .module: return "模块设置"
+        case .advanced: return "高级"
+        }
+    }
+
+    var sections: [SettingsSection] {
+        switch self {
+        case .djonehub: return [.status, .appearance, .notification]
+        case .module: return [.connection, .voice, .network, .power, .esim]
+        case .advanced: return [.debugAT, .service]
         }
     }
 }
@@ -76,8 +101,6 @@ struct SettingsView: View {
     @State private var systemPower: SystemPowerStatus?
     @State private var showingPowerDetails = false
     @State private var powerDetailsPresented = false
-    @State private var powerCardPressed = false
-    @State private var powerCardFeedback = UIImpactFeedbackGenerator(style: .medium)
     @State private var cellularAllowed = true
     /// 4G 策略写入期间，禁止轮询回包覆盖用户刚刚选择的状态。
     @State private var isUpdatingCellularPolicy = false
@@ -185,16 +208,16 @@ struct SettingsView: View {
     // MARK: - iPhone 单列表单（官方 grouped Form）
     private var settingsForm: some View {
         Form {
-            Section(L10n.t("状态")) { statusCard }
-            Section(L10n.t("外观")) { appearanceCard }
-            Section("通知") { notificationCard }
-            Section("连接") { connectionCard }
-            Section("通话支持") { voiceCard }
-            Section(L10n.t("网络")) { networkCard }
-            Section("功率与温度") { powerCard }
-            Section(L10n.t("eSIM / 卡片")) { esimCard }
-            Section(L10n.t("AT 调试")) { atCard }
-            Section("服务控制") { serviceCard }
+            statusSection
+            appearanceSection
+            notificationSection
+            connectionSection
+            voiceSection
+            networkSection
+            powerSection
+            esimSection
+            atSection
+            serviceSection
             if !actionMessage.isEmpty {
                 Section {
                     Text(actionMessage).font(.footnote).foregroundStyle(.secondary)
@@ -204,37 +227,38 @@ struct SettingsView: View {
         .formStyle(.grouped)
     }
 
-    // MARK: - iPad 分区列表 + 详情（系统设置式，左右各为一整列，无高度差空白）
+    // MARK: - iPad 分区列表 + 详情（系统设置式，左右各为一整列）
 
-    /// 左栏分区列表，右栏只承载当前分区的全部内容；分区之间逻辑并列，不互相留白。
+    /// 左栏按系统设置 App 分成「DJOneHub 设置 / 模块设置 / 高级」三组，
+    /// 右栏只承载当前分区的分组表单，不再使用自绘玻璃卡片。
     private var settingsSplitView: some View {
         NavigationSplitView {
             List(selection: $selectedSection) {
-                Section(L10n.t("设置")) {
-                    ForEach(SettingsSection.allCases) { section in
-                        Label(L10n.t(section.title), systemImage: section.icon)
-                            .tag(section)
+                ForEach(SettingsGroup.allCases) { group in
+                    Section(L10n.t(group.title)) {
+                        ForEach(group.sections) { section in
+                            Label(L10n.t(section.title), systemImage: section.icon)
+                                .tag(section)
+                        }
                     }
                 }
             }
             .listStyle(.sidebar)
+            // 侧栏选中高亮用系统蓝，避免父级 primary tint 把选中行染成黑色。
+            .tint(Color(uiColor: .systemBlue))
             .navigationTitle(L10n.t("设置"))
-            .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 360)
+            .navigationSplitViewColumnWidth(min: 250, ideal: 290, max: 380)
         } detail: {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    settingsCard("") { sectionContent(selectedSection ?? .status) }
-                    if !actionMessage.isEmpty {
-                        settingsCard("") {
-                            Text(actionMessage).font(.footnote).foregroundStyle(.secondary)
-                        }
+            // 右栏严格按系统设置 App 的分组表单呈现：没有卡片、没有玻璃底板。
+            Form {
+                sectionContent(selectedSection ?? .status)
+                if !actionMessage.isEmpty {
+                    Section {
+                        Text(actionMessage).font(.footnote).foregroundStyle(.secondary)
                     }
                 }
-                .frame(maxWidth: 760, alignment: .leading)
-                .frame(maxWidth: .infinity, alignment: .top)
-                .padding(20)
             }
-            .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
+            .formStyle(.grouped)
             .navigationTitle(L10n.t((selectedSection ?? .status).title))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { settingsToolbar }
@@ -244,16 +268,16 @@ struct SettingsView: View {
     @ViewBuilder
     private func sectionContent(_ section: SettingsSection) -> some View {
         switch section {
-        case .status: statusCard
-        case .appearance: appearanceCard
-        case .notification: notificationCard
-        case .connection: connectionCard
-        case .voice: voiceCard
-        case .network: networkCard
-        case .power: powerCard
-        case .esim: esimCard
-        case .debugAT: atCard
-        case .service: serviceCard
+        case .status: statusSection
+        case .appearance: appearanceSection
+        case .notification: notificationSection
+        case .connection: connectionSection
+        case .voice: voiceSection
+        case .network: networkSection
+        case .power: powerSection
+        case .esim: esimSection
+        case .debugAT: atSection
+        case .service: serviceSection
         }
     }
 
@@ -268,70 +292,38 @@ struct SettingsView: View {
         }
     }
 
-    private func settingsCard<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if !title.isEmpty {
-                Text(title)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.secondary)
+    /// 状态：系统设置式分组行（LabeledContent），每行一项，不再做两列卡片。
+    @ViewBuilder
+    private var statusSection: some View {
+        Section {
+            LabeledContent(L10n.t("模块代理")) {
+                Text(model.isOnline ? L10n.t("在线") : L10n.t("离线"))
+                    .foregroundStyle(model.isOnline ? Color.green : Color.red)
             }
-            content()
+            LabeledContent("App 版本", value: appVersionText)
+            LabeledContent("Agent 版本", value: model.agentVersion ?? (model.isOnline ? "读取中" : "--"))
+            LabeledContent(L10n.t("运营商"), value: operatorDisplayName(modem?.operatorName) ?? "--")
+            LabeledContent(L10n.t("SIM 卡"), value: modem?.simInserted == true ? "已接入" : "未接入")
+            LabeledContent(L10n.t("网络模式"), value: modem?.networkMode ?? "--")
+            LabeledContent(L10n.t("信号强度"), value: modem?.signalDBM.map { "\($0) dBm" } ?? "--")
+        } header: {
+            Text(L10n.t("模块"))
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(16)
-        .modifier(SettingsCardGlass())
-    }
-
-    private var statusCard: some View {
-        VStack(spacing: 12) {
-            // 状态字段两列紧凑网格（标签在上、值在下），消除每行独占的空白。
-            LazyVGrid(
-                columns: [
-                    GridItem(.flexible(), spacing: 12, alignment: .leading),
-                    GridItem(.flexible(), spacing: 12, alignment: .leading)
-                ],
-                spacing: 12
-            ) {
-                statusMetric(L10n.t("模块代理"), model.isOnline ? L10n.t("在线") : L10n.t("离线"),
-                             tint: model.isOnline ? .green : .red)
-                statusMetric("App 版本", appVersionText)
-                statusMetric("Agent 版本", model.agentVersion ?? (model.isOnline ? "读取中" : "--"))
-                statusMetric(L10n.t("运营商"), operatorDisplayName(modem?.operatorName) ?? "--")
-                statusMetric(L10n.t("SIM 卡"), modem?.simInserted == true ? "已接入" : "未接入")
-                statusMetric(L10n.t("网络模式"), modem?.networkMode ?? "--")
-                statusMetric(L10n.t("信号强度"), modem?.signalDBM.map { "\($0) dBm" } ?? "--")
-            }
-            Divider()
-            HStack(spacing: 0) {
-                metric(L10n.t("下载速度"), rateText(downloadRate))
-                Divider().frame(height: 36)
-                metric(L10n.t("上传速度"), rateText(uploadRate))
-                Divider().frame(height: 36)
-                metric(L10n.t("本次流量"), byteText(traffic?.sessionTotal))
-            }
+        Section {
+            LabeledContent(L10n.t("下载速度"), value: rateText(downloadRate))
+            LabeledContent(L10n.t("上传速度"), value: rateText(uploadRate))
+            LabeledContent(L10n.t("本次流量"), value: byteText(traffic?.sessionTotal))
+        } header: {
+            Text(L10n.t("流量"))
+        }
+        Section {
             Button {
                 Task { await refreshAll() }
             } label: {
                 Label(L10n.t("刷新"), systemImage: "arrow.clockwise")
-                    .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.bordered)
+            .disabled(busy)
         }
-    }
-
-    /// 状态字段单元（标签在上、值在下，两列网格用）。
-    private func statusMetric(_ title: String, _ value: String, tint: Color? = nil) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(title)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            Text(value)
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(tint ?? .primary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var appVersionText: String {
@@ -340,218 +332,163 @@ struct SettingsView: View {
         return "\(version) (\(build))"
     }
 
-    private var appearanceCard: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Label(L10n.t("显示模式"), systemImage: "circle.lefthalf.filled")
-                Spacer()
-                Picker(L10n.t("显示模式"), selection: $appSettings.appearance) {
-                    ForEach(AppAppearance.allCases) { Text($0.title).tag($0) }
-                }
-                .labelsHidden()
-                .pickerStyle(.menu)
+    /// 外观与语言：系统设置式 Picker 行。
+    @ViewBuilder
+    private var appearanceSection: some View {
+        Section {
+            Picker(L10n.t("显示模式"), selection: $appSettings.appearance) {
+                ForEach(AppAppearance.allCases) { Text($0.title).tag($0) }
             }
-            .padding(.vertical, 4)
-            Divider()
-            HStack {
-                Label(L10n.t("语言"), systemImage: "globe")
-                Spacer()
-                Picker(L10n.t("语言"), selection: $appSettings.language) {
-                    ForEach(AppLanguage.allCases) { Text($0.title).tag($0) }
-                }
-                .labelsHidden()
-                .pickerStyle(.menu)
+            Picker(L10n.t("语言"), selection: $appSettings.language) {
+                ForEach(AppLanguage.allCases) { Text($0.title).tag($0) }
             }
-            .padding(.vertical, 4)
+        } header: {
+            Text(L10n.t("外观与语言"))
         }
     }
 
-    private var notificationCard: some View {
-        VStack(spacing: 0) {
-            Toggle("锁屏收来电", isOn: $backgroundStandbyEnabled)
+    /// 后台与保活：保活开关 + 通知开关，全部是系统设置式行。
+    /// 保活不使用静音音频后台播放，改用「始终允许」的后台定位维持进程。
+    @ViewBuilder
+    private var notificationSection: some View {
+        Section {
+            Toggle(L10n.t("后台保活"), isOn: $backgroundStandbyEnabled)
                 // 开关保持系统绿色（TabView 的 primary tint 不得染到开关）。
                 .tint(Color(uiColor: .systemGreen))
                 .onChange(of: backgroundStandbyEnabled) { enabled in
                     model.setBackgroundStandbyEnabled(enabled)
                 }
-            Text(backgroundStandbyEnabled
-                 ? "可靠来电模式：后台维持必要的连接与音频准备，锁屏来电更及时，但耗电高于普通 App。"
-                 : "低耗电模式：iOS 可挂起 App；锁屏来电可能延迟，甚至无法及时显示。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .fixedSize(horizontal: false, vertical: true)
-            Divider().padding(.vertical, 8)
+            LabeledContent(L10n.t("保活状态"), value: model.backgroundStandby.statusText)
+        } header: {
+            Text(L10n.t("后台与保活"))
+        } footer: {
+            Text("不使用静音音频后台播放。开启后 App 借助“始终允许”的后台定位让进程保持活跃，熄屏或切到后台仍能及时收到模块转发的来电与短信，代价是略高的耗电。")
+        }
+        Section {
             Toggle("短信通知", isOn: $smsNotificationsEnabled)
                 .tint(Color(uiColor: .systemGreen))
                 .onChange(of: smsNotificationsEnabled) { enabled in
                     model.setSMSNotificationsEnabled(enabled)
                 }
-            Text("App 在后台时，新收到的短信会像来电一样弹出系统通知；关闭后仍可在 App 内查看。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .fixedSize(horizontal: false, vertical: true)
-            Divider().padding(.vertical, 8)
             Toggle("灵动岛", isOn: $liveActivityEnabled)
                 .tint(Color(uiColor: .systemGreen))
                 .onChange(of: liveActivityEnabled) { enabled in
                     model.setLiveActivityEnabled(enabled)
                 }
-            Text("关闭后结束灵动岛和锁屏实时活动；普通来电通知仍然保留。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .fixedSize(horizontal: false, vertical: true)
-            Divider().padding(.vertical, 8)
             Toggle("省电模式", isOn: $lowPowerModeEnabled)
                 .tint(Color(uiColor: .systemGreen))
                 .onChange(of: lowPowerModeEnabled) { enabled in
                     model.setLowPowerModeEnabled(enabled)
                 }
                 .disabled(!backgroundStandbyEnabled)
-            Text(lowPowerModeEnabled
-                 ? "优先降低空闲状态请求频率；旧模块不支持事件等待时会自动使用兼容轮询。"
-                 : "保持较高的后台检测频率，响应更快但耗电更高。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .fixedSize(horizontal: false, vertical: true)
+        } header: {
+            Text(L10n.t("通知"))
+        } footer: {
+            Text("App 在后台时，新短信与来电会像来电一样弹出系统通知；灵动岛关闭后结束实时活动，普通通知仍然保留。省电模式降低后台空闲时的检测频率。")
         }
     }
 
-    private var connectionCard: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 12) {
-                Label("连接模式", systemImage: DeviceContext.symbolName)
-                Spacer()
-                Text(usbProfile?.mode == "mac" ? "Mac 完整模式" : "\(DeviceContext.displayName) 直连模式")
-                    .font(.subheadline.weight(.semibold))
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .padding(.vertical, 4)
-            Text("192.168.225.1")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Divider().padding(.vertical, 8)
-            Button {
-                showingMacModeConfirmation = true
-            } label: {
-                Label("切换为 Mac 完整模式", systemImage: "laptopcomputer.and.iphone")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.bordered)
-            .disabled(busy || !model.isOnline || usbProfile?.mode == "mac")
-            Text("快速切换只改 UAC 位，不重刷整套固件；重启和 USB 重新枚举通常只需十几秒。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .fixedSize(horizontal: false, vertical: true)
-            Divider().padding(.vertical, 8)
+    /// 连接：系统设置式信息行 + 模式切换动作行。
+    @ViewBuilder
+    private var connectionSection: some View {
+        Section {
+            LabeledContent("连接模式", value: usbProfile?.mode == "mac" ? "Mac 完整模式" : "\(DeviceContext.displayName) 直连模式")
+            LabeledContent("模块地址", value: "192.168.225.1")
             NavigationLink {
                 RingtoneSettingsView()
             } label: {
                 Label("来电铃声", systemImage: "bell.fill")
             }
+        } header: {
+            Text(L10n.t("连接"))
+        }
+        Section {
+            Button {
+                showingMacModeConfirmation = true
+            } label: {
+                Label("切换为 Mac 完整模式", systemImage: "laptopcomputer.and.iphone")
+            }
+            .disabled(busy || !model.isOnline || usbProfile?.mode == "mac")
+        } footer: {
+            Text("快速切换只改 UAC 位，不重刷整套固件；重启和 USB 重新枚举通常只需十几秒。")
         }
     }
 
-    private var voiceCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label("通话支持", systemImage: "waveform.circle.fill").font(.headline)
-            Text(voice?.ready == true ? "语音运行时已就绪" : (voice?.lastError ?? "等待模块语音运行时"))
-                .font(.subheadline)
-                .foregroundStyle(voice?.ready == true ? Color.green : Color.secondary)
+    /// 通话支持：状态行 + 两个动作行。
+    @ViewBuilder
+    private var voiceSection: some View {
+        Section {
+            LabeledContent(L10n.t("语音运行时")) {
+                Text(voice?.ready == true ? "已就绪" : "未就绪")
+                    .foregroundStyle(voice?.ready == true ? Color.green : Color.secondary)
+            }
             if let detail = voice?.runtimeDetail, !detail.isEmpty {
-                Text(detail).font(.caption).foregroundStyle(.secondary)
+                Text(detail).font(.footnote).foregroundStyle(.secondary)
+            } else if voice?.ready != true, let error = voice?.lastError, !error.isEmpty {
+                Text(error).font(.footnote).foregroundStyle(.secondary)
             }
-            HStack {
-                Button("刷新") { Task { await refreshVoice() } }
-                if voice?.ready != true {
-                    Button("安装语音运行时") { Task { await provisionVoice() } }
-                        .buttonStyle(.borderedProminent)
-                }
+        } header: {
+            Text(L10n.t("通话支持"))
+        }
+        Section {
+            Button("刷新") { Task { await refreshVoice() } }
+            if voice?.ready != true {
+                Button("安装语音运行时") { Task { await provisionVoice() } }
             }
         }
     }
 
-    private var networkCard: some View {
-        VStack(spacing: 12) {
+    /// 网络：4G 出口开关 + 诊断动作行。
+    @ViewBuilder
+    private var networkSection: some View {
+        Section {
             Toggle(L10n.t("允许 4G 上网"), isOn: cellularAllowedBinding)
                 .tint(Color(uiColor: .systemGreen))
                 .disabled(isUpdatingCellularPolicy)
+        } footer: {
             Text("关闭后禁止\(DeviceContext.displayName)通过模块访问互联网；短信与来电监控不受影响。")
-                .font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
-                .fixedSize(horizontal: false, vertical: true)
-            Divider()
-            actionGrid([
-                (L10n.t("检查 4G 出口"), "antenna.radiowaves.left.and.right", check4G),
-                (L10n.t("检查代理出口"), "network", checkProxy),
-                (L10n.t("网络诊断"), "stethoscope", showNetworkDiagnostic),
-                (L10n.t("重启模块"), "restart", rebootModule),
-            ])
         }
+        Section {
+            Button { Task { await check4G() } } label: {
+                Label(L10n.t("检查 4G 出口"), systemImage: "antenna.radiowaves.left.and.right")
+            }
+            Button { Task { await checkProxy() } } label: {
+                Label(L10n.t("检查代理出口"), systemImage: "network")
+            }
+            Button { Task { await showNetworkDiagnostic() } } label: {
+                Label(L10n.t("网络诊断"), systemImage: "stethoscope")
+            }
+            Button { Task { await rebootModule() } } label: {
+                Label(L10n.t("重启模块"), systemImage: "restart")
+            }
+        } header: {
+            Text(L10n.t("诊断与维护"))
+        }
+        .disabled(busy)
     }
 
     /// 温度与供电仅每次设置页状态刷新时读取一次，不保持额外后台轮询。
-    private var powerCard: some View {
-        VStack(spacing: 12) {
-            HStack(spacing: 12) {
-                Image(systemName: "thermometer.medium")
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(.orange)
-                    .frame(width: 38, height: 38)
-                    .background(.orange.opacity(0.14), in: Circle())
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("模块温度")
-                        .font(.subheadline.weight(.semibold))
-                    Text(powerCardSubtitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Spacer(minLength: 8)
-
-                VStack(alignment: .trailing, spacing: 2) {
-                    Text(primaryPower.map { String(format: "%.1f W", $0) } ?? "--")
-                        .font(.title3.weight(.semibold).monospacedDigit())
-                    Text("当前功率")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            Divider()
-
-            HStack(spacing: 0) {
-                compactPowerMetric("电压", primaryVoltage.map { String(format: "%.2f V", $0) } ?? "--")
-                Divider().frame(height: 28)
-                compactPowerMetric("电流", primaryCurrent.map { String(format: "%.2f A", $0) } ?? "--")
-                Divider().frame(height: 28)
-                compactPowerMetric("状态", modulePowerOnline ? "已连接" : "--", tint: modulePowerOnline ? .green : .secondary)
+    /// 功率与温度：系统设置式读数行，完整传感器列表放到二级入口。
+    @ViewBuilder
+    private var powerSection: some View {
+        Section {
+            LabeledContent("模块温度", value: primaryTemperature.map { String(format: "%.0f°C", $0) } ?? "--")
+            LabeledContent("当前功率", value: primaryPower.map { String(format: "%.1f W", $0) } ?? "--")
+            LabeledContent("电压", value: primaryVoltage.map { String(format: "%.2f V", $0) } ?? "--")
+            LabeledContent("电流", value: primaryCurrent.map { String(format: "%.2f A", $0) } ?? "--")
+            LabeledContent("供电状态", value: modulePowerOnline ? "已连接" : "--")
+        } header: {
+            Text(L10n.t("功率与温度"))
+        } footer: {
+            Text(powerCardSubtitle)
+        }
+        Section {
+            Button {
+                showingPowerDetails = true
+            } label: {
+                Label(L10n.t("查看全部传感器"), systemImage: "list.bullet.rectangle")
             }
         }
-        .padding(14)
-        .scaleEffect(powerCardPressed ? 0.97 : 1)
-        .animation(.easeOut(duration: 0.12), value: powerCardPressed)
-        // 长按卡片才显示完整传感器列表；轻触仍保持设置页的普通滚动体验。
-        .onLongPressGesture(
-            minimumDuration: 0.2,
-            maximumDistance: 36,
-            perform: {
-                powerCardFeedback.impactOccurred()
-                powerCardFeedback.prepare()
-                withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
-                    showingPowerDetails = true
-                }
-            },
-            onPressingChanged: { pressing in
-                powerCardPressed = pressing
-                if pressing { powerCardFeedback.prepare() }
-            }
-        )
     }
 
     /// 无论模块是否插入都保留同一张卡，避免读取结果返回时设置页面跳动。
@@ -601,30 +538,17 @@ struct SettingsView: View {
         systemPower?.readings.contains(where: { $0.online == true }) == true
     }
 
-    private func compactPowerMetric(_ title: String, _ value: String, tint: Color = .primary) -> some View {
-        VStack(spacing: 2) {
-            Text(value)
-                .font(.caption.weight(.semibold).monospacedDigit())
-                .foregroundStyle(tint)
-            Text(title)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity)
-    }
-
-    // 定位板块已移除（功能未实现，不保留占位）。
-
-    private var esimCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            infoRow(L10n.t("卡片类型"), cardTypeText)
+    /// eSIM 与卡片：卡片信息行 + 每个 Profile 一行 + 两个动作行。
+    @ViewBuilder
+    private var esimSection: some View {
+        Section {
+            LabeledContent(L10n.t("卡片类型"), value: cardTypeText)
             if let message = esim?.message, !message.isEmpty {
-                Text(message).font(.caption).foregroundStyle(.secondary)
+                Text(message).font(.footnote).foregroundStyle(.secondary)
             }
             if let groups = esim?.profiles {
                 ForEach(Array(groups.enumerated()), id: \.offset) { _, group in
                     ForEach(group.profiles ?? []) { profile in
-                        Divider()
                         ESIMProfileRow(profile: profile) { action in
                             // 把所属 eUICC AID 一并传给模块，避免双 eUICC 卡跨 SE 误操作。
                             Task { await handleProfile(action, profile: profile, aid: group.aidHex ?? "") }
@@ -632,52 +556,60 @@ struct SettingsView: View {
                     }
                 }
             }
-            Divider()
-            VStack(spacing: 8) {
-                Button(L10n.t("通讯录检测")) { Task { await probePhonebook() } }
-                    .frame(maxWidth: .infinity)
-                Button(L10n.t("下载新 Profile")) { showingESIMDownload = true }
-                    .buttonStyle(.borderedProminent)
-                    .frame(maxWidth: .infinity)
-            }
+        } header: {
+            Text(L10n.t("eSIM 与卡片"))
+        } footer: {
             if let healthMessage = esimHealth?.message, !healthMessage.isEmpty {
-                Text(healthMessage).font(.caption).foregroundStyle(.secondary)
+                Text(healthMessage)
             }
+        }
+        Section {
+            Button(L10n.t("通讯录检测")) { Task { await probePhonebook() } }
+            Button(L10n.t("下载新 Profile")) { showingESIMDownload = true }
         }
     }
 
-    private var atCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            VStack(alignment: .leading, spacing: 8) {
-                TextField(L10n.t("AT 指令"), text: $atCommand)
-                    .textInputAutocapitalization(.characters)
-                    .autocorrectionDisabled()
-                    .font(.system(.body, design: .monospaced))
-                    .textFieldStyle(.roundedBorder)
-                Button(L10n.t("发送 AT")) { Task { await executeAT() } }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(atCommand.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-            }
-            if !atResponse.isEmpty {
+    /// AT 调试：输入行 + 发送动作行 + 等宽的返回结果行。
+    @ViewBuilder
+    private var atSection: some View {
+        Section {
+            TextField(L10n.t("AT 指令"), text: $atCommand)
+                .textInputAutocapitalization(.characters)
+                .autocorrectionDisabled()
+                .font(.system(.body, design: .monospaced))
+            Button(L10n.t("发送 AT")) { Task { await executeAT() } }
+                .disabled(busy || atCommand.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        } header: {
+            Text(L10n.t("AT 调试"))
+        } footer: {
+            Text("指令需以 AT 开头，长度不超过 256。")
+        }
+        if !atResponse.isEmpty {
+            Section {
                 ScrollView(.horizontal) {
                     Text(atResponse)
                         .font(.system(.caption, design: .monospaced))
                         .textSelection(.enabled)
                 }
-                .frame(maxHeight: 180)
+                .frame(maxHeight: 220)
+            } header: {
+                Text("返回结果")
             }
         }
     }
 
-    private var serviceCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("停止模块内 4G 后台、短信守护、通话与控制服务。")
-                .font(.caption).foregroundStyle(.secondary)
+    /// 服务控制：破坏性动作单独成组，说明放到脚注。
+    @ViewBuilder
+    private var serviceSection: some View {
+        Section {
             Button("完全退出", role: .destructive) {
                 showingShutdownConfirmation = true
             }
-            .buttonStyle(.bordered)
+            .disabled(busy)
+        } header: {
+            Text(L10n.t("服务控制"))
+        } footer: {
+            Text("停止模块内 4G 后台、短信守护、通话与控制服务。代理停止后需重新插拔或重启模块才能恢复。")
         }
     }
 
@@ -869,41 +801,6 @@ struct SettingsView: View {
 
     // MARK: - 展示辅助
 
-    private func infoRow(_ label: String, _ value: String, tint: Color? = nil) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(label).foregroundStyle(.secondary)
-            Text(value)
-                .fontWeight(.medium)
-                .foregroundStyle(tint ?? .primary)
-                .multilineTextAlignment(.leading)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .font(.subheadline)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 3)
-    }
-    private func metric(_ label: String, _ value: String) -> some View {
-        VStack(spacing: 3) {
-            Text(value).font(.subheadline.weight(.semibold)).lineLimit(1).minimumScaleFactor(0.7)
-            Text(label).font(.caption2).foregroundStyle(.secondary).lineLimit(2).multilineTextAlignment(.center)
-        }
-            .frame(maxWidth: .infinity)
-    }
-    private func actionGrid(_ actions: [(String, String, () async -> Void)]) -> some View {
-        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
-            ForEach(Array(actions.enumerated()), id: \.offset) { _, action in
-                Button { Task { await action.2() } } label: {
-                    VStack(spacing: 4) {
-                        Image(systemName: action.1)
-                        Text(action.0).multilineTextAlignment(.center).lineLimit(2)
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 42)
-                }
-                .buttonStyle(.bordered)
-                .disabled(busy)
-            }
-        }
-    }
     private var coordinateText: String {
         guard let lat = gps?.lastFix?.latitude, let lng = gps?.lastFix?.longitude else { return L10n.t("等待定位") }
         return "\(lat), \(lng)"
@@ -1174,16 +1071,3 @@ private struct RingtoneSettingsView: View {
     }
 }
 
-/// 设置页卡片玻璃：iOS 26 官方 glassEffect 圆角卡片，旧系统用 regularMaterial 回退。
-private struct SettingsCardGlass: ViewModifier {
-    func body(content: Content) -> some View {
-        if #available(iOS 26.0, *) {
-            content.glassEffect(.regular, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-        } else {
-            content.background(
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .fill(.regularMaterial)
-            )
-        }
-    }
-}

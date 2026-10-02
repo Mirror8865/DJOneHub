@@ -64,13 +64,16 @@ struct RootView: View {
             // tab 选中色：浅色黑、深色白（不用蓝色）。
             .tint(Color.primary)
 
-            if let call = model.activeCall {
+            // 呼出与来电都优先交给系统 CallKit 界面承载；只有 CallKit 不可用
+            // （例如个人侧载缺少权限）时才回退显示 App 内通话页。
+            if let call = model.activeCall, !model.callKitManagesCall {
                 ActiveCallView(call: call)
                     .transition(.opacity.combined(with: .scale(scale: 0.98)))
             }
         }
         .background(PhoneBackdrop())
         .animation(.easeInOut(duration: 0.2), value: model.activeCall?.id)
+        .animation(.easeInOut(duration: 0.2), value: model.callKitManagesCall)
         .preferredColorScheme(settings.appearance.colorScheme)
         .fullScreenCover(isPresented: Binding(
             get: { !firstConnectionComplete },

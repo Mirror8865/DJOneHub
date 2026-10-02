@@ -47,6 +47,8 @@ enum ModuleSetupStage: Equatable {
 @MainActor
 final class AppModel: ObservableObject {
     @Published var activeCall: CallRecord?
+    /// 当前通话是否由系统 CallKit 界面接管；为 true 时 App 不再重复显示自带通话页。
+    @Published private(set) var callKitManagesCall = false
     @Published var callHistory: [CallRecord] = []
     @Published var messages: [SMSMessage] = []
     @Published var numberInput = ""
@@ -276,6 +278,9 @@ final class AppModel: ObservableObject {
               ["incoming", "waiting"].contains(call.state) else { return }
         let callerName = contacts.displayName(for: call.number)
         callKit.synchronize(call: call, previous: activeCall, callerName: callerName)
+        if callKitManagesCall != callKit.managesCurrentCall {
+            callKitManagesCall = callKit.managesCurrentCall
+        }
         if callKit.suppressesInAppIncomingRingtone {
             audio.stopCallTone()
         }
@@ -327,6 +332,10 @@ final class AppModel: ObservableObject {
                 previous: confirmedEndedCall ?? previousCall,
                 callerName: callerName
             )
+            // 系统通话界面接管后立即收起 App 内通话页，避免同时出现两套通话 UI。
+            if callKitManagesCall != callKit.managesCurrentCall {
+                callKitManagesCall = callKit.managesCurrentCall
+            }
             await liveActivity.update(
                 call: status.active,
                 callerName: callerName,
@@ -464,16 +473,23 @@ final class AppModel: ObservableObject {
     func dial() async {
         let number = Self.validatedNumber(numberInput)
         guard !number.isEmpty else { return }
-        debugDialLog("开始直接提交模块拨号；呼出不经过 CallKit")
+        debugDialLog("呼出提交系统 CallKit")
         await perform {
-            // 呼出交给模块状态机，CallKit 继续仅负责呼入的锁屏界面和系统按键。
-            // 这样不会额外等待 CXStartCallAction 的音频仲裁。
             self.resetControlsForNewCall()
             self.audio.stopCallTone()
-            try await self.api.dial(number: number)
+            do {
+                // 与来电保持一致统一走系统 CallKit：锁屏、后台、小窗都由系统通话界面承载，
+                // App 内不再维护第二套拨号界面。
+                try await self.callKit.startOutgoingCall(number: number)
+                self.debugDialLog("CallKit 已接管呼出")
+            } catch CallKitBridgeError.unavailable {
+                // 个人侧载或受限设备没有 CallKit 权限时回退模块 ATD，保证仍然拨得出去。
+                self.debugDialLog("CallKit 不可用，回退模块直接拨号")
+                try await self.api.dial(number: number)
+            }
             // 仅当模块已确认接收拨号请求后清空，失败时保留号码供用户重试或修改。
             self.numberInput = ""
-            self.debugDialLog("模块 ATD 请求成功")
+            self.callKitManagesCall = self.callKit.managesCurrentCall
         }
     }
 

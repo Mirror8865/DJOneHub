@@ -625,6 +625,18 @@ struct MessagesView: View {
 
     private func isPinned(_ sender: String) -> Bool { pinnedSenders.contains(sender) }
 
+    /// 进入“新信息”草稿：清掉左栏选中，右栏切到新消息线程，左栏同步出现草稿行。
+    private func startNewMessage(_ recipient: String) {
+        selection = nil
+        newMessageRecipient = recipient
+    }
+
+    /// 退出草稿态：左栏恢复普通会话列表，右栏回到选中会话或占位页。
+    private func cancelNewMessage() {
+        newMessageRecipient = nil
+        pendingRecipient = nil
+    }
+
     private func togglePin(_ sender: String) {
         var pins = pinnedSenders
         if pins.contains(sender) { pins.remove(sender) } else { pins.insert(sender) }
@@ -671,7 +683,12 @@ struct MessagesView: View {
                 .task { await model.refreshMessages(silently: true) }
                 .onChange(of: pendingRecipient) { recipient in
                     // iMessage 流程：直接进入右侧新消息线程（不弹小窗口）。
-                    if let recipient, !recipient.isEmpty { newMessageRecipient = recipient }
+                    if let recipient, !recipient.isEmpty { startNewMessage(recipient) }
+                }
+                .onChange(of: selection) { sender in
+                    // 新建消息期间点开其它会话：退出草稿并切到该会话，操作逻辑与 iMessage 一致。
+                    guard newMessageRecipient != nil, sender != nil else { return }
+                    cancelNewMessage()
                 }
                 .sheet(isPresented: $showingPinEditor) { pinEditorSheet }
                 .sheet(isPresented: $showingNamePhotoEditor) {
@@ -705,14 +722,10 @@ struct MessagesView: View {
                 // iMessage 新消息流程：右侧直接是收件人+消息线程，发送后左栏新建会话。
                 NewMessageThread(
                     initialRecipient: draft,
-                    onCancel: {
-                        newMessageRecipient = nil
-                        pendingRecipient = nil
-                    },
+                    onCancel: cancelNewMessage,
                     onSend: { recipient, body in
                         Task { _ = await model.sendSMS(to: recipient, content: body) }
-                        newMessageRecipient = nil
-                        pendingRecipient = nil
+                        cancelNewMessage()
                         selection = recipient
                     },
                     // 收件人实时同步到左栏草稿行，左右两栏始终对应。
@@ -763,6 +776,9 @@ struct MessagesView: View {
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
+        // 选中高亮必须和自绘的蓝色会话块同色。父级 TabView 用的是 primary tint，
+        // 否则系统会给选中行描出一圈黑（深色模式为白）的选中框。
+        .tint(Color(uiColor: .systemBlue))
         // 选中块随 selection 缓慢淡入。
         .animation(.easeOut(duration: 0.2), value: selection)
     }
@@ -797,7 +813,7 @@ struct MessagesView: View {
             InitialAvatar(
                 name: title,
                 photoData: trimmed.isEmpty ? nil : photoData(for: trimmed),
-                size: 52
+                size: 56
             )
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
@@ -811,8 +827,9 @@ struct MessagesView: View {
             }
             Spacer()
         }
-        .padding(.vertical, 10)
-        .listRowInsets(EdgeInsets(top: 2, leading: 10, bottom: 2, trailing: 10))
+        .padding(.vertical, 12)
+        // 蓝色高亮块比灰底窄一圈，两侧留出灰底，和系统列表的选中样式一致。
+        .listRowInsets(EdgeInsets(top: 4, leading: 14, bottom: 4, trailing: 14))
         .listRowSeparator(.hidden)
         .listRowBackground(
             RoundedRectangle(cornerRadius: 20, style: .continuous)
@@ -859,7 +876,8 @@ struct MessagesView: View {
                     RoundedRectangle(cornerRadius: 20, style: .continuous)
                         .fill(Color(uiColor: .systemBlue))
                 )
-                .listRowInsets(EdgeInsets(top: 2, leading: 10, bottom: 2, trailing: 10))
+                // 蓝色融合块比灰底窄一圈：左右各留 14pt、上下各留 4pt 灰底。
+                .listRowInsets(EdgeInsets(top: 4, leading: 14, bottom: 4, trailing: 14))
                 .listRowBackground(Color.clear)
             case .plainGroup(let items):
                 ForEach(items, id: \.sender) { conversation in
@@ -882,11 +900,12 @@ struct MessagesView: View {
             }
         } label: {
             HStack(spacing: 10) {
-                // 复选圈占位与普通态头像同宽（52pt），蓝块宽度与灰色行背景完全一致。
+                // 复选圈只占自己需要的宽度（约 40pt），不再和头像同宽，
+                // 因此蓝色勾选块明显比整行灰底窄，符合系统列表的选择态样式。
                 Image(systemName: inBlue ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 22))
+                    .font(.system(size: 26))
                     .foregroundStyle(inBlue ? Color.white : Color(uiColor: .systemGray3))
-                    .frame(width: 52)
+                    .frame(width: 40)
                 MessageConversationRow(
                     sender: conversation.sender,
                     messages: conversation.messages,
@@ -897,7 +916,7 @@ struct MessagesView: View {
                 )
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 10)
+            .padding(.vertical, 12)
             .overlay(alignment: .bottom) {
                 // 融合块内行间细分割线（半透明白，缩进对齐文字）。
                 if !isLast {
@@ -926,7 +945,7 @@ struct MessagesView: View {
                 highlighted: selection == conversation.sender
             )
         }
-        .listRowInsets(EdgeInsets(top: 0, leading: 10, bottom: 0, trailing: 10))
+        .listRowInsets(EdgeInsets(top: 3, leading: 14, bottom: 3, trailing: 14))
         .listRowBackground(
             RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .fill(selection == conversation.sender ? Color(uiColor: .systemBlue) : Color.clear)
@@ -980,7 +999,7 @@ struct MessagesView: View {
             }
             // 新建信息：iMessage 流程，右侧直接进入新消息线程（系统自动玻璃圆形按钮）。
             ToolbarItem(placement: .topBarTrailing) {
-                Button { newMessageRecipient = "" } label: {
+                Button { startNewMessage("") } label: {
                     Image(systemName: "square.and.pencil")
                 }
                 .tint(Color.primary)
@@ -1046,7 +1065,7 @@ struct MessagesView: View {
         var body: some View {
             HStack(spacing: 12) {
                 // 行高按 iMessage 列表放大，头像与两行文字并排后不再显扁。
-                InitialAvatar(name: displayName, photoData: photoData, size: 52)
+                InitialAvatar(name: displayName, photoData: photoData, size: 56)
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 5) {
                         Text(displayName)
@@ -1070,7 +1089,7 @@ struct MessagesView: View {
                     .font(.caption2)
                     .foregroundStyle(highlighted ? Color.white.opacity(0.85) : .secondary)
             }
-            .padding(.vertical, 10)
+            .padding(.vertical, 12)
         }
 
         /// 行右侧时间：今天显示时分；本周显示星期几；更早显示日期（与 iMessage 一致）。
@@ -1194,6 +1213,8 @@ private struct MessageThreadView: View {
             .padding(.horizontal)
             .padding(.vertical, 8)
         }
+        // 输入栏锚定在底部：键盘弹出时不上移、消息区不跟着跳（与 iMessage 一致）。
+        .ignoresSafeArea(.keyboard, edges: .bottom)
     }
 
     /// iMessage 式会话头部：仅名称文字，带长条形（胶囊）液态玻璃背景，位置居中。
@@ -1771,6 +1792,8 @@ private struct NewMessageThread: View {
             .padding(.horizontal)
             .padding(.vertical, 8)
         }
+        // 输入栏锚定在底部：键盘弹出时不上移（与 iMessage 一致）。
+        .ignoresSafeArea(.keyboard, edges: .bottom)
         .onAppear {
             if recipient.isEmpty { recipient = initialRecipient }
         }
@@ -2075,7 +2098,7 @@ struct ContactsView: View {
                         }
                     }
                     .buttonStyle(.plain)
-                    .listRowInsets(EdgeInsets(top: 2, leading: 10, bottom: 2, trailing: 10))
+                    .listRowInsets(EdgeInsets(top: 3, leading: 14, bottom: 3, trailing: 14))
                     .listRowBackground(Color.clear)
                 }
             }
@@ -2089,6 +2112,9 @@ struct ContactsView: View {
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
+        // 选中高亮必须与自绘的蓝色块同色：父级 TabView 的 primary tint
+        // 否则会给选中联系人描出一圈黑（深色模式为白）的边框。
+        .tint(Color(uiColor: .systemBlue))
         .animation(.easeOut(duration: 0.2), value: selection)
     }
 
@@ -2096,8 +2122,8 @@ struct ContactsView: View {
     private func contactLink(_ contact: ContactStore.Contact, isMe: Bool) -> some View {
         NavigationLink(value: contact.id) {
             HStack(spacing: 12) {
-                // 行高与头像放大，列表不再又紧又扁。
-                InitialAvatar(name: contact.name, photoData: contact.photoData, size: 52)
+                // 行高与头像继续放大到接近系统通讯录的行高，列表不再又紧又扁。
+                InitialAvatar(name: contact.name, photoData: contact.photoData, size: 56)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(contact.name)
                         .font(.body.weight(.semibold))
@@ -2111,9 +2137,9 @@ struct ContactsView: View {
                 }
                 Spacer(minLength: 0)
             }
-            .padding(.vertical, 9)
+            .padding(.vertical, 12)
         }
-        .listRowInsets(EdgeInsets(top: 2, leading: 10, bottom: 2, trailing: 10))
+        .listRowInsets(EdgeInsets(top: 3, leading: 14, bottom: 3, trailing: 14))
         .listRowSeparator(.hidden)
         .listRowBackground(
             RoundedRectangle(cornerRadius: 20, style: .continuous)
@@ -2136,25 +2162,96 @@ struct ContactsView: View {
     }
 }
 
-/// 联系人详情容器：regular 宽窗保留原生卡片自带导航栏（含“编辑”），
-/// compact 窄窗隐藏内层导航栏，只留分栏导航的返回按钮，避免出现两条返回栏。
+/// 联系人详情容器：原生卡片直接铺满详情列，只保留分栏导航自己的返回按钮，
+/// 联系人对象在后台线程预取，所以既不会出现两条导航栏，也不会点开就卡顿。
 private struct NativeContactDetail: View {
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     let identifier: String?
     let phone: String?
     let onCall: (String) -> Void
     let onMessage: (String) -> Void
 
+    @State private var contact: CNContact?
+    @State private var loadFinished = false
+    @State private var showingEditor = false
+
     var body: some View {
-        NativeContactCard(
-            identifier: identifier,
-            phone: phone,
-            showsNavigationBar: horizontalSizeClass == .regular,
-            showsDoneButton: false,
-            onCall: onCall,
-            onMessage: onMessage
-        )
+        Group {
+            if let contact {
+                NativeContactCard(
+                    contact: contact,
+                    // 详情列完全交给分栏导航自己的返回按钮，不再自带第二条导航栏，
+                    // 因此顶部也不会残留一条导航栏高度的留白。
+                    showsNavigationBar: false,
+                    showsDoneButton: false,
+                    allowsEditing: false,
+                    onCall: onCall,
+                    onMessage: onMessage
+                )
+            } else if loadFinished {
+                EmptyStateView(title: L10n.t("无法读取该联系人"), systemImage: "person.crop.circle.badge.exclamationmark")
+            } else {
+                ProgressView()
+                    .controlSize(.large)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        // 铺满整列，上下不留白。
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .ignoresSafeArea(.container, edges: .bottom)
+        .toolbar {
+            if contact != nil {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(L10n.t("编辑")) { showingEditor = true }
+                }
+            }
+        }
+        .sheet(isPresented: $showingEditor) {
+            if let contact {
+                // 编辑仍然走系统原生卡片：allowsEditing + contactStore 由系统负责保存。
+                NativeContactCard(
+                    contact: contact,
+                    showsNavigationBar: true,
+                    showsDoneButton: true,
+                    allowsEditing: true,
+                    onCall: onCall,
+                    onMessage: onMessage
+                )
+                .presentationSizingIfAvailable()
+                .presentationDragIndicator(.visible)
+            }
+        }
+        .task(id: identifier) { await loadContact() }
+    }
+
+    /// 全字段 unifiedContact 读取放到后台线程，主线程只负责切换界面，避免点开就卡住。
+    private func loadContact() async {
+        guard let identifier else {
+            contact = nil
+            loadFinished = true
+            return
+        }
+        contact = nil
+        loadFinished = false
+        let box = await Task.detached(priority: .userInitiated) { () -> NativeContactBox in
+            let store = CNContactStore()
+            let fetched = try? store.unifiedContact(
+                withIdentifier: identifier,
+                keysToFetch: [CNContactViewController.descriptorForRequiredKeys()]
+            )
+            return NativeContactBox(value: fetched)
+        }.value
+        guard !Task.isCancelled else { return }
+        contact = box.value
+        loadFinished = true
+    }
+}
+
+/// 跨线程搬运 CNContact（非 Sendable）的一次性容器：后台只写一次，主线程只读一次。
+private final class NativeContactBox: @unchecked Sendable {
+    let value: CNContact?
+
+    init(value: CNContact?) {
+        self.value = value
     }
 }
 
@@ -2162,22 +2259,27 @@ private struct NativeContactDetail: View {
 /// 传入通讯录 identifier 时直接展示该联系人；否则按号码构造临时卡片。
 /// 号码动作交给系统选择器，用户可明确“发信息 / 拨打电话”，不会被误路由成拨号。
 private struct NativeContactCard: UIViewControllerRepresentable {
-    let identifier: String?
-    let phone: String?
+    /// 直接传入已取好的联系人时优先使用，避免 representable 在 main thread 重复读取通讯录。
+    var contact: CNContact? = nil
+    var identifier: String? = nil
+    var phone: String? = nil
     var showsNavigationBar: Bool = true
     var showsDoneButton: Bool = false
+    var allowsEditing: Bool = false
     let onCall: (String) -> Void
     let onMessage: (String) -> Void
 
-    func makeUIViewController(context: Context) -> UINavigationController {
+    func makeUIViewController(context: Context) -> UIViewController {
         let store = CNContactStore()
-        let contact: CNContact
-        if let identifier,
-           let fetched = try? store.unifiedContact(
-               withIdentifier: identifier,
-               keysToFetch: [CNContactViewController.descriptorForRequiredKeys()]
-           ) {
-            contact = fetched
+        let resolved: CNContact
+        if let contact {
+            resolved = contact
+        } else if let identifier,
+                  let fetched = try? store.unifiedContact(
+                      withIdentifier: identifier,
+                      keysToFetch: [CNContactViewController.descriptorForRequiredKeys()]
+                  ) {
+            resolved = fetched
         } else {
             // 号码不在通讯录时构造一张未保存的临时卡片（与 iMessage 展示陌生号码一致）。
             let draft = CNMutableContact()
@@ -2186,19 +2288,22 @@ private struct NativeContactCard: UIViewControllerRepresentable {
                     CNLabeledValue(label: CNLabelPhoneNumberMain, value: CNPhoneNumber(stringValue: phone))
                 ]
             }
-            contact = draft
+            resolved = draft
         }
 
-        let vc = CNContactViewController(for: contact)
+        let vc = CNContactViewController(for: resolved)
         vc.contactStore = store
         vc.delegate = context.coordinator
-        vc.allowsEditing = identifier != nil
+        // 只有通讯录里真实存在的联系人才能进入编辑态；陌生号码的临时卡片不可编辑。
+        vc.allowsEditing = allowsEditing && (contact != nil || identifier != nil)
         vc.allowsActions = true
         context.coordinator.contactViewController = vc
 
+        // 不要导航栏时直接返回卡片本身：多包一层 UINavigationController 会
+        // 在详情列里多出一条空导航栏（顶部留白 + 两个返回按钮）。
+        guard showsNavigationBar else { return vc }
         let nav = UINavigationController(rootViewController: vc)
         nav.navigationBar.prefersLargeTitles = false
-        nav.setNavigationBarHidden(!showsNavigationBar, animated: false)
         if showsDoneButton {
             vc.navigationItem.leftBarButtonItem = UIBarButtonItem(
                 title: L10n.t("完成"),
@@ -2210,7 +2315,7 @@ private struct NativeContactCard: UIViewControllerRepresentable {
         return nav
     }
 
-    func updateUIViewController(_ nav: UINavigationController, context: Context) {}
+    func updateUIViewController(_ controller: UIViewController, context: Context) {}
 
     func makeCoordinator() -> Coordinator {
         Coordinator(onCall: onCall, onMessage: onMessage)
