@@ -20,6 +20,11 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<!-- 保活：系统按此白名单校验 BGTaskScheduler 注册的标识符，缺失会在注册时抛异常。 -->
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>com.djonehub.standby.refresh</string>
+	</array>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSAppTransportSecurity</key>
@@ -49,6 +54,8 @@
 		<string>voip</string>
 		<!-- 后台保活：不使用静音音频，改由定位更新把进程留在运行态。 -->
 		<string>location</string>
+		<!-- 进程被系统回收后，靠后台刷新任务重新拉起并补发通知。 -->
+		<string>fetch</string>
 	</array>
 	<key>UILaunchScreen</key>
 	<dict/>

@@ -1,6 +1,7 @@
 import AVFoundation
 import CallKit
 import Foundation
+import UIKit
 
 /// 把系统 CallKit 操作转发给模块控制层，协议限定在主线程以保护 AppModel 状态。
 @MainActor
@@ -41,9 +42,13 @@ final class CallKitController: NSObject {
         let configuration = CXProviderConfiguration()
         configuration.maximumCallGroups = 1
         configuration.maximumCallsPerCallGroup = 1
-        configuration.supportedHandleTypes = [.phoneNumber]
+        // .generic 让系统联系人、Siri 也能把呼叫动作交给本 App 的 provider。
+        configuration.supportedHandleTypes = [.phoneNumber, .generic]
         configuration.supportsVideo = false
         configuration.includesCallsInRecents = true
+        // 系统通话界面用它作为「回到本 App」的按钮图标；官方要求 40pt 方形纯白模板图，
+        // 缺失时系统只能显示一个没有标识的空白按钮。
+        configuration.iconTemplateImageData = CallKitIcon.templateImageData
         provider = CXProvider(configuration: configuration)
         super.init()
         provider.setDelegate(self, queue: .main)
@@ -135,7 +140,10 @@ final class CallKitController: NSObject {
             // AT+CLCC 偶发空响应不等于电话已挂断；保留 UUID，避免系统扬声器/静音事务变成未知 UUID。
             if currentUUID != nil, systemCallReported || currentDirection == "outgoing" {
                 missingCallPolls += 1
-                guard missingCallPolls >= 3 else { return }
+                // 呼出事务仍在进行（模块 ATD 还没把 CLCC 置起来）时要多等几轮，
+                // 不能因为模块慢一拍就把刚上报给系统的呼出通话结束掉。
+                let toleratedPolls = outgoingStartInFlight ? 12 : 3
+                guard missingCallPolls >= toleratedPolls else { return }
             }
             finishCurrentCall(previous: previous)
             return
@@ -151,7 +159,15 @@ final class CallKitController: NSObject {
             currentBackendID = call.id
             currentNumber = call.number ?? currentNumber
             missingCallPolls = 0
-            if call.state == "active", currentState != "active", systemCallReported {
+            if !systemCallReported {
+                // provider 重置或上报曾失败时，轮询发现模块仍在通话就立刻补报，
+                // 否则系统通话界面会一直缺失，用户只能靠锁屏重新点亮才能看到。
+                provider.reportOutgoingCall(with: uuid, startedConnectingAt: call.startedAt)
+                systemCallReported = true
+                if call.state == "active" {
+                    provider.reportOutgoingCall(with: uuid, connectedAt: call.updatedAt)
+                }
+            } else if call.state == "active", currentState != "active" {
                 provider.reportOutgoingCall(with: uuid, connectedAt: call.updatedAt)
             }
             currentState = call.state
@@ -280,6 +296,12 @@ final class CallKitController: NSObject {
         return true
     }
 
+    /// 呼出事务失败或需要降级为模块直拨时，清掉本地系统通话状态，
+    /// 避免系统侧残留一通永远拨不出去的电话。
+    func abandonSystemCall() {
+        finishCurrentCall(previous: nil, reason: .failed)
+    }
+
     /// 真机联调只记录状态与系统错误码，避免把电话号码写入设备日志。
     private func debugLog(_ message: String) {
 #if DEBUG
@@ -340,15 +362,24 @@ final class CallKitController: NSObject {
             guard currentUUID == action.callUUID, currentDirection == "outgoing" else {
                 throw CallKitBridgeError.staleSystemCall
             }
+            // 官方呼出时序：先 reportOutgoingCall(startedConnectingAt:)，系统通话界面
+            // 随即出现在锁屏、状态栏与灵动岛，然后再执行模块 ATD。
+            // 旧实现把上报放在模块握手之后，模块稍慢时拨出后屏幕上什么都没有。
+            if !systemCallReported {
+                provider.reportOutgoingCall(with: action.callUUID, startedConnectingAt: Date())
+                systemCallReported = true
+            }
             try await handler.callKitStart(number: action.handle.value)
-            provider.reportOutgoingCall(with: action.callUUID, startedConnectingAt: Date())
-            systemCallReported = true
             if currentState == "active" {
                 provider.reportOutgoingCall(with: action.callUUID, connectedAt: Date())
             }
             action.fulfill()
         } catch {
-            if currentUUID == action.callUUID { resetCurrentCall() }
+            if currentUUID == action.callUUID {
+                // 已经上报给系统的呼出必须显式结束，否则系统侧会残留一通僵尸通话，
+                // 用户还会在锁屏看到一通永远拨不出去的电话。
+                finishCurrentCall(previous: nil, reason: .failed)
+            }
             fail(action, error: error)
         }
     }
@@ -448,5 +479,28 @@ enum CallKitBridgeError: LocalizedError {
         case .unavailable: return "系统 CallKit 当前不可用"
         case .callInProgress: return "当前已有进行中的系统通话"
         }
+    }
+}
+
+/// 系统通话界面的 App 标识图：官方要求 40pt 方形、纯白、带透明通道的模板图。
+/// 系统会用自己的圆角与色调渲染它，这里只需要给出白色剪影。
+enum CallKitIcon {
+    static let templateImageData: Data? = makeTemplateImageData()
+
+    private static func makeTemplateImageData() -> Data? {
+        let size = CGSize(width: 40, height: 40)
+        let renderer = UIGraphicsImageRenderer(size: size)
+        let image = renderer.image { context in
+            let cgContext = context.cgContext
+            cgContext.clear(CGRect(origin: .zero, size: size))
+            if let symbol = UIImage(systemName: "phone.fill")?
+                .withTintColor(.white, renderingMode: .alwaysOriginal) {
+                symbol.draw(in: CGRect(x: 5, y: 5, width: 30, height: 30))
+            } else {
+                cgContext.setFillColor(UIColor.white.cgColor)
+                cgContext.fill(CGRect(x: 5, y: 5, width: 30, height: 30))
+            }
+        }
+        return image.pngData()
     }
 }

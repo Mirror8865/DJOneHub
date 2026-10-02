@@ -32,6 +32,7 @@ enum PhoneTab: String, CaseIterable, Identifiable {
 struct RootView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var settings: AppSettings
+    @Environment(\.scenePhase) private var scenePhase
     @AppStorage("djonehub.selected-tab") private var selectedTabRawValue = PhoneTab.dial.rawValue
     @State private var pendingSMSRecipient: String?
     @AppStorage("djonehub.first-connection-complete") private var firstConnectionComplete = false
@@ -64,14 +65,20 @@ struct RootView: View {
             // tab 选中色：浅色黑、深色白（不用蓝色）。
             .tint(Color.primary)
 
-            // 呼出与来电都优先交给系统 CallKit 界面承载；只有 CallKit 不可用
-            // （例如个人侧载缺少权限）时才回退显示 App 内通话页。
-            if let call = model.activeCall, !model.callKitManagesCall {
+            // 系统 CallKit 只负责锁屏、后台与状态栏这一层的通话界面；
+            // App 在前台时必须自己把通话页铺满屏幕，否则呼出后屏幕上什么都没有。
+            // 切到后台/锁屏后本视图不可见，系统通话界面接管；回到 App 时通话页仍在，
+            // 这也让状态栏电话图标「回到 App」后能直接看到通话中界面。
+            if let call = model.activeCall, scenePhase != .background {
                 ActiveCallView(call: call)
                     .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                    .zIndex(1)
             }
         }
         .background(PhoneBackdrop())
+        // 沉浸式状态栏：内容铺到屏幕边缘，状态栏保持可见但不占位。
+        .statusBarHidden(false)
+        .persistentSystemOverlays(.automatic)
         .animation(.easeInOut(duration: 0.2), value: model.activeCall?.id)
         .animation(.easeInOut(duration: 0.2), value: model.callKitManagesCall)
         .preferredColorScheme(settings.appearance.colorScheme)
@@ -125,28 +132,12 @@ struct RootView: View {
 
 }
 
-/// 浅色模式使用系统电话式纯白底；深色模式才绘制深蓝黑底部环境光。
+/// 与系统 App 对齐：只使用系统背景色（浅色纯白、深色纯黑），铺满安全区。
+/// 不再自绘蓝色渐变——自绘底色在深色下会和系统导航栏、状态栏、键盘底色对不上。
 struct PhoneBackdrop: View {
-    @Environment(\.colorScheme) private var colorScheme
-
     var body: some View {
-        ZStack {
-            if colorScheme == .dark {
-                Color(red: 0.008, green: 0.016, blue: 0.035)
-                LinearGradient(
-                    colors: [
-                        Color.clear,
-                        Color(red: 0.018, green: 0.075, blue: 0.16).opacity(0.72),
-                        Color(red: 0.025, green: 0.20, blue: 0.48).opacity(0.62),
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-            } else {
-                Color.white
-            }
-        }
-        .ignoresSafeArea()
+        Color(uiColor: .systemBackground)
+            .ignoresSafeArea()
     }
 }
 

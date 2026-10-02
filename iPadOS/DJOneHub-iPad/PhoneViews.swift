@@ -169,8 +169,12 @@ struct DialPadView: View {
                 // 只在背景普通点击时收起，避免与状态标签的长按结束事件发生竞争。
                 .onTapGesture { dismissModuleStatusPopover() }
             }
-            // 导航栏只承担设置入口；标题和状态放在页面内容区，避免窄屏互相挤压。
+            // 标题交给系统导航栏：iPad 上窗口控件（关闭/最大化/最小化）位于左上角，
+            // 系统会把导航栏内容与窗口控件自动错开；内容区左上角不再放任何自绘元素。
+            .navigationTitle(L10n.t("拨号"))
             .navigationBarTitleDisplayMode(.inline)
+            // 沉浸式：导航栏保持透明，背景色一直铺到状态栏下方。
+            .toolbarBackground(.hidden, for: .navigationBar)
             .onDisappear(perform: stopRepeatingDelete)
         }
     }
@@ -227,17 +231,15 @@ struct DialPadView: View {
             .onEnded { _ in stopRepeatingDelete() }
     }
 
+    /// 标题已在系统导航栏；内容区只保留右侧的模块状态标签，
+    /// 顶部左侧始终留空，窗口控件与状态栏都不会被遮挡。
     private var dialPageHeader: some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
-            Text(L10n.t("拨号"))
-                .font(.system(size: isCompact ? 32 : 36, weight: .bold, design: .rounded))
-                .accessibilityAddTraits(.isHeader)
-
             Spacer(minLength: 12)
-
             dialStatusPill
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .trailing)
+        .accessibilityElement(children: .contain)
     }
 
     private var dialStatusPill: some View {
@@ -459,6 +461,13 @@ struct RecentsView: View {
     let onCall: (String) -> Void
     let onMessage: (String) -> Void
 
+    /// 系统电话 App 的最近通话顶部就是「全部 / 未接」分段控件。
+    @State private var showsMissedOnly = false
+
+    private var displayedCalls: [CallRecord] {
+        showsMissedOnly ? model.callHistory.filter(\.missed) : model.callHistory
+    }
+
     var body: some View {
         NavigationStack {
             Group {
@@ -468,7 +477,7 @@ struct RecentsView: View {
                         systemImage: "phone.arrow.up.right"
                     )
                 } else {
-                    List(model.callHistory) { call in
+                    List(displayedCalls) { call in
                         // 点击整条记录直接回拨；没有号码的异常记录仍保持只读显示。
                         Button {
                             if let number = RecentCallDialPolicy.numberToDial(call.number) {
@@ -494,10 +503,31 @@ struct RecentsView: View {
                         }
                     }
                     .listStyle(.insetGrouped)
+                    .overlay {
+                        if displayedCalls.isEmpty {
+                            EmptyStateView(
+                                title: L10n.t("暂无未接来电"),
+                                systemImage: "phone.arrow.down.left"
+                            )
+                        }
+                    }
                 }
+            }
+            // 与系统电话 App 一致：分段控件固定在导航栏下方，列表在其下滚动。
+            .safeAreaInset(edge: .top, spacing: 0) {
+                Picker(L10n.t("通话筛选"), selection: $showsMissedOnly) {
+                    Text(L10n.t("全部")).tag(false)
+                    Text(L10n.t("未接")).tag(true)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(.bar)
             }
             .background(PhoneBackdrop())
             .navigationTitle(L10n.t("最近通话"))
+            .navigationBarTitleDisplayMode(.large)
         }
     }
 

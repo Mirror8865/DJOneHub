@@ -1,4 +1,5 @@
 import AVFoundation
+import BackgroundTasks
 import CoreLocation
 import Foundation
 import UIKit
@@ -41,7 +42,29 @@ final class DJOneHubNotificationDelegate: NSObject, UIApplicationDelegate, UNUse
         let center = UNUserNotificationCenter.current()
         center.delegate = self
         IncomingCallNotification.registerCategory()
+        // 进程被系统回收后只有系统能重新拉起它；这里登记后台刷新任务作为复活通道之一。
+        StandbyBackgroundScheduler.register()
         return true
+    }
+
+    /// 每次进入后台都补排一次后台刷新；系统按自己的节奏唤醒，用这段时间补发遗漏的通知。
+    func applicationDidEnterBackground(_ application: UIApplication) {
+        StandbyBackgroundScheduler.schedule()
+    }
+
+    /// 旧版「后台刷新」唤醒回调，与 BGTask 走同一条恢复路径。
+    func application(
+        _ application: UIApplication,
+        performFetchWithCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void
+    ) {
+        Task { @MainActor in
+            guard let model = AppModel.shared else {
+                completionHandler(.noData)
+                return
+            }
+            await model.resumeForBackgroundWake()
+            completionHandler(.newData)
+        }
     }
 
     func userNotificationCenter(
@@ -115,11 +138,18 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
     private var suspendedForCall = false
     private var heartbeatActive = false
     private var restartTask: Task<Void, Never>?
+    /// 显著位置变化监控是否已登记；它决定 App 被系统回收后还能不能被自动拉起。
+    private var significantChangeMonitoring = false
+    /// 后台唤醒去重时间戳：定位回调很密集，避免每一次回调都重建轮询。
+    private var lastBackgroundWake = Date.distantPast
 
     /// 是否授予了「始终允许」；只有它才能让定位更新在后台持续投递。
     var hasAlwaysAuthorization: Bool {
         manager.authorizationStatus == .authorizedAlways
     }
+
+    /// 显著位置变化监控是否已生效：生效后即使用户杀掉后台，系统仍可能在位置显著变化时重新拉起 App。
+    var supportsTerminatedRelaunch: Bool { significantChangeMonitoring && hasAlwaysAuthorization }
 
     /// 保活是否真正在运行，设置页用它给出可读状态，避免用户以为开关无效。
     var statusText: String {
@@ -159,11 +189,13 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
         if enabled {
             // 权限弹窗必须在前台出现，用户才能看到并授权；随后由进入后台触发心跳。
             requestAuthorizationIfNeeded()
+            startSignificantChangeMonitoring()
             startIfAuthorized()
         } else {
             restartTask?.cancel()
             restartTask = nil
             stopHeartbeat()
+            stopSignificantChangeMonitoring()
         }
     }
 
@@ -224,6 +256,32 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
         manager.stopUpdatingLocation()
     }
 
+    /// 显著位置变化监控：这是系统允许的「进程被回收后仍能被拉起」通道。
+    /// 只要登记着，iOS 就会在基站 / Wi-Fi 发生显著切换时把 App 重新启动到后台，
+    /// 即使它此前已经被系统回收；耗电远低于持续开启高精度定位。
+    private func startSignificantChangeMonitoring() {
+        guard !significantChangeMonitoring else { return }
+        significantChangeMonitoring = true
+        manager.startMonitoringSignificantLocationChanges()
+    }
+
+    private func stopSignificantChangeMonitoring() {
+        guard significantChangeMonitoring else { return }
+        significantChangeMonitoring = false
+        manager.stopMonitoringSignificantLocationChanges()
+    }
+
+    /// 后台被系统唤醒（定位事件 / 后台刷新任务）时，把 AppModel 拉回「正在轮询」的状态。
+    /// 去重是为了让密集的定位回调不至于反复重启轮询任务。
+    private func dispatchBackgroundWake() {
+        guard enabled, !suspendedForCall else { return }
+        guard Date().timeIntervalSince(lastBackgroundWake) > 45 else { return }
+        lastBackgroundWake = Date()
+        Task { @MainActor in
+            await AppModel.shared?.resumeForBackgroundWake()
+        }
+    }
+
     private func scheduleRestart() {
         guard restartTask == nil, enabled, !suspendedForCall else { return }
         restartTask = Task { @MainActor [weak self] in
@@ -248,10 +306,20 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
     }
 
     /// 回调本身就是心跳；不读取坐标、不落盘、不上传任何位置数据。
+    /// App 被系统回收后再被定位事件拉起时，这里负责把它从空壳恢复成持续轮询的状态。
     nonisolated func locationManager(
         _ manager: CLLocationManager,
         didUpdateLocations locations: [CLLocation]
-    ) {}
+    ) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.heartbeatActive = true
+            // 前台也会收到显著位置变化回调，只有确认不在前台时才按「后台复活」处理。
+            guard UIApplication.shared.applicationState != .active else { return }
+            self.appIsBackground = true
+            self.dispatchBackgroundWake()
+        }
+    }
 
     nonisolated func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
         Task { @MainActor [weak self] in
@@ -322,5 +390,72 @@ final class IncomingCallNotifier {
             trigger: nil
         )
         UNUserNotificationCenter.current().add(request)
+    }
+}
+
+/// 后台刷新任务：App 被系统回收后，系统仍会按自己的节奏把进程唤醒一次。
+/// 保活定位负责「持续活着」，这个任务负责「被回收后还能被叫醒」，两者互补。
+enum StandbyBackgroundScheduler {
+    static let refreshTaskIdentifier = "com.djonehub.standby.refresh"
+
+    private static var isPermitted: Bool {
+        let allowed = Bundle.main.object(forInfoDictionaryKey: "BGTaskSchedulerPermittedIdentifiers") as? [String]
+        return allowed?.contains(refreshTaskIdentifier) ?? false
+    }
+
+    /// 标识符必须先在 Info.plist 的 BGTaskSchedulerPermittedIdentifiers 里声明，
+    /// 否则 register 会抛 Objective-C 异常（Swift 捕不到）直接崩溃，所以先校验再注册。
+    static func register() {
+        guard isPermitted else { return }
+        BGTaskScheduler.shared.register(
+            forTaskWithIdentifier: refreshTaskIdentifier,
+            using: nil
+        ) { task in
+            guard let refreshTask = task as? BGAppRefreshTask else {
+                task.setTaskCompleted(success: false)
+                return
+            }
+            handle(refreshTask)
+        }
+    }
+
+    static func schedule() {
+        guard isPermitted else { return }
+        let request = BGAppRefreshTaskRequest(identifier: refreshTaskIdentifier)
+        // earliestBeginDate 只是「不早于」，真实唤醒时机仍由系统按使用习惯决定。
+        request.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60)
+        try? BGTaskScheduler.shared.submit(request)
+    }
+
+    private static func handle(_ task: BGAppRefreshTask) {
+        // 先排下一次，保证本次即使被中断也不会丢掉后续唤醒机会。
+        schedule()
+        let work = Task { @MainActor in
+            await AppModel.shared?.resumeForBackgroundWake()
+        }
+        task.expirationHandler = { work.cancel() }
+        Task {
+            await work.value
+            task.setTaskCompleted(success: !work.isCancelled)
+        }
+    }
+}
+
+/// 借一段 beginBackgroundTask 执行时间，保证后台唤醒后能完整跑完一轮轮询与通知投递。
+@MainActor
+final class BackgroundExecutionLease {
+    private var identifier: UIBackgroundTaskIdentifier = .invalid
+
+    func begin(_ name: String) {
+        end()
+        identifier = UIApplication.shared.beginBackgroundTask(withName: name) { [weak self] in
+            Task { @MainActor in self?.end() }
+        }
+    }
+
+    func end() {
+        guard identifier != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(identifier)
+        identifier = .invalid
     }
 }

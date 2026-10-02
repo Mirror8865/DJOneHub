@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 
 enum ModuleUpdatePolicy {
     static func shouldInstall(installed: String, available: String) -> Bool {
@@ -47,7 +48,8 @@ enum ModuleSetupStage: Equatable {
 @MainActor
 final class AppModel: ObservableObject {
     @Published var activeCall: CallRecord?
-    /// 当前通话是否由系统 CallKit 界面接管；为 true 时 App 不再重复显示自带通话页。
+    /// 当前通话是否由系统 CallKit 界面接管；它决定静音/DTMF 走系统事务还是模块直连。
+    /// 注意：CallKit 只负责锁屏与后台的系统通话界面，App 在前台仍要自己呈现通话页。
     @Published private(set) var callKitManagesCall = false
     @Published var callHistory: [CallRecord] = []
     @Published var messages: [SMSMessage] = []
@@ -73,6 +75,14 @@ final class AppModel: ObservableObject {
     let incomingNotifier = IncomingCallNotifier()
     let smsNotifier = SMSNotifier()
     let liveActivity = LiveActivityController()
+
+    /// 保活唤醒期间借用的执行时间租约（见 BackgroundExecutionLease）。
+    private let backgroundWakeLease = BackgroundExecutionLease()
+    /// 系统可能在 SwiftUI 场景之外把 App 拉起（定位事件 / 后台任务），
+    /// 需要一条静态引用让 AppDelegate 与保活控制器找回主状态中心。
+    /// App 全程只有一个 AppModel（在 App.init 里创建），因此这里持有强引用不会造成泄漏，
+    /// 反而能保证保活控制器不会因为主状态中心被释放而失联。
+    static var shared: AppModel?
 
     private let historyStore = LocalHistoryStore()
 
@@ -113,7 +123,16 @@ final class AppModel: ObservableObject {
 
     init(api: DJOneHubAPI = DJOneHubAPI()) {
         self.api = api
+        AppModel.shared = self
         callKit.handler = self
+        // 背景启动时 SwiftUI 不会走 onAppear，这里延后一拍自行恢复轮询与保活。
+        // 前台启动有 onAppear 接管，且 applicationState 不会是 background，因此不会重复启动。
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard let self else { return }
+            guard UIApplication.shared.applicationState == .background else { return }
+            await self.resumeForBackgroundWake()
+        }
         // 音频路由可能由 CallKit、蓝牙或系统控制中心改变，通话页按钮必须即时反映真实状态。
         audio.onSpeakerStateChanged = { [weak self] enabled in
             self?.isSpeakerEnabled = enabled
@@ -164,6 +183,30 @@ final class AppModel: ObservableObject {
         appIsActive = false
         Task { await NetworkDiagnosticRecorder.shared.recordLifecycle("background") }
         backgroundStandby.setApplicationIsBackground(true)
+        // 进程一旦被系统回收，只有系统调度能重新拉起它；这里补排一次后台刷新任务。
+        StandbyBackgroundScheduler.schedule()
+    }
+
+    /// 被系统在后台唤醒（显著位置变化 / 后台刷新任务）时恢复保活与轮询。
+    /// 即使进程此前已被系统回收，这条路径也会重新建立轮询并补发遗漏的来电与短信通知。
+    func resumeForBackgroundWake() async {
+        appIsActive = false
+        backgroundStandby.setApplicationIsBackground(true)
+        backgroundStandby.ensureRunning()
+        if !hasStarted {
+            start()
+        } else {
+            consecutivePollFailures = 0
+            api.resetLocalConnectionState()
+            restartCallEventBridge()
+            restartPolling()
+        }
+        // 后台唤醒给的时间窗很短，先借一段执行时间，跑完一轮轮询与通知再归还。
+        backgroundWakeLease.begin("djonehub.standby")
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(25))
+            self?.backgroundWakeLease.end()
+        }
     }
 
     func setBackgroundStandbyEnabled(_ enabled: Bool) {
@@ -485,6 +528,12 @@ final class AppModel: ObservableObject {
             } catch CallKitBridgeError.unavailable {
                 // 个人侧载或受限设备没有 CallKit 权限时回退模块 ATD，保证仍然拨得出去。
                 self.debugDialLog("CallKit 不可用，回退模块直接拨号")
+                try await self.api.dial(number: number)
+            } catch {
+                // 系统事务失败同样不能吞掉用户的拨号动作：清掉残留的系统通话后立即回退模块 ATD，
+                // 保证「点拨号一定有反应」，而不是界面闪一下什么都没发生。
+                self.debugDialLog("CallKit 事务失败，回退模块直接拨号：\(error.localizedDescription)")
+                self.callKit.abandonSystemCall()
                 try await self.api.dial(number: number)
             }
             // 仅当模块已确认接收拨号请求后清空，失败时保留号码供用户重试或修改。

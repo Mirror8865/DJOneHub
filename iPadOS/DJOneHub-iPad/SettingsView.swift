@@ -359,10 +359,16 @@ struct SettingsView: View {
                     model.setBackgroundStandbyEnabled(enabled)
                 }
             LabeledContent(L10n.t("保活状态"), value: model.backgroundStandby.statusText)
+            LabeledContent(
+                L10n.t("被回收后恢复"),
+                value: model.backgroundStandby.supportsTerminatedRelaunch
+                    ? L10n.t("已启用系统级唤醒")
+                    : L10n.t("等待“始终允许”定位授权")
+            )
         } header: {
             Text(L10n.t("后台与保活"))
         } footer: {
-            Text("不使用静音音频后台播放。开启后 App 借助“始终允许”的后台定位让进程保持活跃，熄屏或切到后台仍能及时收到模块转发的来电与短信，代价是略高的耗电。")
+            Text("不使用静音音频后台播放。开启并授权“始终允许”定位后，App 用后台定位维持进程，同时登记显著位置变化监控与后台刷新任务；进程被系统回收时，系统会用这两条通道把它重新拉起并补发遗漏的来电与短信通知。若你在应用切换器里手动上滑杀掉 App，iOS 会暂停这些调度，需要重新打开 App 才能恢复。")
         }
         Section {
             Toggle("短信通知", isOn: $smsNotificationsEnabled)
