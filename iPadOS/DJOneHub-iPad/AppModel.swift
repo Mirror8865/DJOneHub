@@ -1022,6 +1022,11 @@ extension AppModel: CallKitActionHandling {
         }
     }
 
+    /// CXStartCallAction 回调里、fulfill 之前调用：先声明语音类别，
+    /// 让系统在通话建立的第一时间就切到通话态并显示通话界面。
+    func callKitPrepareAudioSession() {
+        try? audio.prepareForCallKit()
+    }
     func callKitAudioSessionDidActivate() async {
         await startCallAudioIfReady()
     }

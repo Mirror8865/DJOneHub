@@ -100,7 +100,6 @@ struct SettingsView: View {
     @State private var uploadRate: Double?
     @State private var systemPower: SystemPowerStatus?
     @State private var showingPowerDetails = false
-    @State private var powerDetailsPresented = false
     @State private var cellularAllowed = true
     /// 4G 策略写入期间，禁止轮询回包覆盖用户刚刚选择的状态。
     @State private var isUpdatingCellularPolicy = false
@@ -176,32 +175,11 @@ struct SettingsView: View {
             } message: {
                 Text("只会写入已验证的 USB Audio 配置位。模块重启后，请把它从\(DeviceContext.displayName)拔出并连接到 Mac。")
             }
-        // 弹窗放到整个设置页顶层，不能附在 Form 单行上，否则长内容会被列表裁切。
-        .overlay {
-            if showingPowerDetails {
-                ZStack {
-                    Color.black.opacity(0.14)
-                        .contentShape(Rectangle())
-                        .onTapGesture { dismissPowerDetails() }
-                        .opacity(powerDetailsPresented ? 1 : 0)
-
-                    PowerDetailsPopover(systemPower: systemPower, onDismiss: dismissPowerDetails)
-                        // 吞掉卡片内的普通点击，只有点击遮罩才关闭。
-                        .onTapGesture {}
-                        // 模拟 iOS 原生弹层：轻微上浮并以弹簧回弹，不硬切显示。
-                        .scaleEffect(powerDetailsPresented ? 1 : 0.92)
-                        .offset(y: powerDetailsPresented ? 0 : 16)
-                        .opacity(powerDetailsPresented ? 1 : 0)
-                        .onAppear {
-                            withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
-                                powerDetailsPresented = true
-                            }
-                        }
-                }
-                // 顶部导航栏不进入遮罩范围，用户随时都能点“完成”退出设置。
-                .padding(.top, 64)
-                .zIndex(10)
-            }
+        // 功率详情改用系统原生 sheet，不再自绘遮罩与浮动卡片。
+        .sheet(isPresented: $showingPowerDetails) {
+            PowerDetailsPopover(systemPower: systemPower, onDismiss: dismissPowerDetails)
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
         }
     }
 
@@ -517,14 +495,7 @@ struct SettingsView: View {
     }
 
     private func dismissPowerDetails() {
-        withAnimation(.easeOut(duration: 0.18)) {
-            powerDetailsPresented = false
-        }
-        Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(190))
-            guard !powerDetailsPresented else { return }
-            showingPowerDetails = false
-        }
+        showingPowerDetails = false
     }
 
     private func closeSettings() {

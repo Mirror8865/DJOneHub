@@ -11,6 +11,8 @@ protocol CallKitActionHandling: AnyObject {
     func callKitEnd() async throws
     func callKitSetMuted(_ muted: Bool) async
     func callKitPlayDTMF(_ digits: String) async throws
+    /// CXStartCallAction 回调内、fulfill 之前必须完成的音频会话配置（CallKit 官方时序）。
+    func callKitPrepareAudioSession()
     func callKitAudioSessionDidActivate() async
     func callKitAudioSessionDidDeactivate()
     func callKitProviderDidReset() async
@@ -360,10 +362,12 @@ final class CallKitController: NSObject {
             guard currentUUID == action.callUUID, currentDirection == "outgoing" else {
                 throw CallKitBridgeError.staleSystemCall
             }
-            // 官方呼出时序：先 reportOutgoingCall(startedConnectingAt:) 让系统通话界面
-            // 立刻出现在锁屏 / 状态栏 / 灵动岛，然后马上 fulfill 这个 CXStartCallAction。
-            // 关键点：不能再等模块 ATD 握手完成才 fulfill —— 模块慢一步，系统就迟迟
-            // 不显示通话界面，只能靠锁屏重新点亮补显示。
+            // 官方呼出时序（CallKit 文档「Making and receiving VoIP calls」）：
+            // 在 CXStartCallAction 回调里先配置 AVAudioSession，再
+            // reportOutgoingCall(startedConnectingAt:)，最后 fulfill。
+            // 少了配置这一步，系统不会立刻进入通话态，通话界面往往要等锁屏
+            // 重新点亮才出现；模块 ATD 握手也绝不能挡在 fulfill 之前。
+            handler.callKitPrepareAudioSession()
             if !systemCallReported {
                 provider.reportOutgoingCall(with: action.callUUID, startedConnectingAt: Date())
                 systemCallReported = true

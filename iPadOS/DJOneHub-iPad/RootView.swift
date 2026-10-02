@@ -1,82 +1,89 @@
 import SwiftUI
 
+/// 顶层 tab。命名与顺序都对齐系统「电话」App 的信息层级：
+/// 拨号 / 最近 / 短信 / 联系人 / 设置，5 个以内不需要 More。
 enum PhoneTab: String, CaseIterable, Identifiable {
-    case dial = "拨号"
-    case recents = "最近通话"
-    case messages = "短信"
-    case contacts = "通讯录"
-    case settings = "设置"
+    case dial
+    case recents
+    case messages
+    case contacts
+    case settings
 
     var id: String { rawValue }
 
-    var icon: String {
+    /// HIG：tab 标签尽量用单个词，便于快速读取。
+    var tabTitle: String {
         switch self {
-        case .dial: return "circle.grid.3x3"
-        case .recents: return "clock"
-        case .messages: return "message"
-        case .contacts: return "person.crop.circle"
-        case .settings: return "gearshape"
+        case .dial: return L10n.t("拨号")
+        case .recents: return L10n.t("最近")
+        case .messages: return L10n.t("短信")
+        case .contacts: return L10n.t("联系人")
+        case .settings: return L10n.t("设置")
         }
     }
 
-    var tabTitle: String {
+    /// HIG：tab bar 图标优先使用填充变体，和系统 App 保持一致。
+    var icon: String {
         switch self {
-        case .recents: return "最近"
-        case .contacts: return "联系人"
-        default: return rawValue
+        case .dial: return "circle.grid.3x3.fill"
+        case .recents: return "clock.fill"
+        case .messages: return "message.fill"
+        case .contacts: return "person.crop.circle.fill"
+        case .settings: return "gearshape.fill"
         }
     }
 }
 
-/// 四个高频目的地使用系统 TabView；低频设置入口固定在右上角导航层。
+/// App 外壳：只负责 tab 导航、沉浸式背景和前台通话覆盖层。
+/// 每个 tab 的内容视图自己带 NavigationStack / NavigationSplitView，
+/// 这样 iPad 顶部 tab bar 由系统渲染（Liquid Glass），并自动避开窗口左上角的
+/// 关闭 / 最大化 / 最小化控件，不需要任何自绘顶部条。
 struct RootView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var settings: AppSettings
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("djonehub.selected-tab") private var selectedTabRawValue = PhoneTab.dial.rawValue
-    @State private var pendingSMSRecipient: String?
     @AppStorage("djonehub.first-connection-complete") private var firstConnectionComplete = false
+    @State private var pendingSMSRecipient: String?
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
-            // 设置与拨号/最近/短信/联系人同级，作为顶层 tab，位置统一。
+        ZStack {
             TabView(selection: selectedTabBinding) {
                 DialPadView()
                     .tag(PhoneTab.dial)
-                    .tabItem { Label(L10n.t(PhoneTab.dial.tabTitle), systemImage: PhoneTab.dial.icon) }
+                    .tabItem { Label(PhoneTab.dial.tabTitle, systemImage: PhoneTab.dial.icon) }
 
                 RecentsView(onCall: dial, onMessage: composeMessage)
                     .tag(PhoneTab.recents)
-                    .tabItem { Label(L10n.t(PhoneTab.recents.tabTitle), systemImage: PhoneTab.recents.icon) }
+                    .tabItem { Label(PhoneTab.recents.tabTitle, systemImage: PhoneTab.recents.icon) }
 
                 MessagesView(pendingRecipient: $pendingSMSRecipient)
                     .tag(PhoneTab.messages)
-                    .tabItem { Label(L10n.t(PhoneTab.messages.tabTitle), systemImage: PhoneTab.messages.icon) }
+                    .tabItem { Label(PhoneTab.messages.tabTitle, systemImage: PhoneTab.messages.icon) }
 
                 ContactsView(onCall: dial, onMessage: composeMessage)
                     .tag(PhoneTab.contacts)
-                    .tabItem { Label(L10n.t(PhoneTab.contacts.tabTitle), systemImage: PhoneTab.contacts.icon) }
+                    .tabItem { Label(PhoneTab.contacts.tabTitle, systemImage: PhoneTab.contacts.icon) }
 
                 SettingsView()
                     .tag(PhoneTab.settings)
-                    .tabItem { Label(L10n.t(PhoneTab.settings.tabTitle), systemImage: PhoneTab.settings.icon) }
+                    .tabItem { Label(PhoneTab.settings.tabTitle, systemImage: PhoneTab.settings.icon) }
             }
             .phoneTabBarMinimizeOnScroll()
-            // tab 选中色：浅色黑、深色白（不用蓝色）。
-            .tint(Color.primary)
+            // 强调色固定系统蓝：不能再把 tint 设成 primary，
+            // 否则列表选中行会被描上黑（深色下为白）边，与系统 App 不一致。
+            .tint(Color(uiColor: .systemBlue))
 
-            // 系统 CallKit 只负责锁屏、后台与状态栏这一层的通话界面；
-            // App 在前台时必须自己把通话页铺满屏幕，否则呼出后屏幕上什么都没有。
-            // 切到后台/锁屏后本视图不可见，系统通话界面接管；回到 App 时通话页仍在，
-            // 这也让状态栏电话图标「回到 App」后能直接看到通话中界面。
+            // 系统 CallKit 只负责锁屏、后台与状态栏那一层通话界面；
+            // App 在前台时必须自己把通话页铺满，否则呼出后屏幕上没有通话 UI。
+            // 退到后台后本视图自然消失，系统通话界面接管。
             if let call = model.activeCall, scenePhase != .background {
                 ActiveCallView(call: call)
-                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
-                    .zIndex(1)
+                    .transition(.opacity)
             }
         }
         .background(PhoneBackdrop())
-        // 沉浸式状态栏：内容铺到屏幕边缘，状态栏保持可见但不占位。
+        // 沉浸式：状态栏保持可见（HIG 不主张永久隐藏），但内容一直铺到屏幕边缘。
         .statusBarHidden(false)
         .persistentSystemOverlays(.automatic)
         .animation(.easeInOut(duration: 0.2), value: model.activeCall?.id)
@@ -129,11 +136,10 @@ struct RootView: View {
         pendingSMSRecipient = number
         selectedTab = .messages
     }
-
 }
 
-/// 与系统 App 对齐：只使用系统背景色（浅色纯白、深色纯黑），铺满安全区。
-/// 不再自绘蓝色渐变——自绘底色在深色下会和系统导航栏、状态栏、键盘底色对不上。
+/// 与系统 App 对齐：只使用系统背景色（浅色纯白、深色纯黑）并铺满安全区。
+/// 不再自绘渐变——自绘底色在深色下会和系统导航栏、状态栏、键盘底色对不上。
 struct PhoneBackdrop: View {
     var body: some View {
         Color(uiColor: .systemBackground)
@@ -152,6 +158,7 @@ extension View {
         }
     }
 
+    /// iOS 26 的滚动收缩 tab bar；旧系统保持常显（HIG：不要隐藏 tab bar）。
     @ViewBuilder
     func phoneTabBarMinimizeOnScroll() -> some View {
         if #available(iOS 26.0, *) {
