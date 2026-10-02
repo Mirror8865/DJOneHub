@@ -256,18 +256,20 @@ struct SettingsView: View {
                                     }
                                     .buttonStyle(.plain)
                                     .listRowSeparator(.hidden)
+                                    .listRowBackground(Color.clear)
                                     .listRowInsets(EdgeInsets(top: 2, leading: 16, bottom: 2, trailing: 16))
                                 }
                             }
                         }
                     }
                     .listStyle(.plain)
+                    .scrollContentBackground(.hidden)
                     .tint(Color(uiColor: .systemBlue))
                     .scrollDismissesKeyboard(.interactively)
                 }
+                // 与通话 / 联系人 / 信息三个板块同一套左栏底色：浅色淡灰、深色深灰。
+                .background(Color(uiColor: .secondarySystemBackground).ignoresSafeArea())
                 .frame(width: 320)
-
-                Divider()
 
                 // 右栏严格按系统设置 App 的分组表单呈现：没有卡片、没有玻璃底板。
                 Form {
@@ -374,9 +376,9 @@ struct SettingsView: View {
                     Task { await refreshAll() }
                 } label: {
                     Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.system(size: 18, weight: .semibold))
                         .foregroundStyle(Color.primary)
-                        .frame(width: 32, height: 32)
+                        .frame(width: 44, height: 44)
                         .modifier(GlassCircle())
                 }
                 .buttonStyle(.plain)
@@ -1162,9 +1164,13 @@ private struct SettingsSidebarRow: View {
                 .foregroundStyle(isSelected ? Color.white : Color.primary)
             Spacer(minLength: 0)
         }
-        .padding(.vertical, 8)
+        .padding(.vertical, 13)
         .padding(.horizontal, 12)
-        .background(PhoneSelectionHighlight(isActive: isSelected))
+        // 选中高亮两端纯圆的胶囊（按 iOS 26 设置 App 侧栏选中态）。
+        .background(
+            Capsule(style: .continuous)
+                .fill(isSelected ? Color(uiColor: .systemBlue) : Color.clear)
+        )
         .contentShape(Rectangle())
     }
 }

@@ -496,9 +496,9 @@ struct PhoneSearchField: View {
     @FocusState private var isFocused: Bool
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 15, weight: .medium))
+                .font(.system(size: 16, weight: .medium))
                 .foregroundStyle(.secondary)
             TextField(placeholder, text: $text)
                 .textFieldStyle(.plain)
@@ -513,28 +513,30 @@ struct PhoneSearchField: View {
                     text = ""
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 15))
+                        .font(.system(size: 16))
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(L10n.t("清除"))
             }
             Image(systemName: "mic.fill")
-                .font(.system(size: 15, weight: .medium))
+                .font(.system(size: 16, weight: .medium))
                 .foregroundStyle(.secondary)
                 .accessibilityHidden(true)
         }
-        .padding(.horizontal, 10)
-        .frame(height: 36)
-        .modifier(GlassSearchFieldBackground(cornerRadius: 12))
+        .padding(.horizontal, 16)
+        .frame(height: 44)
+        // iOS 26 标准搜索框：两端纯圆胶囊 + 交互式液态玻璃（按住有回弹），聚焦时弹簧放大。
+        .modifier(GlassSearchFieldBackground())
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            Capsule(style: .continuous)
                 .strokeBorder(
                     isFocused ? Color(uiColor: .systemBlue) : Color.clear,
                     lineWidth: 1.5
                 )
         )
-        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .contentShape(Capsule(style: .continuous))
+        .modifier(GlassFocusBounce(isActive: isFocused))
     }
 }
 
@@ -587,22 +589,57 @@ struct PhoneSelectionHighlight: View {
     }
 }
 
-/// 搜索框底：iOS 26 液态玻璃；旧系统回退为系统填充色圆角矩形。
-struct GlassSearchFieldBackground: ViewModifier {
-    var cornerRadius: CGFloat = 12
+/// 多选合并高亮：相邻选中行只保留整块外侧的圆角，
+/// 视觉上并成一个大的蓝色圆角矩形（圆角半径不变）。
+struct PhoneMergedSelectionHighlight: View {
+    var isActive: Bool
+    var isFirst: Bool = true
+    var isLast: Bool = true
+    var cornerRadius: CGFloat = 20
 
+    var body: some View {
+        UnevenRoundedRectangle(
+            topLeadingRadius: isFirst ? cornerRadius : 0,
+            bottomLeadingRadius: isLast ? cornerRadius : 0,
+            bottomTrailingRadius: isLast ? cornerRadius : 0,
+            topTrailingRadius: isFirst ? cornerRadius : 0,
+            style: .continuous
+        )
+        .fill(isActive ? Color(uiColor: .systemBlue) : Color.clear)
+    }
+}
+
+/// 多选合并高亮：判断当前行是否为选中块的首行（上一行未选中或已到顶）。
+func mergedSelectionIsFirst(_ index: Int, ids: [String], checked: Set<String>) -> Bool {
+    index == 0 || !checked.contains(ids[index - 1])
+}
+
+/// 多选合并高亮：判断当前行是否为选中块的末行（下一行未选中或已到底）。
+func mergedSelectionIsLast(_ index: Int, ids: [String], checked: Set<String>) -> Bool {
+    index == ids.count - 1 || !checked.contains(ids[index + 1])
+}
+
+/// 搜索框底：iOS 26 两端纯圆的交互式液态玻璃胶囊；旧系统回退系统填充色胶囊。
+struct GlassSearchFieldBackground: ViewModifier {
     func body(content: Content) -> some View {
         if #available(iOS 26.0, *) {
-            content.glassEffect(
-                .regular,
-                in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-            )
+            content.glassEffect(.regular.interactive(), in: Capsule(style: .continuous))
         } else {
             content.background(
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(Color(uiColor: .tertiarySystemFill))
+                Capsule(style: .continuous).fill(Color(uiColor: .tertiarySystemFill))
             )
         }
+    }
+}
+
+/// 输入控件的「q 弹」反馈：聚焦 / 失焦时按弹簧曲线轻微放大再回弹（iOS 26 交互式玻璃手感）。
+struct GlassFocusBounce: ViewModifier {
+    var isActive: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .scaleEffect(isActive ? 1.015 : 1.0)
+            .animation(.spring(response: 0.30, dampingFraction: 0.52), value: isActive)
     }
 }
 
@@ -652,7 +689,9 @@ struct PhoneSplitListColumn<Content: View>: View {
     var body: some View {
         VStack(spacing: 0) { content }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
+            // 浅色下左列淡灰、深色下左列深灰（secondarySystemBackground），
+            // 与右列的系统白 / 纯黑形成对比。
+            .background(Color(uiColor: .secondarySystemBackground).ignoresSafeArea())
     }
 }
 
@@ -815,8 +854,6 @@ struct CallsView: View {
             }
             .frame(width: 380)
 
-            Divider()
-
             PhoneSplitDetailColumn {
                 if let call = selectedCall {
                     CallDetailPane(call: call, onMessage: onMessage, onCall: dialNumber)
@@ -838,6 +875,7 @@ struct CallsView: View {
             compactCallsRows
         }
         .listStyle(.plain)
+        .scrollContentBackground(.hidden)
         .scrollDismissesKeyboard(.interactively)
     }
 
@@ -848,7 +886,8 @@ struct CallsView: View {
         if filteredCalls.isEmpty {
             emptyCallsRow
         } else {
-            ForEach(filteredCalls) { call in
+            let ids = filteredCalls.map(\.id)
+            ForEach(Array(filteredCalls.enumerated()), id: \.element.id) { index, call in
                 Button {
                     if isEditing {
                         toggleCheck(call.id)
@@ -861,12 +900,25 @@ struct CallsView: View {
                         onCall: dialNumber,
                         isSelected: !isEditing && selection == call.id,
                         isEditing: isEditing,
-                        isChecked: checkedIDs.contains(call.id)
+                        isChecked: checkedIDs.contains(call.id),
+                        isSelectionFirst: mergedSelectionIsFirst(index, ids: ids, checked: checkedIDs),
+                        isSelectionLast: mergedSelectionIsLast(index, ids: ids, checked: checkedIDs)
                     )
                 }
                 .buttonStyle(.plain)
                 .listRowSeparator(.hidden)
-                .listRowInsets(EdgeInsets(top: 2, leading: 16, bottom: 2, trailing: 16))
+                .listRowBackground(Color.clear)
+                .listRowInsets(rowInsets)
+                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                    if !isEditing {
+                        Button(role: .destructive) {
+                            model.deleteCalls(ids: [call.id])
+                            if selection == call.id { selection = nil }
+                        } label: {
+                            Label(L10n.t("删除"), systemImage: "trash")
+                        }
+                    }
+                }
             }
         }
     }
@@ -876,7 +928,8 @@ struct CallsView: View {
         if filteredCalls.isEmpty {
             emptyCallsRow
         } else {
-            ForEach(filteredCalls) { call in
+            let ids = filteredCalls.map(\.id)
+            ForEach(Array(filteredCalls.enumerated()), id: \.element.id) { index, call in
                 if isEditing {
                     Button {
                         toggleCheck(call.id)
@@ -885,18 +938,30 @@ struct CallsView: View {
                             call: call,
                             onCall: dialNumber,
                             isEditing: true,
-                            isChecked: checkedIDs.contains(call.id)
+                            isChecked: checkedIDs.contains(call.id),
+                            isSelectionFirst: mergedSelectionIsFirst(index, ids: ids, checked: checkedIDs),
+                            isSelectionLast: mergedSelectionIsLast(index, ids: ids, checked: checkedIDs)
                         )
                     }
                     .buttonStyle(.plain)
                     .listRowSeparator(.hidden)
-                    .listRowInsets(EdgeInsets(top: 2, leading: 16, bottom: 2, trailing: 16))
+                    .listRowBackground(Color.clear)
+                    .listRowInsets(rowInsets)
                 } else {
                     NavigationLink(value: call.id) {
                         RecentsRow(call: call, onCall: dialNumber, isSelected: false)
                     }
                     .listRowSeparator(.hidden)
-                    .listRowInsets(EdgeInsets(top: 2, leading: 16, bottom: 2, trailing: 16))
+                    .listRowBackground(Color.clear)
+                    .listRowInsets(rowInsets)
+                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                        Button(role: .destructive) {
+                            model.deleteCalls(ids: [call.id])
+                            if selection == call.id { selection = nil }
+                        } label: {
+                            Label(L10n.t("删除"), systemImage: "trash")
+                        }
+                    }
                 }
             }
         }
@@ -938,6 +1003,13 @@ struct CallsView: View {
         }
     }
 
+    /// 编辑态去掉行间留白，让相邻选中行的高亮连成一整块。
+    private var rowInsets: EdgeInsets {
+        isEditing
+            ? EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16)
+            : EdgeInsets(top: 2, leading: 16, bottom: 2, trailing: 16)
+    }
+
     private func deleteCheckedCalls() {
         let ids = checkedIDs
         guard !ids.isEmpty else { return }
@@ -966,6 +1038,9 @@ private struct RecentsRow: View {
     var isSelected: Bool = false
     var isEditing: Bool = false
     var isChecked: Bool = false
+    /// 多选合并高亮：本行是否为选中块的首 / 末行，只有外侧保留圆角。
+    var isSelectionFirst: Bool = true
+    var isSelectionLast: Bool = true
 
     private var name: String { model.contacts.displayName(for: call.number) }
     private var photo: Data? {
@@ -982,7 +1057,7 @@ private struct RecentsRow: View {
                 PhoneSelectionCircle(isSelected: isChecked, onHighlight: isHighlighted)
             }
 
-            InitialAvatar(name: name, photoData: photo, size: 46)
+            InitialAvatar(name: name, photoData: photo, size: 54)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(name)
@@ -1019,9 +1094,18 @@ private struct RecentsRow: View {
                 .accessibilityLabel(L10n.t("呼叫"))
             }
         }
+        .frame(minHeight: 54)
         .padding(.vertical, 14)
         .padding(.horizontal, 14)
-        .background(PhoneSelectionHighlight(isActive: isHighlighted, cornerRadius: 18))
+        .background(
+            PhoneMergedSelectionHighlight(
+                isActive: isHighlighted,
+                isFirst: isSelectionFirst,
+                isLast: isSelectionLast,
+                cornerRadius: 20
+            )
+            .padding(.vertical, -2)
+        )
         .contentShape(Rectangle())
     }
 
@@ -1368,8 +1452,6 @@ struct ContactsView: View {
             }
             .frame(width: 380)
 
-            Divider()
-
             PhoneSplitDetailColumn {
                 if let contact = selectedContact {
                     ContactDetailPane(
@@ -1394,6 +1476,7 @@ struct ContactsView: View {
             contactRows(linkRows: !isEditing)
         }
         .listStyle(.plain)
+        .scrollContentBackground(.hidden)
         .scrollDismissesKeyboard(.interactively)
     }
 
@@ -1406,7 +1489,8 @@ struct ContactsView: View {
         } else {
             ForEach(sections) { section in
                 Section(section.id) {
-                    ForEach(section.contacts) { contact in
+                    let ids = section.contacts.map(\.id)
+                    ForEach(Array(section.contacts.enumerated()), id: \.element.id) { index, contact in
                         if isEditing {
                             Button {
                                 toggleCheck(contact.id)
@@ -1414,18 +1498,22 @@ struct ContactsView: View {
                                 ContactRow(
                                     contact: contact,
                                     isEditing: true,
-                                    isChecked: checkedIDs.contains(contact.id)
+                                    isChecked: checkedIDs.contains(contact.id),
+                                    isSelectionFirst: mergedSelectionIsFirst(index, ids: ids, checked: checkedIDs),
+                                    isSelectionLast: mergedSelectionIsLast(index, ids: ids, checked: checkedIDs)
                                 )
                             }
                             .buttonStyle(.plain)
                             .listRowSeparator(.hidden)
-                            .listRowInsets(EdgeInsets(top: 2, leading: 16, bottom: 2, trailing: 16))
+                            .listRowBackground(Color.clear)
+                            .listRowInsets(rowInsets)
                         } else if linkRows {
                             NavigationLink(value: contact.id) {
                                 ContactRow(contact: contact)
                             }
                             .listRowSeparator(.hidden)
-                            .listRowInsets(EdgeInsets(top: 2, leading: 16, bottom: 2, trailing: 16))
+                            .listRowBackground(Color.clear)
+                            .listRowInsets(rowInsets)
                         } else {
                             Button {
                                 selection = contact.id
@@ -1434,7 +1522,19 @@ struct ContactsView: View {
                             }
                             .buttonStyle(.plain)
                             .listRowSeparator(.hidden)
-                            .listRowInsets(EdgeInsets(top: 2, leading: 16, bottom: 2, trailing: 16))
+                            .listRowBackground(Color.clear)
+                            .listRowInsets(rowInsets)
+                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                Button(role: .destructive) {
+                                    Task {
+                                        let removed = await model.contacts.delete(ids: [contact.id])
+                                        guard removed else { return }
+                                        if selection == contact.id { selection = nil }
+                                    }
+                                } label: {
+                                    Label(L10n.t("删除"), systemImage: "trash")
+                                }
+                            }
                         }
                     }
                 }
@@ -1453,6 +1553,13 @@ struct ContactsView: View {
         } else {
             checkedIDs.insert(id)
         }
+    }
+
+    /// 编辑态去掉行间留白，让相邻选中行的高亮连成一整块。
+    private var rowInsets: EdgeInsets {
+        isEditing
+            ? EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16)
+            : EdgeInsets(top: 2, leading: 16, bottom: 2, trailing: 16)
     }
 
     /// 多选删除：系统通讯录的删除是真实删除，成功后本机副本同步更新。
@@ -1490,6 +1597,9 @@ private struct ContactRow: View {
     var isSelected: Bool = false
     var isEditing: Bool = false
     var isChecked: Bool = false
+    /// 多选合并高亮：本行是否为选中块的首 / 末行，只有外侧保留圆角。
+    var isSelectionFirst: Bool = true
+    var isSelectionLast: Bool = true
 
     private var isHighlighted: Bool { isSelected || isChecked }
 
@@ -1498,15 +1608,25 @@ private struct ContactRow: View {
             if isEditing {
                 PhoneSelectionCircle(isSelected: isChecked, onHighlight: isHighlighted)
             }
-            InitialAvatar(name: contact.name, photoData: contact.photoData, size: 46)
+            InitialAvatar(name: contact.name, photoData: contact.photoData, size: 54)
             Text(contact.name)
+                .font(.body.weight(.semibold))
                 .foregroundStyle(isHighlighted ? Color.white : Color.primary)
                 .lineLimit(1)
             Spacer(minLength: 0)
         }
+        .frame(minHeight: 54)
         .padding(.vertical, 14)
         .padding(.horizontal, 14)
-        .background(PhoneSelectionHighlight(isActive: isHighlighted, cornerRadius: 18))
+        .background(
+            PhoneMergedSelectionHighlight(
+                isActive: isHighlighted,
+                isFirst: isSelectionFirst,
+                isLast: isSelectionLast,
+                cornerRadius: 20
+            )
+            .padding(.vertical, -2)
+        )
         .contentShape(Rectangle())
     }
 }
@@ -1745,12 +1865,9 @@ private struct InfoCardRow: View {
 
     private var label: some View {
         HStack(spacing: 12) {
-            if let leadingAvatar, let image = UIImage(data: leadingAvatar) {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: 34, height: 34)
-                    .clipShape(Circle())
+            if let leadingAvatar {
+                // 共享控件等前置头像统一液态玻璃圆底（iOS 26）。
+                GlassAvatar(name: title, photoData: leadingAvatar, size: 38)
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
@@ -1872,8 +1989,6 @@ struct MessagesView: View {
             }
             .frame(width: 380)
 
-            Divider()
-
             PhoneSplitDetailColumn {
                 if let handle = selection {
                     NavigationStack {
@@ -1901,6 +2016,7 @@ struct MessagesView: View {
                 conversationRows(linkRows: !isEditing)
             }
             .listStyle(.plain)
+            .scrollContentBackground(.hidden)
             .scrollDismissesKeyboard(.interactively)
             .navigationTitle(isEditing ? L10n.t("已选择 \(checkedIDs.count) 项") : L10n.t("信息"))
             .navigationBarTitleDisplayMode(.inline)
@@ -1955,7 +2071,8 @@ struct MessagesView: View {
                 .listRowBackground(Color.clear)
                 .listRowSeparator(.hidden)
         } else {
-            ForEach(filteredConversations) { conversation in
+            let ids = filteredConversations.map(\.id)
+            ForEach(Array(filteredConversations.enumerated()), id: \.element.id) { index, conversation in
                 if isEditing {
                     Button {
                         toggleCheck(conversation.id)
@@ -1963,18 +2080,22 @@ struct MessagesView: View {
                         ConversationRow(
                             conversation: conversation,
                             isEditing: true,
-                            isChecked: checkedIDs.contains(conversation.id)
+                            isChecked: checkedIDs.contains(conversation.id),
+                            isSelectionFirst: mergedSelectionIsFirst(index, ids: ids, checked: checkedIDs),
+                            isSelectionLast: mergedSelectionIsLast(index, ids: ids, checked: checkedIDs)
                         )
                     }
                     .buttonStyle(.plain)
                     .listRowSeparator(.hidden)
-                    .listRowInsets(EdgeInsets(top: 2, leading: 16, bottom: 2, trailing: 16))
+                    .listRowBackground(Color.clear)
+                    .listRowInsets(rowInsets)
                 } else if linkRows {
                     NavigationLink(value: conversation.id) {
                         ConversationRow(conversation: conversation)
                     }
                     .listRowSeparator(.hidden)
-                    .listRowInsets(EdgeInsets(top: 2, leading: 16, bottom: 2, trailing: 16))
+                    .listRowBackground(Color.clear)
+                    .listRowInsets(rowInsets)
                 } else {
                     Button {
                         selection = conversation.id
@@ -1983,7 +2104,16 @@ struct MessagesView: View {
                     }
                     .buttonStyle(.plain)
                     .listRowSeparator(.hidden)
-                    .listRowInsets(EdgeInsets(top: 2, leading: 16, bottom: 2, trailing: 16))
+                    .listRowBackground(Color.clear)
+                    .listRowInsets(rowInsets)
+                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                        Button(role: .destructive) {
+                            model.deleteMessages(ids: conversation.messages.map(\.id))
+                            if selection == conversation.id { selection = nil }
+                        } label: {
+                            Label(L10n.t("删除"), systemImage: "trash")
+                        }
+                    }
                 }
             }
         }
@@ -2016,6 +2146,13 @@ struct MessagesView: View {
         }
     }
 
+    /// 编辑态去掉行间留白，让相邻选中行的高亮连成一整块。
+    private var rowInsets: EdgeInsets {
+        isEditing
+            ? EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16)
+            : EdgeInsets(top: 2, leading: 16, bottom: 2, trailing: 16)
+    }
+
     /// 删除整个会话：把该号码名下所有短信一起删除（与系统「信息」App 一致）。
     private func deleteCheckedConversations() {
         var ids = Set<String>()
@@ -2038,6 +2175,9 @@ private struct ConversationRow: View {
     var isSelected: Bool = false
     var isEditing: Bool = false
     var isChecked: Bool = false
+    /// 多选合并高亮：本行是否为选中块的首 / 末行，只有外侧保留圆角。
+    var isSelectionFirst: Bool = true
+    var isSelectionLast: Bool = true
 
     private var displayName: String {
         model.contacts.contact(for: conversation.id)?.name ?? conversation.id
@@ -2072,9 +2212,18 @@ private struct ConversationRow: View {
                     .foregroundStyle(isHighlighted ? Color.white.opacity(0.85) : Color.secondary)
             }
         }
+        .frame(minHeight: 54)
         .padding(.vertical, 14)
         .padding(.horizontal, 14)
-        .background(PhoneSelectionHighlight(isActive: isHighlighted, cornerRadius: 20))
+        .background(
+            PhoneMergedSelectionHighlight(
+                isActive: isHighlighted,
+                isFirst: isSelectionFirst,
+                isLast: isSelectionLast,
+                cornerRadius: 20
+            )
+            .padding(.vertical, -2)
+        )
         .contentShape(Rectangle())
     }
 
@@ -2242,7 +2391,7 @@ struct ChatPane: View {
                     .lineLimit(1...6)
                     .textFieldStyle(.plain)
                     .padding(.leading, 16)
-                    .padding(.vertical, 8)
+                    .padding(.vertical, 10)
 
                 if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     DictationButton { recognized in
@@ -2262,6 +2411,8 @@ struct ChatPane: View {
                     .accessibilityLabel(L10n.t("发送"))
                 }
             }
+            // 输入条与搜索框同高（实心胶囊，不在键盘上方上移）。
+            .frame(minHeight: 46)
             .modifier(GlassCapsuleBackground())
         }
         .padding(.horizontal, 12)
@@ -2302,11 +2453,11 @@ struct ChatPane: View {
     }
 }
 
-/// 长条液态玻璃胶囊底：iOS 26 用系统 glassEffect，旧系统用系统填充色。
+/// 长条液态玻璃胶囊底：iOS 26 用交互式系统 glassEffect，旧系统用系统填充色。
 private struct GlassCapsuleBackground: ViewModifier {
     func body(content: Content) -> some View {
         if #available(iOS 26.0, *) {
-            content.glassEffect(.regular, in: Capsule(style: .continuous))
+            content.glassEffect(.regular.interactive(), in: Capsule(style: .continuous))
         } else {
             content.background(Capsule(style: .continuous).fill(Color(uiColor: .secondarySystemFill)))
         }
