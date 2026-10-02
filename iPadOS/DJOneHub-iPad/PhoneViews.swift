@@ -479,13 +479,17 @@ struct CallDetailSheet: View {
     let onMessage: (String) -> Void
 
     private var name: String { model.contacts.displayName(for: call.number) }
+    private var photo: Data? {
+        guard let number = call.number else { return nil }
+        return model.contacts.contact(for: number)?.photoData
+    }
 
     var body: some View {
         NavigationStack {
             List {
                 Section {
                     VStack(spacing: 8) {
-                        InitialAvatar(name: name, photoData: model.contacts.contact(for: call.number)?.photoData, size: 78)
+                        InitialAvatar(name: name, photoData: photo, size: 78)
                         Text(name)
                             .font(.title2.weight(.semibold))
                             .multilineTextAlignment(.center)
