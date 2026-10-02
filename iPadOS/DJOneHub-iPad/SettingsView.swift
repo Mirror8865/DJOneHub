@@ -1153,24 +1153,11 @@ private struct SettingsSidebarRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
+            // 黑白单色图标（浅色黑 / 深色白），不再用彩色渐变底块。
             Image(systemName: section.icon)
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(.white)
-                .frame(width: 29, height: 29)
-                .background(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(
-                            LinearGradient(
-                                colors: [section.iconTint.opacity(0.90), section.iconTint],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.18), lineWidth: 0.5)
-                )
+                .font(.system(size: 20, weight: .regular))
+                .foregroundStyle(isSelected ? Color.white : Color.primary)
+                .frame(width: 26, height: 26)
             Text(L10n.t(section.title))
                 .foregroundStyle(isSelected ? Color.white : Color.primary)
             Spacer(minLength: 0)

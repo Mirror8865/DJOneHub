@@ -320,7 +320,6 @@ struct DialPadOverlay: View {
 
     var body: some View {
         card
-            .padding(.horizontal, 24)
             .onDisappear { stopDeleteRepeat() }
     }
 
@@ -335,6 +334,9 @@ struct DialPadOverlay: View {
         .frame(maxWidth: 268)
         .modifier(DialPadCardBackground())
         .shadow(color: .black.opacity(0.22), radius: 24, y: 10)
+        // 点击卡片内任意非按键区域也能退出键盘。
+        .contentShape(RoundedRectangle(cornerRadius: 34, style: .continuous))
+        .onTapGesture { close() }
     }
 
     private var numberDisplay: some View {
@@ -524,10 +526,7 @@ struct PhoneSearchField: View {
         }
         .padding(.horizontal, 10)
         .frame(height: 36)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color(uiColor: .tertiarySystemFill))
-        )
+        .modifier(GlassSearchFieldBackground(cornerRadius: 12))
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .strokeBorder(
@@ -585,6 +584,86 @@ struct PhoneSelectionHighlight: View {
     var body: some View {
         RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
             .fill(isActive ? Color(uiColor: .systemBlue) : Color.clear)
+    }
+}
+
+/// 搜索框底：iOS 26 液态玻璃；旧系统回退为系统填充色圆角矩形。
+struct GlassSearchFieldBackground: ViewModifier {
+    var cornerRadius: CGFloat = 12
+
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content.glassEffect(
+                .regular,
+                in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            )
+        } else {
+            content.background(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(Color(uiColor: .tertiarySystemFill))
+            )
+        }
+    }
+}
+
+/// 详情页大头像底：iOS 26 液态玻璃圆；旧系统回退半透明白圆。
+struct GlassAvatarBackground: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content.glassEffect(.regular, in: Circle())
+        } else {
+            content.background(Circle().fill(Color.white.opacity(0.16)))
+        }
+    }
+}
+
+/// 详情页大头像：液态玻璃圆底 + 照片 / 白色 monogram / 人像。
+struct GlassAvatar: View {
+    let name: String
+    var photoData: Data? = nil
+    var size: CGFloat = 110
+
+    var body: some View {
+        Group {
+            if let photoData, let image = UIImage(data: photoData) {
+                Image(uiImage: image).resizable().scaledToFill()
+            } else if let monogram = Monogram.text(for: name) {
+                Text(monogram)
+                    .font(.system(size: size * 0.40, weight: .medium))
+                    .foregroundStyle(.white)
+                    .minimumScaleFactor(0.4)
+                    .lineLimit(1)
+            } else {
+                Image(systemName: "person.fill")
+                    .font(.system(size: size * 0.46, weight: .medium))
+                    .foregroundStyle(.white)
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(Circle())
+        .modifier(GlassAvatarBackground())
+    }
+}
+
+/// 分栏版式左列：系统灰底（列表区），与系统 App 的双栏左列一致。
+struct PhoneSplitListColumn<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(spacing: 0) { content }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
+    }
+}
+
+/// 分栏版式右列：系统白底（详情区）。
+struct PhoneSplitDetailColumn<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        content
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(uiColor: .systemBackground).ignoresSafeArea())
     }
 }
 
@@ -662,20 +741,22 @@ struct CallsView: View {
                     EmptyStateView(title: L10n.t("暂无通话记录"), systemImage: "clock")
                 }
             }
-            .overlay {
+            .overlay(alignment: .topTrailing) {
                 if showingKeypad {
-                    ZStack {
-                        // 点键盘以外的任意区域即可关闭键盘。
-                        Color.black.opacity(0.10)
+                    ZStack(alignment: .topTrailing) {
+                        // 悬浮浮窗不压暗整屏：透明层只负责「点任意位置退出」。
+                        Color.clear
                             .ignoresSafeArea()
                             .contentShape(Rectangle())
                             .onTapGesture { dismissKeypad() }
                             .accessibilityHidden(true)
                             .transition(.opacity)
-                        // 圆形的拨号按钮放大成小尺寸拨号键盘。
+                        // 悬浮在右上角拨号按钮旁边的小浮窗，不再全屏居中独占窗口。
                         DialPadOverlay(onDismiss: dismissKeypad)
+                            .padding(.top, 6)
+                            .padding(.trailing, 18)
                             .transition(
-                                .scale(scale: 0.06, anchor: .topTrailing)
+                                .scale(scale: 0.10, anchor: .topTrailing)
                                     .combined(with: .opacity)
                             )
                     }
@@ -718,8 +799,9 @@ struct CallsView: View {
     // MARK: iPad 页内双栏（只有一条顶栏）
 
     private var regularBody: some View {
+        // 左列系统灰底（列表）、右列系统白底（详情），与系统设置 App 的分栏一致。
         HStack(spacing: 0) {
-            VStack(spacing: 0) {
+            PhoneSplitListColumn {
                 PhoneSearchField(placeholder: L10n.t("搜索"), text: $search)
                     .padding(.horizontal, 16)
                     .padding(.top, 4)
@@ -728,20 +810,20 @@ struct CallsView: View {
                     callsRows
                 }
                 .listStyle(.plain)
+                .scrollContentBackground(.hidden)
                 .scrollDismissesKeyboard(.interactively)
             }
             .frame(width: 380)
 
             Divider()
 
-            Group {
+            PhoneSplitDetailColumn {
                 if let call = selectedCall {
                     CallDetailPane(call: call, onMessage: onMessage, onCall: dialNumber)
                 } else {
                     EmptyStateView(title: L10n.t("选择通话记录查看详情"), systemImage: "phone")
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
@@ -900,7 +982,7 @@ private struct RecentsRow: View {
                 PhoneSelectionCircle(isSelected: isChecked, onHighlight: isHighlighted)
             }
 
-            InitialAvatar(name: name, photoData: photo, size: 44)
+            InitialAvatar(name: name, photoData: photo, size: 46)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(name)
@@ -937,9 +1019,9 @@ private struct RecentsRow: View {
                 .accessibilityLabel(L10n.t("呼叫"))
             }
         }
-        .padding(.vertical, 8)
-        .padding(.horizontal, 12)
-        .background(PhoneSelectionHighlight(isActive: isHighlighted))
+        .padding(.vertical, 14)
+        .padding(.horizontal, 14)
+        .background(PhoneSelectionHighlight(isActive: isHighlighted, cornerRadius: 18))
         .contentShape(Rectangle())
     }
 
@@ -996,7 +1078,8 @@ struct CallDetailPane: View {
     /// 图四大卡片：大头像 + 姓名 + 四个动作圆钮。
     private var hero: some View {
         VStack(spacing: 14) {
-            InitialAvatar(name: name, photoData: photo, size: 124)
+            // 大头像同样走液态玻璃圆底（与联系人详情 / 短信人详情一致）。
+            GlassAvatar(name: name, photoData: photo, size: 124)
                 .overlay(Circle().strokeBorder(Color.white.opacity(0.35), lineWidth: 1))
 
             VStack(spacing: 4) {
@@ -1269,8 +1352,9 @@ struct ContactsView: View {
     }
 
     private var regularBody: some View {
+        // 左列系统灰底（列表）、右列系统白底（详情），与系统设置 App 的分栏一致。
         HStack(spacing: 0) {
-            VStack(spacing: 0) {
+            PhoneSplitListColumn {
                 PhoneSearchField(placeholder: L10n.t("搜索"), text: $search)
                     .padding(.horizontal, 16)
                     .padding(.top, 4)
@@ -1279,13 +1363,14 @@ struct ContactsView: View {
                     contactRows(linkRows: false)
                 }
                 .listStyle(.plain)
+                .scrollContentBackground(.hidden)
                 .scrollDismissesKeyboard(.interactively)
             }
             .frame(width: 380)
 
             Divider()
 
-            Group {
+            PhoneSplitDetailColumn {
                 if let contact = selectedContact {
                     ContactDetailPane(
                         contact: contact,
@@ -1297,7 +1382,6 @@ struct ContactsView: View {
                     EmptyStateView(title: L10n.t("选择联系人查看详情"), systemImage: "person.crop.circle")
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
@@ -1414,15 +1498,15 @@ private struct ContactRow: View {
             if isEditing {
                 PhoneSelectionCircle(isSelected: isChecked, onHighlight: isHighlighted)
             }
-            InitialAvatar(name: contact.name, photoData: contact.photoData, size: 40)
+            InitialAvatar(name: contact.name, photoData: contact.photoData, size: 46)
             Text(contact.name)
                 .foregroundStyle(isHighlighted ? Color.white : Color.primary)
                 .lineLimit(1)
             Spacer(minLength: 0)
         }
-        .padding(.vertical, 8)
-        .padding(.horizontal, 12)
-        .background(PhoneSelectionHighlight(isActive: isHighlighted))
+        .padding(.vertical, 14)
+        .padding(.horizontal, 14)
+        .background(PhoneSelectionHighlight(isActive: isHighlighted, cornerRadius: 18))
         .contentShape(Rectangle())
     }
 }
@@ -1506,8 +1590,7 @@ struct ContactDetailPane: View {
                 }
             }
             .frame(width: 188, height: 188)
-            .background(Circle().fill(Color.white.opacity(0.12)))
-            .clipShape(Circle())
+            .modifier(GlassAvatarBackground())
             .overlay(Circle().strokeBorder(Color.white.opacity(0.35), lineWidth: 1))
 
             Text(contact.name)
@@ -1769,7 +1852,7 @@ struct MessagesView: View {
     private var regularBody: some View {
         HStack(spacing: 0) {
             NavigationStack {
-                VStack(spacing: 0) {
+                PhoneSplitListColumn {
                     PhoneSearchField(placeholder: L10n.t("搜索"), text: $search)
                         .padding(.horizontal, 16)
                         .padding(.top, 4)
@@ -1778,6 +1861,7 @@ struct MessagesView: View {
                         conversationRows(linkRows: false)
                     }
                     .listStyle(.plain)
+                    .scrollContentBackground(.hidden)
                     .scrollDismissesKeyboard(.interactively)
                 }
                 .navigationTitle(isEditing ? L10n.t("已选择 \(checkedIDs.count) 项") : L10n.t("信息"))
@@ -1790,7 +1874,7 @@ struct MessagesView: View {
 
             Divider()
 
-            Group {
+            PhoneSplitDetailColumn {
                 if let handle = selection {
                     NavigationStack {
                         ChatPane(handle: handle) {
@@ -1802,7 +1886,6 @@ struct MessagesView: View {
                     EmptyStateView(title: L10n.t("选择信息开始聊天"), systemImage: "message")
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
@@ -1970,7 +2053,7 @@ private struct ConversationRow: View {
                 PhoneSelectionCircle(isSelected: isChecked, onHighlight: isHighlighted)
             }
 
-            InitialAvatar(name: displayName, photoData: photoData, size: 50)
+            InitialAvatar(name: displayName, photoData: photoData, size: 54)
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(displayName)
@@ -1989,9 +2072,9 @@ private struct ConversationRow: View {
                     .foregroundStyle(isHighlighted ? Color.white.opacity(0.85) : Color.secondary)
             }
         }
-        .padding(.vertical, 8)
-        .padding(.horizontal, 12)
-        .background(PhoneSelectionHighlight(isActive: isHighlighted, cornerRadius: 14))
+        .padding(.vertical, 14)
+        .padding(.horizontal, 14)
+        .background(PhoneSelectionHighlight(isActive: isHighlighted, cornerRadius: 20))
         .contentShape(Rectangle())
     }
 
@@ -2153,7 +2236,8 @@ struct ChatPane: View {
             .buttonStyle(.plain)
             .accessibilityLabel(L10n.t("更多"))
 
-            HStack(alignment: .bottom, spacing: 4) {
+            // 发送 / 语音按钮与输入框垂直居中对齐（不再贴底）。
+            HStack(alignment: .center, spacing: 4) {
                 TextField(L10n.t("iMessage 信息"), text: $draft, axis: .vertical)
                     .lineLimit(1...6)
                     .textFieldStyle(.plain)
@@ -2164,8 +2248,7 @@ struct ChatPane: View {
                     DictationButton { recognized in
                         draft = recognized
                     }
-                    .padding(.trailing, 4)
-                    .padding(.bottom, 2)
+                    .padding(.trailing, 6)
                 } else {
                     Button(action: send) {
                         Image(systemName: "arrow.up")
@@ -2175,8 +2258,7 @@ struct ChatPane: View {
                             .background(Circle().fill(Color(uiColor: .systemBlue)))
                     }
                     .buttonStyle(.plain)
-                    .padding(.trailing, 4)
-                    .padding(.bottom, 3)
+                    .padding(.trailing, 6)
                     .accessibilityLabel(L10n.t("发送"))
                 }
             }
@@ -2371,7 +2453,7 @@ struct ChatContactInfoPanel: View {
 
     private var header: some View {
         VStack(spacing: 12) {
-            InitialAvatar(name: displayName, photoData: photoData, size: 110)
+            GlassAvatar(name: displayName, photoData: photoData, size: 110)
                 .overlay(Circle().strokeBorder(Color.white.opacity(0.35), lineWidth: 1))
             Text(displayName)
                 .font(.title2.weight(.bold))
@@ -2859,18 +2941,30 @@ struct ActiveCallView: View {
     var body: some View {
         ZStack {
             Color(uiColor: .systemBackground).ignoresSafeArea()
+            if showingKeypad {
+                // 点键盘以外的任意位置退出通话中键盘。
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        withAnimation(.easeInOut(duration: 0.22)) { showingKeypad = false }
+                    }
+                    .accessibilityHidden(true)
+            }
             VStack(spacing: isCompact ? 16 : 24) {
                 Spacer(minLength: 20)
                 header
                 Spacer(minLength: 8)
                 if showingKeypad {
+                    // 通话中的键盘贴底悬浮，不再居中遮挡姓名与状态。
+                    Spacer(minLength: 0)
                     DTMFKeypadPanel {
                         withAnimation(.easeInOut(duration: 0.22)) { showingKeypad = false }
                     }
+                    .transition(.scale(scale: 0.92, anchor: .bottom).combined(with: .opacity))
                 } else {
                     controls
+                    Spacer(minLength: 20)
                 }
-                Spacer(minLength: 20)
             }
             .padding(.horizontal, 24)
             .frame(maxWidth: 520)
@@ -3044,6 +3138,9 @@ private struct DTMFKeypadPanel: View {
         .padding(.vertical, 16)
         .modifier(DialPadCardBackground())
         .shadow(color: .black.opacity(0.22), radius: 24, y: 10)
+        // 点击卡片内任意非按键区域即可退出键盘。
+        .contentShape(RoundedRectangle(cornerRadius: 34, style: .continuous))
+        .onTapGesture { onClose() }
     }
 
     private var keypadRows: some View {
