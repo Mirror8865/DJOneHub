@@ -528,6 +528,9 @@ struct RecentsView: View {
             .background(PhoneBackdrop())
             .navigationTitle(L10n.t("最近通话"))
             .navigationBarTitleDisplayMode(.large)
+            // 沉浸式：导航标题栏保留（iPad 窗口控件需要它），
+            // 但背景不再画一条不透明的条，页面色一直铺到状态栏下。
+            .toolbarBackground(.hidden, for: .navigationBar)
         }
     }
 
@@ -2194,40 +2197,66 @@ struct ContactsView: View {
 
 /// 联系人详情容器：原生卡片直接铺满详情列，只保留分栏导航自己的返回按钮，
 /// 联系人对象在后台线程预取，所以既不会出现两条导航栏，也不会点开就卡顿。
+/// 联系人详情：与系统「通讯录」一致的原生 SwiftUI 版式。
+/// 直接渲染本机已缓存的联系人数据，点开即出；
+/// 顶部不再嵌套第二条导航栏，不会出现「上方留白、与返回按钮不融合」。
 private struct NativeContactDetail: View {
     let identifier: String?
     let phone: String?
     let onCall: (String) -> Void
     let onMessage: (String) -> Void
 
-    @State private var contact: CNContact?
-    @State private var loadFinished = false
+    @EnvironmentObject private var model: AppModel
     @State private var showingEditor = false
+
+    private var contact: ContactStore.Contact? {
+        if let identifier, let match = model.contacts.contacts.first(where: { $0.id == identifier }) {
+            return match
+        }
+        if let phone, !phone.isEmpty, let match = model.contacts.contact(for: phone) {
+            return match
+        }
+        return nil
+    }
+
+    /// 用于「编辑」的系统原生卡片；只在用户点编辑时才读取全字段，不进点开路径。
+    private var editableContact: CNContact? {
+        guard let identifier else { return nil }
+        return try? CNContactStore().unifiedContact(
+            withIdentifier: identifier,
+            keysToFetch: [CNContactViewController.descriptorForRequiredKeys()]
+        )
+    }
 
     var body: some View {
         Group {
             if let contact {
-                NativeContactCard(
-                    contact: contact,
-                    // 详情列完全交给分栏导航自己的返回按钮，不再自带第二条导航栏，
-                    // 因此顶部也不会残留一条导航栏高度的留白。
-                    showsNavigationBar: false,
-                    showsDoneButton: false,
-                    allowsEditing: false,
+                ContactDetailList(
+                    name: contact.name,
+                    phones: contact.phones,
+                    emails: contact.emails,
+                    photoData: contact.photoData,
                     onCall: onCall,
                     onMessage: onMessage
                 )
-            } else if loadFinished {
-                EmptyStateView(title: L10n.t("无法读取该联系人"), systemImage: "person.crop.circle.badge.exclamationmark")
+            } else if let phone, !phone.isEmpty {
+                // 号码不在通讯录：与 iMessage 展示陌生号码一致，仍然给出可用动作。
+                ContactDetailList(
+                    name: phone,
+                    phones: [phone],
+                    emails: [],
+                    photoData: nil,
+                    onCall: onCall,
+                    onMessage: onMessage
+                )
             } else {
-                ProgressView()
-                    .controlSize(.large)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                EmptyStateView(
+                    title: L10n.t("无法读取该联系人"),
+                    systemImage: "person.crop.circle.badge.exclamationmark"
+                )
             }
         }
-        // 铺满整列，上下不留白。
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .ignoresSafeArea(.container, edges: .bottom)
+        .background(Color(uiColor: .systemGroupedBackground))
         .toolbar {
             if contact != nil {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -2236,10 +2265,10 @@ private struct NativeContactDetail: View {
             }
         }
         .sheet(isPresented: $showingEditor) {
-            if let contact {
-                // 编辑仍然走系统原生卡片：allowsEditing + contactStore 由系统负责保存。
+            if let editable = editableContact {
+                // 编辑仍走系统原生卡片：由系统负责保存。
                 NativeContactCard(
-                    contact: contact,
+                    contact: editable,
                     showsNavigationBar: true,
                     showsDoneButton: true,
                     allowsEditing: true,
@@ -2248,31 +2277,126 @@ private struct NativeContactDetail: View {
                 )
                 .presentationSizingIfAvailable()
                 .presentationDragIndicator(.visible)
+                .onDisappear { Task { await model.contacts.loadIfNeeded() } }
             }
         }
-        .task(id: identifier) { await loadContact() }
+    }
+}
+
+/// 系统「通讯录」联系人详情版式：头像 + 姓名 + 四个动作按钮，下方是分组信息列表。
+/// 全部使用系统 List / 分组样式，不自绘卡片。
+private struct ContactDetailList: View {
+    let name: String
+    let phones: [String]
+    let emails: [String]
+    let photoData: Data?
+    let onCall: (String) -> Void
+    let onMessage: (String) -> Void
+
+    @Environment(\.openURL) private var openURL
+
+    private var primaryPhone: String? { phones.first }
+
+    var body: some View {
+        List {
+            Section {
+                VStack(spacing: 12) {
+                    InitialAvatar(name: name, photoData: photoData, size: 120)
+                    Text(name)
+                        .font(.title.weight(.semibold))
+                        .multilineTextAlignment(.center)
+                    HStack(spacing: 10) {
+                        actionButton(title: L10n.t("信息"), icon: "message.fill", tint: .blue, enabled: primaryPhone != nil) {
+                            if let primaryPhone { onMessage(primaryPhone) }
+                        }
+                        actionButton(title: L10n.t("呼叫"), icon: "phone.fill", tint: .green, enabled: primaryPhone != nil) {
+                            if let primaryPhone { onCall(primaryPhone) }
+                        }
+                        actionButton(title: L10n.t("视频"), icon: "video.fill", tint: .blue, enabled: primaryPhone != nil) {
+                            if let primaryPhone { onCall(primaryPhone) }
+                        }
+                        actionButton(title: L10n.t("邮件"), icon: "envelope.fill", tint: .blue, enabled: !emails.isEmpty) {
+                            guard let address = emails.first,
+                                  let url = URL(string: "mailto:\(address)") else { return }
+                            openURL(url)
+                        }
+                    }
+                    .padding(.top, 2)
+                }
+                .padding(.vertical, 10)
+            }
+            .listRowBackground(Color.clear)
+
+            if !phones.isEmpty {
+                Section(L10n.t("电话号码")) {
+                    ForEach(phones, id: \.self) { number in
+                        Button {
+                            onCall(number)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(L10n.t("手机"))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Text(number)
+                                    .font(.body)
+                                    .foregroundStyle(Color(uiColor: .systemBlue))
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                            Button { onMessage(number) } label: {
+                                Label(L10n.t("信息"), systemImage: "message.fill")
+                            }
+                            .tint(.blue)
+                        }
+                    }
+                }
+            }
+
+            if !emails.isEmpty {
+                Section(L10n.t("电子邮件")) {
+                    ForEach(emails, id: \.self) { address in
+                        Button {
+                            if let url = URL(string: "mailto:\(address)") { openURL(url) }
+                        } label: {
+                            Text(address)
+                                .font(.body)
+                                .foregroundStyle(Color(uiColor: .systemBlue))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
     }
 
-    /// 全字段 unifiedContact 读取放到后台线程，主线程只负责切换界面，避免点开就卡住。
-    private func loadContact() async {
-        guard let identifier else {
-            contact = nil
-            loadFinished = true
-            return
+    private func actionButton(
+        title: String,
+        icon: String,
+        tint: Color,
+        enabled: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            VStack(spacing: 4) {
+                Image(systemName: icon)
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 40, height: 40)
+                    .background(tint.opacity(enabled ? 1 : 0.35), in: Circle())
+                Text(title)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity)
         }
-        contact = nil
-        loadFinished = false
-        let box = await Task.detached(priority: .userInitiated) { () -> NativeContactBox in
-            let store = CNContactStore()
-            let fetched = try? store.unifiedContact(
-                withIdentifier: identifier,
-                keysToFetch: [CNContactViewController.descriptorForRequiredKeys()]
-            )
-            return NativeContactBox(value: fetched)
-        }.value
-        guard !Task.isCancelled else { return }
-        contact = box.value
-        loadFinished = true
+        .buttonStyle(.plain)
+        .disabled(!enabled)
     }
 }
 

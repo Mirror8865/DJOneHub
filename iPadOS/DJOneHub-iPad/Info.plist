@@ -24,6 +24,7 @@
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
 		<string>com.djonehub.standby.refresh</string>
+		<string>com.djonehub.standby.processing</string>
 	</array>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
@@ -56,6 +57,7 @@
 		<string>location</string>
 		<!-- 进程被系统回收后，靠后台刷新任务重新拉起并补发通知。 -->
 		<string>fetch</string>
+		<string>processing</string>
 	</array>
 	<key>UILaunchScreen</key>
 	<dict/>

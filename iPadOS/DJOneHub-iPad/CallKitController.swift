@@ -342,13 +342,11 @@ final class CallKitController: NSObject {
 
     private func performStart(_ action: CXStartCallAction) async {
         if action.isComplete { return }
-        if outgoingStartInFlight { return }
+        // 同一通呼出可能被系统重复投递（Siri/联系人 + App 内事务）；已上报过就直接完成。
         if systemCallReported, currentUUID == action.callUUID, currentDirection == "outgoing" {
             action.fulfill()
             return
         }
-        outgoingStartInFlight = true
-        defer { outgoingStartInFlight = false }
         do {
             guard let handler else { throw CallKitBridgeError.handlerUnavailable }
             // 除了 App 内提交的事务，系统也可能通过 Siri/联系人把呼出动作
@@ -362,22 +360,35 @@ final class CallKitController: NSObject {
             guard currentUUID == action.callUUID, currentDirection == "outgoing" else {
                 throw CallKitBridgeError.staleSystemCall
             }
-            // 官方呼出时序：先 reportOutgoingCall(startedConnectingAt:)，系统通话界面
-            // 随即出现在锁屏、状态栏与灵动岛，然后再执行模块 ATD。
-            // 旧实现把上报放在模块握手之后，模块稍慢时拨出后屏幕上什么都没有。
+            // 官方呼出时序：先 reportOutgoingCall(startedConnectingAt:) 让系统通话界面
+            // 立刻出现在锁屏 / 状态栏 / 灵动岛，然后马上 fulfill 这个 CXStartCallAction。
+            // 关键点：不能再等模块 ATD 握手完成才 fulfill —— 模块慢一步，系统就迟迟
+            // 不显示通话界面，只能靠锁屏重新点亮补显示。
             if !systemCallReported {
                 provider.reportOutgoingCall(with: action.callUUID, startedConnectingAt: Date())
                 systemCallReported = true
             }
-            try await handler.callKitStart(number: action.handle.value)
-            if currentState == "active" {
-                provider.reportOutgoingCall(with: action.callUUID, connectedAt: Date())
-            }
             action.fulfill()
+            // 事务完成后异步执行模块拨号；模块 CLCC 稍后才起来，期间容忍空轮询。
+            outgoingStartInFlight = true
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                defer { self.outgoingStartInFlight = false }
+                do {
+                    try await handler.callKitStart(number: action.handle.value)
+                    if self.currentUUID == action.callUUID, self.currentState == "active" {
+                        self.provider.reportOutgoingCall(with: action.callUUID, connectedAt: Date())
+                    }
+                } catch {
+                    // 模块拨号失败：结束已上报的系统通话，避免锁屏残留僵尸通话。
+                    if self.currentUUID == action.callUUID {
+                        self.finishCurrentCall(previous: nil, reason: .failed)
+                    }
+                    self.handler?.callKitDidFail(error.localizedDescription)
+                }
+            }
         } catch {
             if currentUUID == action.callUUID {
-                // 已经上报给系统的呼出必须显式结束，否则系统侧会残留一通僵尸通话，
-                // 用户还会在锁屏看到一通永远拨不出去的电话。
                 finishCurrentCall(previous: nil, reason: .failed)
             }
             fail(action, error: error)

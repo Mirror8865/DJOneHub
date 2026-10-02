@@ -27,7 +27,7 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .status: return "状态"
+        case .status: return "模块状态"
         case .appearance: return "外观与语言"
         case .notification: return "后台与保活"
         case .connection: return "连接"
@@ -74,8 +74,8 @@ private enum SettingsGroup: String, CaseIterable, Identifiable {
 
     var sections: [SettingsSection] {
         switch self {
-        case .djonehub: return [.status, .appearance, .notification]
-        case .module: return [.connection, .voice, .network, .power, .esim]
+        case .djonehub: return [.appearance, .notification]
+        case .module: return [.status, .connection, .voice, .network, .power, .esim]
         case .advanced: return [.debugAT, .service]
         }
     }
@@ -295,6 +295,18 @@ struct SettingsView: View {
     /// 状态：系统设置式分组行（LabeledContent），每行一项，不再做两列卡片。
     @ViewBuilder
     private var statusSection: some View {
+        // 模块状态板块顶部的模块实拍图（已去白底，随浅色/深色外观自适应）。
+        Section {
+            Image("ModuleHero")
+                .resizable()
+                .scaledToFit()
+                .frame(maxWidth: 300)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+                .accessibilityLabel(L10n.t("DJOneHub 模块"))
+        }
         Section {
             LabeledContent(L10n.t("模块代理")) {
                 Text(model.isOnline ? L10n.t("在线") : L10n.t("离线"))

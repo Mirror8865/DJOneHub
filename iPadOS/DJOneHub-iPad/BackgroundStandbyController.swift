@@ -140,6 +140,10 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
     private var restartTask: Task<Void, Never>?
     /// 显著位置变化监控是否已登记；它决定 App 被系统回收后还能不能被自动拉起。
     private var significantChangeMonitoring = false
+    /// 名称访问监控（CLVisit）：系统在进程被回收后仍可因一次访问事件把它重新拉起。
+    private var monitoringVisits = false
+    /// 地理围栏监控：进出围栏同样能拉起已被系统回收的进程，作为第三条复活通道。
+    private var monitoredRegion: CLCircularRegion?
     /// 后台唤醒去重时间戳：定位回调很密集，避免每一次回调都重建轮询。
     private var lastBackgroundWake = Date.distantPast
 
@@ -149,7 +153,9 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
     }
 
     /// 显著位置变化监控是否已生效：生效后即使用户杀掉后台，系统仍可能在位置显著变化时重新拉起 App。
-    var supportsTerminatedRelaunch: Bool { significantChangeMonitoring && hasAlwaysAuthorization }
+    var supportsTerminatedRelaunch: Bool {
+        hasAlwaysAuthorization && (significantChangeMonitoring || monitoringVisits || monitoredRegion != nil)
+    }
 
     /// 保活是否真正在运行，设置页用它给出可读状态，避免用户以为开关无效。
     var statusText: String {
@@ -189,13 +195,18 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
         if enabled {
             // 权限弹窗必须在前台出现，用户才能看到并授权；随后由进入后台触发心跳。
             requestAuthorizationIfNeeded()
+            // 三条「被回收后仍能拉起进程」的通道全部登记：显著位置变化、访问事件、地理围栏。
             startSignificantChangeMonitoring()
+            startVisitMonitoring()
+            startRegionMonitoring()
             startIfAuthorized()
         } else {
             restartTask?.cancel()
             restartTask = nil
             stopHeartbeat()
             stopSignificantChangeMonitoring()
+            stopVisitMonitoring()
+            stopRegionMonitoring()
         }
     }
 
@@ -271,6 +282,64 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
         manager.stopMonitoringSignificantLocationChanges()
     }
 
+    /// 访问监控：用户到访一处地点后系统会把进程叫醒（即使它此前已被回收）。
+    private func startVisitMonitoring() {
+        guard !monitoringVisits else { return }
+        monitoringVisits = true
+        manager.startMonitoringVisits()
+    }
+
+    private func stopVisitMonitoring() {
+        guard monitoringVisits else { return }
+        monitoringVisits = false
+        manager.stopMonitoringVisits()
+    }
+
+    /// 地理围栏：在当前坐标附近登记一个 200m 围栏，进出事件都是系统级的复活机会。
+    /// 定位权限不足时 startMonitoring 不生效，等授权回调或下一次心跳再补登记。
+    private func startRegionMonitoring() {
+        guard monitoredRegion == nil else { return }
+        guard let location = manager.location else { return }
+        let region = CLCircularRegion(
+            center: location.coordinate,
+            radius: 200,
+            identifier: "djonehub.standby.region"
+        )
+        region.notifyOnEntry = true
+        region.notifyOnExit = true
+        monitoredRegion = region
+        manager.startMonitoring(for: region)
+    }
+
+    private func stopRegionMonitoring() {
+        guard let region = monitoredRegion else { return }
+        monitoredRegion = nil
+        manager.stopMonitoring(for: region)
+    }
+
+    /// 心跳把进程带到新位置后，围栏要跟着挪，否则一直等不到进出事件。
+    private func refreshRegionIfNeeded() {
+        guard enabled, hasAlwaysAuthorization else { return }
+        guard let region = monitoredRegion, let location = manager.location else {
+            startRegionMonitoring()
+            return
+        }
+        let center = CLLocation(latitude: region.center.latitude, longitude: region.center.longitude)
+        guard location.distance(from: center) > 100 else { return }
+        manager.stopMonitoring(for: region)
+        monitoredRegion = nil
+        startRegionMonitoring()
+    }
+
+    /// 围栏 / 访问事件统一走后台复活路径。
+    private func handleTerminatedRelaunchEvent() {
+        heartbeatActive = true
+        refreshRegionIfNeeded()
+        guard UIApplication.shared.applicationState != .active else { return }
+        appIsBackground = true
+        dispatchBackgroundWake()
+    }
+
     /// 后台被系统唤醒（定位事件 / 后台刷新任务）时，把 AppModel 拉回「正在轮询」的状态。
     /// 去重是为了让密集的定位回调不至于反复重启轮询任务。
     private func dispatchBackgroundWake() {
@@ -297,6 +366,9 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
             guard let self else { return }
             if self.manager.authorizationStatus == .authorizedAlways {
                 self.heartbeatActive = false
+                // 拿到「始终允许」后才补登记访问 / 围栏监控（这两者都要求 always 授权）。
+                self.startVisitMonitoring()
+                self.startRegionMonitoring()
                 self.startIfAuthorized()
             } else if self.manager.authorizationStatus == .denied
                         || self.manager.authorizationStatus == .restricted {
@@ -315,9 +387,36 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
             guard let self else { return }
             self.heartbeatActive = true
             // 前台也会收到显著位置变化回调，只有确认不在前台时才按「后台复活」处理。
+            self.refreshRegionIfNeeded()
             guard UIApplication.shared.applicationState != .active else { return }
             self.appIsBackground = true
             self.dispatchBackgroundWake()
+        }
+    }
+
+    /// 访问事件：进程被回收后系统因一次到访把它叫醒。
+    nonisolated func locationManager(_ manager: CLLocationManager, didVisit visit: CLVisit) {
+        Task { @MainActor [weak self] in
+            self?.handleTerminatedRelaunchEvent()
+        }
+    }
+
+    /// 进入围栏：第三条复活通道。
+    nonisolated func locationManager(_ manager: CLLocationManager, didEnterRegion region: CLRegion) {
+        Task { @MainActor [weak self] in
+            self?.handleTerminatedRelaunchEvent()
+        }
+    }
+
+    /// 离开围栏：顺手把围栏挪到新位置，保持后续还有事件可等。
+    nonisolated func locationManager(_ manager: CLLocationManager, didExitRegion region: CLRegion) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            if let monitored = self.monitoredRegion, monitored.identifier == region.identifier {
+                self.manager.stopMonitoring(for: monitored)
+                self.monitoredRegion = nil
+            }
+            self.handleTerminatedRelaunchEvent()
         }
     }
 
@@ -397,37 +496,71 @@ final class IncomingCallNotifier {
 /// 保活定位负责「持续活着」，这个任务负责「被回收后还能被叫醒」，两者互补。
 enum StandbyBackgroundScheduler {
     static let refreshTaskIdentifier = "com.djonehub.standby.refresh"
+    /// 后台处理任务给的时间窗比 App 刷新长得多，用来把被回收后的补发做完整。
+    static let processingTaskIdentifier = "com.djonehub.standby.processing"
 
-    private static var isPermitted: Bool {
-        let allowed = Bundle.main.object(forInfoDictionaryKey: "BGTaskSchedulerPermittedIdentifiers") as? [String]
-        return allowed?.contains(refreshTaskIdentifier) ?? false
+    private static var permittedIdentifiers: [String] {
+        Bundle.main.object(forInfoDictionaryKey: "BGTaskSchedulerPermittedIdentifiers") as? [String] ?? []
+    }
+
+    private static func isPermitted(_ identifier: String) -> Bool {
+        permittedIdentifiers.contains(identifier)
     }
 
     /// 标识符必须先在 Info.plist 的 BGTaskSchedulerPermittedIdentifiers 里声明，
     /// 否则 register 会抛 Objective-C 异常（Swift 捕不到）直接崩溃，所以先校验再注册。
     static func register() {
-        guard isPermitted else { return }
-        BGTaskScheduler.shared.register(
-            forTaskWithIdentifier: refreshTaskIdentifier,
-            using: nil
-        ) { task in
-            guard let refreshTask = task as? BGAppRefreshTask else {
-                task.setTaskCompleted(success: false)
-                return
+        if isPermitted(refreshTaskIdentifier) {
+            BGTaskScheduler.shared.register(
+                forTaskWithIdentifier: refreshTaskIdentifier,
+                using: nil
+            ) { task in
+                guard let refreshTask = task as? BGAppRefreshTask else {
+                    task.setTaskCompleted(success: false)
+                    return
+                }
+                handle(refreshTask)
             }
-            handle(refreshTask)
+        }
+        if isPermitted(processingTaskIdentifier) {
+            BGTaskScheduler.shared.register(
+                forTaskWithIdentifier: processingTaskIdentifier,
+                using: nil
+            ) { task in
+                guard let processingTask = task as? BGProcessingTask else {
+                    task.setTaskCompleted(success: false)
+                    return
+                }
+                handle(processingTask)
+            }
         }
     }
 
+    /// 两条通道一起排：刷新任务负责「轻量叫醒」，处理任务负责「跑完整一轮补发」。
     static func schedule() {
-        guard isPermitted else { return }
+        scheduleRefresh()
+        scheduleProcessing()
+    }
+
+    private static func scheduleRefresh() {
+        guard isPermitted(refreshTaskIdentifier) else { return }
         let request = BGAppRefreshTaskRequest(identifier: refreshTaskIdentifier)
         // earliestBeginDate 只是「不早于」，真实唤醒时机仍由系统按使用习惯决定。
         request.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60)
         try? BGTaskScheduler.shared.submit(request)
     }
 
-    private static func handle(_ task: BGAppRefreshTask) {
+    private static func scheduleProcessing() {
+        guard isPermitted(processingTaskIdentifier) else { return }
+        let request = BGProcessingTaskRequest(identifier: processingTaskIdentifier)
+        // 需要网络才能把积压的来电/短信补发出去；不强制外接电源，模块本身是 USB 供电。
+        request.requiresNetworkConnectivity = true
+        request.requiresExternalPower = false
+        request.earliestBeginDate = Date(timeIntervalSinceNow: 5 * 60)
+        try? BGTaskScheduler.shared.submit(request)
+    }
+
+    private static func handle(_ task: BGTask) {
         // 先排下一次，保证本次即使被中断也不会丢掉后续唤醒机会。
         schedule()
         let work = Task { @MainActor in
