@@ -296,6 +296,10 @@ let dialPadRows: [[(String, String)]] = [
 
 /// 拨号键盘浮层：由通话页顶栏的拨号按钮呼出，
 /// 点击键盘以外的任何区域（背景遮罩）都会关闭键盘。
+/// 拨号键盘浮层：由通话页顶栏的拨号按钮呼出。
+///
+/// 键盘是一块小尺寸卡片（不铺满整屏），在通话页里从右上角圆形拨号按钮的位置
+/// 放大展开；点键盘以外的任意区域都会关闭键盘（遮罩由通话页提供）。
 struct DialPadOverlay: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -304,8 +308,9 @@ struct DialPadOverlay: View {
     @State private var deleteRepeatTask: Task<Void, Never>?
 
     private var isCompact: Bool { horizontalSizeClass == .compact }
-    private var keySize: CGFloat { isCompact ? 70 : 78 }
-    private var keySpacing: CGFloat { isCompact ? 22 : 30 }
+    private var keySize: CGFloat { isCompact ? 58 : 62 }
+    private var keySpacing: CGFloat { isCompact ? 20 : 24 }
+    private var rowSpacing: CGFloat { isCompact ? 8 : 10 }
     private var matchedName: String? {
         model.contacts.contact(for: model.numberInput)?.name
     }
@@ -314,41 +319,32 @@ struct DialPadOverlay: View {
     }
 
     var body: some View {
-        ZStack {
-            Color.black.opacity(0.28)
-                .ignoresSafeArea()
-                .contentShape(Rectangle())
-                .onTapGesture { close() }
-                .accessibilityHidden(true)
-
-            card
-                .padding(.horizontal, 24)
-        }
-        .transition(.opacity)
-        .onDisappear { stopDeleteRepeat() }
+        card
+            .padding(.horizontal, 24)
+            .onDisappear { stopDeleteRepeat() }
     }
 
     private var card: some View {
-        VStack(spacing: isCompact ? 12 : 16) {
+        VStack(spacing: isCompact ? 10 : 12) {
             numberDisplay
             keypad
             callRow
         }
-        .padding(.horizontal, isCompact ? 18 : 26)
-        .padding(.vertical, isCompact ? 18 : 24)
-        .frame(maxWidth: 400)
+        .padding(.horizontal, isCompact ? 16 : 20)
+        .padding(.vertical, isCompact ? 14 : 18)
+        .frame(maxWidth: 320)
         .modifier(DialPadCardBackground())
     }
 
     private var numberDisplay: some View {
         VStack(spacing: 2) {
             Text(model.numberInput.isEmpty ? L10n.t("输入号码") : model.numberInput)
-                .font(.system(size: isCompact ? 30 : 34, weight: .regular, design: .rounded))
+                .font(.system(size: isCompact ? 26 : 30, weight: .regular, design: .rounded))
                 .foregroundStyle(model.numberInput.isEmpty ? Color.secondary : Color.primary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.45)
                 .frame(maxWidth: .infinity)
-                .frame(height: 42)
+                .frame(height: 36)
             if let matchedName {
                 Text(matchedName)
                     .font(.footnote)
@@ -359,7 +355,7 @@ struct DialPadOverlay: View {
     }
 
     private var keypad: some View {
-        VStack(spacing: isCompact ? 10 : 14) {
+        VStack(spacing: rowSpacing) {
             ForEach(Array(dialPadRows.enumerated()), id: \.offset) { _, row in
                 HStack(spacing: keySpacing) {
                     ForEach(Array(row.enumerated()), id: \.offset) { _, key in
@@ -377,7 +373,7 @@ struct DialPadOverlay: View {
     }
 
     private var callRow: some View {
-        HStack(spacing: isCompact ? 26 : 38) {
+        HStack(spacing: keySpacing) {
             Color.clear.frame(width: keySize, height: keySize)
 
             Button {
@@ -463,8 +459,8 @@ private struct DialKey: View {
                 Text(digit)
                     .font(.system(size: size * 0.40, weight: .regular, design: .rounded))
                 Text(letters)
-                    .font(.system(size: size * 0.13, weight: .semibold))
-                    .tracking(1.4)
+                    .font(.system(size: size * 0.17, weight: .semibold))
+                    .tracking(1.3)
             }
             .foregroundStyle(.primary)
             .frame(width: size, height: size)
@@ -481,6 +477,87 @@ private struct DialKey: View {
         .accessibilityLabel(letters.isEmpty ? digit : "\(digit) \(letters)")
     }
 }
+
+// MARK: - 列表通用控件
+
+/// 搜索栏：与系统 App 顶栏下方的搜索栏一致（灰色圆角矩形 + 放大镜 + 麦克风）。
+///
+/// 这里不用 `.searchable`：搜索栏挂在导航栏上时会横跨整个窗口宽度，
+/// iPad 分栏下就比左列列表宽出一截（用户反馈「搜索框过长」）。
+/// 把它放进左列内部后，宽度天然与列表等长。
+struct PhoneSearchField: View {
+    let placeholder: String
+    @Binding var text: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(.secondary)
+            TextField(placeholder, text: $text)
+                .textFieldStyle(.plain)
+                .font(.body)
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
+                .submitLabel(.search)
+                .accessibilityLabel(placeholder)
+            if !text.isEmpty {
+                Button {
+                    text = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 15))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(L10n.t("清除"))
+            }
+            Image(systemName: "mic.fill")
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 36)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color(uiColor: .tertiarySystemFill))
+        )
+    }
+}
+
+/// 顶栏「编辑 / 完成」按钮：浅色下黑字、深色下白字，不使用强调色蓝。
+/// 自己画而不是直接用 `EditButton`，是为了让三个板块共用同一套多选删除逻辑。
+struct PhoneEditToggle: View {
+    let isEditing: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(isEditing ? L10n.t("完成") : L10n.t("编辑"))
+                .fontWeight(isEditing ? .semibold : .regular)
+        }
+        .tint(Color.primary)
+        .accessibilityLabel(isEditing ? L10n.t("完成") : L10n.t("编辑"))
+    }
+}
+
+/// 编辑态左侧的圆形复选框：选中为系统蓝实心对勾，未选中为灰色空心圈。
+struct PhoneSelectionCircle: View {
+    let isSelected: Bool
+
+    var body: some View {
+        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+            .font(.system(size: 22, weight: .regular))
+            .foregroundStyle(
+                isSelected
+                    ? Color(uiColor: .systemBlue)
+                    : Color(uiColor: .tertiaryLabel)
+            )
+            .accessibilityHidden(true)
+    }
+}
+
 // MARK: - 通话（拨号 + 通话记录合并）
 
 /// 「通话」板块：左侧通话记录，右侧通话详情；顶栏左侧「编辑 + 分类」、
@@ -499,6 +576,8 @@ struct CallsView: View {
     @State private var search = ""
     @State private var showsMissedOnly = false
     @State private var showingKeypad = false
+    @State private var isEditing = false
+    @State private var checkedIDs = Set<String>()
 
     private var isRegular: Bool { horizontalSizeClass == .regular }
 
@@ -521,22 +600,9 @@ struct CallsView: View {
             Group {
                 if isRegular { regularBody } else { compactBody }
             }
-            .navigationTitle(L10n.t("通话"))
+            .navigationTitle(isEditing ? L10n.t("已选择 \(checkedIDs.count) 项") : L10n.t("通话"))
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItemGroup(placement: .topBarLeading) {
-                    EditButton().tint(Color.primary)
-                    filterMenu
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { showingKeypad = true } label: {
-                        Image(systemName: "circle.grid.3x3.fill")
-                    }
-                    .tint(Color.primary)
-                    .accessibilityLabel(L10n.t("拨号键盘"))
-                }
-            }
-            .searchable(text: $search, placement: .toolbar, prompt: Text(L10n.t("搜索")))
+            .toolbar { callsToolbar }
             .immersiveBars()
             .navigationDestination(for: String.self) { identifier in
                 if let call = model.callHistory.first(where: { $0.id == identifier }) {
@@ -545,24 +611,74 @@ struct CallsView: View {
                     EmptyStateView(title: L10n.t("暂无通话记录"), systemImage: "clock")
                 }
             }
-        }
-        .overlay {
-            if showingKeypad {
-                DialPadOverlay(onDismiss: { showingKeypad = false })
+            .overlay {
+                if showingKeypad {
+                    ZStack {
+                        // 点键盘以外的任意区域即可关闭键盘。
+                        Color.black.opacity(0.18)
+                            .ignoresSafeArea()
+                            .contentShape(Rectangle())
+                            .onTapGesture { dismissKeypad() }
+                            .accessibilityHidden(true)
+                            .transition(.opacity)
+                        // 圆形的拨号按钮放大成小尺寸拨号键盘。
+                        DialPadOverlay(onDismiss: dismissKeypad)
+                            .transition(
+                                .scale(scale: 0.06, anchor: .topTrailing)
+                                    .combined(with: .opacity)
+                            )
+                    }
+                }
             }
         }
-        .animation(.easeInOut(duration: 0.2), value: showingKeypad)
         .task { await model.contacts.loadIfNeeded() }
+    }
+
+    @ToolbarContentBuilder
+    private var callsToolbar: some ToolbarContent {
+        ToolbarItemGroup(placement: .topBarLeading) {
+            PhoneEditToggle(isEditing: isEditing) { toggleEditing() }
+            if !isEditing { filterMenu }
+        }
+        ToolbarItem(placement: .topBarTrailing) {
+            if isEditing {
+                Button(role: .destructive) {
+                    deleteCheckedCalls()
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .tint(Color.red)
+                .disabled(checkedIDs.isEmpty)
+                .accessibilityLabel(L10n.t("删除"))
+            } else {
+                Button {
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                        showingKeypad = true
+                    }
+                } label: {
+                    Image(systemName: "circle.grid.3x3.fill")
+                }
+                .tint(Color.primary)
+                .accessibilityLabel(L10n.t("拨号键盘"))
+            }
+        }
     }
 
     // MARK: iPad 页内双栏（只有一条顶栏）
 
     private var regularBody: some View {
         HStack(spacing: 0) {
-            List {
-                callsRows
+            VStack(spacing: 0) {
+                PhoneSearchField(placeholder: L10n.t("搜索"), text: $search)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 4)
+                    .padding(.bottom, 8)
+                List {
+                    callsRows
+                }
+                .listStyle(.plain)
+                .scrollDismissesKeyboard(.interactively)
             }
-            .listStyle(.plain)
             .frame(width: 380)
 
             Divider()
@@ -582,9 +698,14 @@ struct CallsView: View {
 
     private var compactBody: some View {
         List {
+            PhoneSearchField(placeholder: L10n.t("搜索"), text: $search)
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
+                .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 8, trailing: 16))
             compactCallsRows
         }
         .listStyle(.plain)
+        .scrollDismissesKeyboard(.interactively)
     }
 
     // MARK: 子视图
@@ -592,18 +713,23 @@ struct CallsView: View {
     @ViewBuilder
     private var callsRows: some View {
         if filteredCalls.isEmpty {
-            EmptyStateView(
-                title: showsMissedOnly ? L10n.t("暂无未接来电") : L10n.t("暂无通话记录"),
-                systemImage: "clock"
-            )
-            .listRowBackground(Color.clear)
-            .listRowSeparator(.hidden)
+            emptyCallsRow
         } else {
             ForEach(filteredCalls) { call in
                 Button {
-                    selection = call.id
+                    if isEditing {
+                        toggleCheck(call.id)
+                    } else {
+                        selection = call.id
+                    }
                 } label: {
-                    RecentsRow(call: call, onCall: dialNumber, isSelected: selection == call.id)
+                    RecentsRow(
+                        call: call,
+                        onCall: dialNumber,
+                        isSelected: !isEditing && selection == call.id,
+                        isEditing: isEditing,
+                        isChecked: checkedIDs.contains(call.id)
+                    )
                 }
                 .buttonStyle(.plain)
                 .listRowSeparator(.hidden)
@@ -615,19 +741,39 @@ struct CallsView: View {
     @ViewBuilder
     private var compactCallsRows: some View {
         if filteredCalls.isEmpty {
-            EmptyStateView(
-                title: showsMissedOnly ? L10n.t("暂无未接来电") : L10n.t("暂无通话记录"),
-                systemImage: "clock"
-            )
-            .listRowBackground(Color.clear)
-            .listRowSeparator(.hidden)
+            emptyCallsRow
         } else {
             ForEach(filteredCalls) { call in
-                NavigationLink(value: call.id) {
-                    RecentsRow(call: call, onCall: dialNumber, isSelected: false)
+                if isEditing {
+                    Button {
+                        toggleCheck(call.id)
+                    } label: {
+                        RecentsRow(
+                            call: call,
+                            onCall: dialNumber,
+                            isEditing: true,
+                            isChecked: checkedIDs.contains(call.id)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                } else {
+                    NavigationLink(value: call.id) {
+                        RecentsRow(call: call, onCall: dialNumber, isSelected: false)
+                    }
                 }
             }
         }
+    }
+
+    private var emptyCallsRow: some View {
+        EmptyStateView(
+            title: showsMissedOnly ? L10n.t("暂无未接来电") : L10n.t("暂无通话记录"),
+            systemImage: "clock"
+        )
+        .listRowBackground(Color.clear)
+        .listRowSeparator(.hidden)
     }
 
     /// 三条杠分类按钮：与系统信息 App 的筛选菜单保持一致。
@@ -644,6 +790,32 @@ struct CallsView: View {
         .accessibilityLabel(L10n.t("筛选"))
     }
 
+    private func toggleEditing() {
+        withAnimation(.easeInOut(duration: 0.2)) { isEditing.toggle() }
+        if !isEditing { checkedIDs.removeAll() }
+    }
+
+    private func toggleCheck(_ id: String) {
+        if checkedIDs.contains(id) {
+            checkedIDs.remove(id)
+        } else {
+            checkedIDs.insert(id)
+        }
+    }
+
+    private func deleteCheckedCalls() {
+        let ids = checkedIDs
+        guard !ids.isEmpty else { return }
+        model.deleteCalls(ids: ids)
+        if let selection, ids.contains(selection) { self.selection = nil }
+        checkedIDs.removeAll()
+        withAnimation(.easeInOut(duration: 0.2)) { isEditing = false }
+    }
+
+    private func dismissKeypad() {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) { showingKeypad = false }
+    }
+
     private func dialNumber(_ number: String) {
         model.numberInput = number
         Task { await model.dial() }
@@ -657,6 +829,8 @@ private struct RecentsRow: View {
     let call: CallRecord
     let onCall: (String) -> Void
     var isSelected: Bool = false
+    var isEditing: Bool = false
+    var isChecked: Bool = false
 
     private var name: String { model.contacts.displayName(for: call.number) }
     private var photo: Data? {
@@ -666,6 +840,10 @@ private struct RecentsRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
+            if isEditing {
+                PhoneSelectionCircle(isSelected: isChecked)
+            }
+
             InitialAvatar(name: name, photoData: photo, size: 44)
 
             VStack(alignment: .leading, spacing: 2) {
@@ -685,7 +863,7 @@ private struct RecentsRow: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
 
-            if let number = call.number {
+            if !isEditing, let number = call.number {
                 Button { onCall(number) } label: {
                     Image(systemName: "phone.fill")
                         .font(.system(size: 15, weight: .semibold))
@@ -698,12 +876,17 @@ private struct RecentsRow: View {
             }
         }
         .padding(.vertical, 8)
-        .padding(.horizontal, 16)
+        .padding(.horizontal, isEditing ? 12 : 16)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(isSelected ? Color(uiColor: .secondarySystemFill) : Color.clear)
+                .fill(rowBackground)
         )
         .contentShape(Rectangle())
+    }
+
+    private var rowBackground: Color {
+        if isEditing { return isChecked ? Color(uiColor: .secondarySystemFill) : Color.clear }
+        return isSelected ? Color(uiColor: .secondarySystemFill) : Color.clear
     }
 
     private var subtitle: String {
@@ -941,6 +1124,8 @@ struct ContactsView: View {
     @State private var selection: String?
     @State private var search = ""
     @State private var showingNewContact = false
+    @State private var isEditing = false
+    @State private var checkedIDs = Set<String>()
 
     private var isRegular: Bool { horizontalSizeClass == .regular }
     private var contacts: [ContactStore.Contact] { model.contacts.contacts }
@@ -981,22 +1166,9 @@ struct ContactsView: View {
             Group {
                 if isRegular { regularBody } else { compactBody }
             }
-            .navigationTitle(L10n.t("联系人"))
+            .navigationTitle(isEditing ? L10n.t("已选择 \(checkedIDs.count) 项") : L10n.t("联系人"))
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { showingNewContact = true } label: {
-                        Image(systemName: "plus")
-                    }
-                    .tint(Color.primary)
-                    .accessibilityLabel(L10n.t("新建联系人"))
-                }
-            }
-            .searchable(
-                text: $search,
-                placement: .navigationBarDrawer(displayMode: .always),
-                prompt: Text(L10n.t("搜索"))
-            )
+            .toolbar { contactsToolbar }
             .immersiveBars()
             .navigationDestination(for: String.self) { identifier in
                 if let contact = contacts.first(where: { $0.id == identifier }) {
@@ -1015,19 +1187,60 @@ struct ContactsView: View {
         }
     }
 
+    @ToolbarContentBuilder
+    private var contactsToolbar: some ToolbarContent {
+        ToolbarItem(placement: .topBarLeading) {
+            if isEditing {
+                PhoneEditToggle(isEditing: true) { toggleEditing() }
+            }
+        }
+        ToolbarItem(placement: .topBarTrailing) {
+            if isEditing {
+                Button(role: .destructive) {
+                    deleteCheckedContacts()
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .tint(Color.red)
+                .disabled(checkedIDs.isEmpty)
+                .accessibilityLabel(L10n.t("删除"))
+            } else {
+                Button {
+                    showingNewContact = true
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .tint(Color.primary)
+                .accessibilityLabel(L10n.t("新建联系人"))
+            }
+        }
+    }
+
     private var regularBody: some View {
         HStack(spacing: 0) {
-            List {
-                contactRows(linkRows: false)
+            VStack(spacing: 0) {
+                PhoneSearchField(placeholder: L10n.t("搜索"), text: $search)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 4)
+                    .padding(.bottom, 8)
+                List {
+                    contactRows(linkRows: false)
+                }
+                .listStyle(.plain)
+                .scrollDismissesKeyboard(.interactively)
             }
-            .listStyle(.plain)
             .frame(width: 380)
 
             Divider()
 
             Group {
                 if let contact = selectedContact {
-                    ContactDetailPane(contact: contact, onCall: onCall, onMessage: onMessage)
+                    ContactDetailPane(
+                        contact: contact,
+                        onCall: onCall,
+                        onMessage: onMessage,
+                        showsEditButton: !isEditing
+                    )
                 } else {
                     EmptyStateView(title: L10n.t("选择联系人查看详情"), systemImage: "person.crop.circle")
                 }
@@ -1038,9 +1251,14 @@ struct ContactsView: View {
 
     private var compactBody: some View {
         List {
-            contactRows(linkRows: true)
+            PhoneSearchField(placeholder: L10n.t("搜索"), text: $search)
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
+                .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 8, trailing: 16))
+            contactRows(linkRows: !isEditing)
         }
         .listStyle(.plain)
+        .scrollDismissesKeyboard(.interactively)
     }
 
     @ViewBuilder
@@ -1053,7 +1271,20 @@ struct ContactsView: View {
             ForEach(sections) { section in
                 Section(section.id) {
                     ForEach(section.contacts) { contact in
-                        if linkRows {
+                        if isEditing {
+                            Button {
+                                toggleCheck(contact.id)
+                            } label: {
+                                ContactRow(
+                                    contact: contact,
+                                    isEditing: true,
+                                    isChecked: checkedIDs.contains(contact.id)
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            .listRowSeparator(.hidden)
+                            .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                        } else if linkRows {
                             NavigationLink(value: contact.id) {
                                 ContactRow(contact: contact)
                             }
@@ -1070,6 +1301,32 @@ struct ContactsView: View {
                     }
                 }
             }
+        }
+    }
+
+    private func toggleEditing() {
+        withAnimation(.easeInOut(duration: 0.2)) { isEditing.toggle() }
+        if !isEditing { checkedIDs.removeAll() }
+    }
+
+    private func toggleCheck(_ id: String) {
+        if checkedIDs.contains(id) {
+            checkedIDs.remove(id)
+        } else {
+            checkedIDs.insert(id)
+        }
+    }
+
+    /// 多选删除：系统通讯录的删除是真实删除，成功后本机副本同步更新。
+    private func deleteCheckedContacts() {
+        let ids = checkedIDs
+        guard !ids.isEmpty else { return }
+        Task {
+            let removed = await model.contacts.delete(ids: ids)
+            guard removed else { return }
+            if let selection, ids.contains(selection) { self.selection = nil }
+            checkedIDs.removeAll()
+            withAnimation(.easeInOut(duration: 0.2)) { isEditing = false }
         }
     }
 
@@ -1093,21 +1350,31 @@ private struct ContactSection: Identifiable {
 private struct ContactRow: View {
     let contact: ContactStore.Contact
     var isSelected: Bool = false
+    var isEditing: Bool = false
+    var isChecked: Bool = false
 
     var body: some View {
         HStack(spacing: 12) {
+            if isEditing {
+                PhoneSelectionCircle(isSelected: isChecked)
+            }
             InitialAvatar(name: contact.name, photoData: contact.photoData, size: 40)
             Text(contact.name)
                 .lineLimit(1)
             Spacer(minLength: 0)
         }
         .padding(.vertical, 8)
-        .padding(.horizontal, 16)
+        .padding(.horizontal, isEditing ? 12 : 16)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(isSelected ? Color(uiColor: .secondarySystemFill) : Color.clear)
+                .fill(rowBackground)
         )
         .contentShape(Rectangle())
+    }
+
+    private var rowBackground: Color {
+        if isEditing { return isChecked ? Color(uiColor: .secondarySystemFill) : Color.clear }
+        return isSelected ? Color(uiColor: .secondarySystemFill) : Color.clear
     }
 }
 
@@ -1118,6 +1385,8 @@ struct ContactDetailPane: View {
     let contact: ContactStore.Contact
     let onCall: (String) -> Void
     let onMessage: (String) -> Void
+    /// 列表进入多选删除时收起本页的「编辑」，避免顶栏同时出现两个编辑按钮。
+    var showsEditButton: Bool = true
 
     @State private var showingEditor = false
 
@@ -1147,21 +1416,29 @@ struct ContactDetailPane: View {
         .immersiveBars()
         .monochromeBarControls()
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button(L10n.t("编辑")) { showingEditor = true }
-                    .fontWeight(.semibold)
+            if showsEditButton {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(L10n.t("编辑")) { showingEditor = true }
+                        .fontWeight(.semibold)
+                }
             }
         }
-        .sheet(isPresented: $showingEditor) {
+        .sheet(isPresented: $showingEditor, onDismiss: reloadContacts) {
             NativeContactCard(
                 identifier: contact.id,
                 showsNavigationBar: true,
                 showsDoneButton: true,
-                allowsEditing: true
+                allowsEditing: true,
+                startsInEditMode: true
             ) { _ in } onMessage: { _ in }
             .presentationSizingIfAvailable()
             .presentationDragIndicator(.visible)
         }
+    }
+
+    /// 系统联系人卡片改完（或取消）后重新读取通讯录，本页显示的字段立即同步。
+    private func reloadContacts() {
+        Task { await model.contacts.requestAccessAndLoad() }
     }
 
     private var header: some View {
@@ -1400,6 +1677,8 @@ struct MessagesView: View {
     @State private var showsUnknownOnly = false
     @State private var showingCompose = false
     @State private var composeRecipient = ""
+    @State private var isEditing = false
+    @State private var checkedIDs = Set<String>()
 
     private var isRegular: Bool { horizontalSizeClass == .regular }
 
@@ -1445,23 +1724,21 @@ struct MessagesView: View {
     private var regularBody: some View {
         HStack(spacing: 0) {
             NavigationStack {
-                List {
-                    conversationRows(linkRows: false)
-                }
-                .listStyle(.plain)
-                .navigationTitle(L10n.t("信息"))
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItemGroup(placement: .topBarLeading) {
-                        filterMenu
-                        EditButton().tint(Color.primary)
+                VStack(spacing: 0) {
+                    PhoneSearchField(placeholder: L10n.t("搜索"), text: $search)
+                        .padding(.horizontal, 16)
+                        .padding(.top, 4)
+                        .padding(.bottom, 8)
+                    List {
+                        conversationRows(linkRows: false)
                     }
+                    .listStyle(.plain)
+                    .scrollDismissesKeyboard(.interactively)
                 }
-                .searchable(
-                    text: $search,
-                    placement: .navigationBarDrawer(displayMode: .always),
-                    prompt: Text(L10n.t("搜索"))
-                )
+                .navigationTitle(isEditing ? L10n.t("已选择 \(checkedIDs.count) 项") : L10n.t("信息"))
+                .navigationBarTitleDisplayMode(.inline)
+                // 左列顶栏只有分类 / 编辑；右列顶栏是新信息 / 视频，与系统「信息」App 一致。
+                .toolbar { listToolbar(showsCompose: false) }
                 .immersiveBars()
             }
             .frame(width: 380)
@@ -1489,27 +1766,45 @@ struct MessagesView: View {
     private var compactBody: some View {
         NavigationStack {
             List {
-                conversationRows(linkRows: true)
+                PhoneSearchField(placeholder: L10n.t("搜索"), text: $search)
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                    .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 8, trailing: 16))
+                conversationRows(linkRows: !isEditing)
             }
             .listStyle(.plain)
-            .navigationTitle(L10n.t("信息"))
+            .scrollDismissesKeyboard(.interactively)
+            .navigationTitle(isEditing ? L10n.t("已选择 \(checkedIDs.count) 项") : L10n.t("信息"))
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItemGroup(placement: .topBarLeading) {
-                    filterMenu
-                    EditButton().tint(Color.primary)
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    composeButton
-                }
-            }
-            .searchable(text: $search, prompt: Text(L10n.t("搜索")))
+            .toolbar { listToolbar(showsCompose: true) }
             .immersiveBars()
             .navigationDestination(for: String.self) { handle in
                 ChatPane(handle: handle) {
                     composeRecipient = ""
                     showingCompose = true
                 }
+            }
+        }
+    }
+
+    @ToolbarContentBuilder
+    private func listToolbar(showsCompose: Bool) -> some ToolbarContent {
+        ToolbarItemGroup(placement: .topBarLeading) {
+            if !isEditing { filterMenu }
+            PhoneEditToggle(isEditing: isEditing) { toggleEditing() }
+        }
+        ToolbarItem(placement: .topBarTrailing) {
+            if isEditing {
+                Button(role: .destructive) {
+                    deleteCheckedConversations()
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .tint(Color.red)
+                .disabled(checkedIDs.isEmpty)
+                .accessibilityLabel(L10n.t("删除"))
+            } else if showsCompose {
+                composeButton
             }
         }
     }
@@ -1533,7 +1828,20 @@ struct MessagesView: View {
                 .listRowSeparator(.hidden)
         } else {
             ForEach(filteredConversations) { conversation in
-                if linkRows {
+                if isEditing {
+                    Button {
+                        toggleCheck(conversation.id)
+                    } label: {
+                        ConversationRow(
+                            conversation: conversation,
+                            isEditing: true,
+                            isChecked: checkedIDs.contains(conversation.id)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                } else if linkRows {
                     NavigationLink(value: conversation.id) {
                         ConversationRow(conversation: conversation)
                     }
@@ -1564,14 +1872,42 @@ struct MessagesView: View {
         .tint(Color.primary)
         .accessibilityLabel(L10n.t("筛选"))
     }
+
+    private func toggleEditing() {
+        withAnimation(.easeInOut(duration: 0.2)) { isEditing.toggle() }
+        if !isEditing { checkedIDs.removeAll() }
+    }
+
+    private func toggleCheck(_ id: String) {
+        if checkedIDs.contains(id) {
+            checkedIDs.remove(id)
+        } else {
+            checkedIDs.insert(id)
+        }
+    }
+
+    /// 删除整个会话：把该号码名下所有短信一起删除（与系统「信息」App 一致）。
+    private func deleteCheckedConversations() {
+        var ids = Set<String>()
+        for conversation in allConversations where checkedIDs.contains(conversation.id) {
+            ids.formUnion(conversation.messages.map(\.id))
+        }
+        guard !ids.isEmpty else { return }
+        model.deleteMessages(ids: ids)
+        if let selection, checkedIDs.contains(selection) { self.selection = nil }
+        checkedIDs.removeAll()
+        withAnimation(.easeInOut(duration: 0.2)) { isEditing = false }
+    }
 }
 
 /// 会话行：头像 + 姓名 + 预览 + 右侧时间。
-/// 会话行：头像 + 姓名 + 预览 + 右侧时间；选中态是系统蓝胶囊（与系统「信息」App 一致）。
+/// 选中态是系统蓝胶囊（与系统「信息」App 一致）；编辑态左侧显示圆形复选框。
 private struct ConversationRow: View {
     @EnvironmentObject private var model: AppModel
     let conversation: Conversation
     var isSelected: Bool = false
+    var isEditing: Bool = false
+    var isChecked: Bool = false
 
     private var displayName: String {
         model.contacts.contact(for: conversation.id)?.name ?? conversation.id
@@ -1583,7 +1919,12 @@ private struct ConversationRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
+            if isEditing {
+                PhoneSelectionCircle(isSelected: isChecked)
+            }
+
             InitialAvatar(name: displayName, photoData: photoData, size: 50)
+
             VStack(alignment: .leading, spacing: 3) {
                 Text(displayName)
                     .font(.body.weight(.semibold))
@@ -1602,12 +1943,17 @@ private struct ConversationRow: View {
             }
         }
         .padding(.vertical, 8)
-        .padding(.horizontal, 14)
+        .padding(.horizontal, isEditing ? 12 : 14)
         .background(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(isSelected ? Color(uiColor: .systemBlue) : Color.clear)
+                .fill(rowBackground)
         )
         .contentShape(Rectangle())
+    }
+
+    private var rowBackground: Color {
+        if isEditing { return isChecked ? Color(uiColor: .secondarySystemFill) : Color.clear }
+        return isSelected ? Color(uiColor: .systemBlue) : Color.clear
     }
 
     /// iMessage 规则：今天显示时分，本周显示星期几，更早显示日期。
@@ -1704,35 +2050,43 @@ struct ChatPane: View {
         }
     }
 
-    /// 正上方居中的头像 + 长条液态玻璃昵称胶囊；点名称进入对方信息面板。
+    /// 正上方居中的大头像 + 长条液态玻璃昵称胶囊（胶囊下缘压住头像），点它进入对方信息面板。
     private var header: some View {
         Button { showingContactInfo = true } label: {
-            VStack(spacing: 8) {
-                InitialAvatar(name: displayName, photoData: photoData, size: 64)
-                HStack(spacing: 5) {
-                    Text(displayName)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                    Image(systemName: "chevron.right")
-                        .font(.caption2.weight(.semibold))
+            VStack(spacing: -24) {
+                InitialAvatar(name: displayName, photoData: photoData, size: 104)
+                    .overlay(Circle().strokeBorder(Color.white.opacity(0.30), lineWidth: 1))
+
+                VStack(spacing: 3) {
+                    HStack(spacing: 5) {
+                        Text(displayName)
+                            .font(.headline)
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                        Image(systemName: "chevron.right")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 8)
+                    .modifier(GlassCapsuleBackground())
+
+                    Text(L10n.t("iMessage 信息"))
+                        .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-                .modifier(GlassCapsuleBackground())
-                Text(L10n.t("iMessage 信息"))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                .zIndex(1)
             }
             .frame(maxWidth: .infinity)
+            .padding(.top, 6)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(L10n.t("联系人信息"))
     }
 
-    /// 底部输入条：长条液态玻璃胶囊，固定在窗口底部，不随键盘上移。
+    /// 底部输入条：整条液态玻璃胶囊，发送 / 语音按钮在胶囊内部；
+    /// 没有文字时显示语音输入，有文字时显示发送。输入条固定在窗口底部，不随输入法键盘上移。
     private var composer: some View {
         HStack(alignment: .bottom, spacing: 8) {
             Menu {
@@ -1755,28 +2109,34 @@ struct ChatPane: View {
             .buttonStyle(.plain)
             .accessibilityLabel(L10n.t("更多"))
 
-            TextField(L10n.t("iMessage 信息"), text: $draft, axis: .vertical)
-                .lineLimit(1...5)
-                .textFieldStyle(.plain)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 9)
-                .modifier(GlassCapsuleBackground())
+            HStack(alignment: .bottom, spacing: 4) {
+                TextField(L10n.t("iMessage 信息"), text: $draft, axis: .vertical)
+                    .lineLimit(1...6)
+                    .textFieldStyle(.plain)
+                    .padding(.leading, 16)
+                    .padding(.vertical, 8)
 
-            if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                DictationButton { recognized in
-                    draft = recognized
+                if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    DictationButton { recognized in
+                        draft = recognized
+                    }
+                    .padding(.trailing, 4)
+                    .padding(.bottom, 2)
+                } else {
+                    Button(action: send) {
+                        Image(systemName: "arrow.up")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 30, height: 30)
+                            .background(Circle().fill(Color(uiColor: .systemBlue)))
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.trailing, 4)
+                    .padding(.bottom, 3)
+                    .accessibilityLabel(L10n.t("发送"))
                 }
-            } else {
-                Button(action: send) {
-                    Image(systemName: "arrow.up")
-                        .font(.system(size: 15, weight: .bold))
-                        .foregroundStyle(.white)
-                        .frame(width: 32, height: 32)
-                        .background(Circle().fill(Color(uiColor: .systemBlue)))
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(L10n.t("发送"))
             }
+            .modifier(GlassCapsuleBackground())
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -1920,13 +2280,14 @@ struct ChatContactInfoPanel: View {
                     .fontWeight(.semibold)
             }
         }
-        .sheet(isPresented: $showingEditor) {
+.sheet(isPresented: $showingEditor) {
             if let contact {
                 NativeContactCard(
                     identifier: contact.id,
                     showsNavigationBar: true,
                     showsDoneButton: true,
-                    allowsEditing: true
+                    allowsEditing: true,
+                    startsInEditMode: true
                 ) { _ in } onMessage: { _ in }
                 .presentationSizingIfAvailable()
                 .presentationDragIndicator(.visible)
@@ -2124,11 +2485,13 @@ struct NewMessageSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button(L10n.t("取消")) { dismiss() }
+                        .tint(Color.primary)
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(L10n.t("发送")) { send() }
                         .disabled(!canSend)
                         .fontWeight(.semibold)
+                        .tint(Color.primary)
                 }
             }
         }
@@ -2244,6 +2607,8 @@ private struct NativeContactCard: UIViewControllerRepresentable {
     var showsNavigationBar: Bool = true
     var showsDoneButton: Bool = false
     var allowsEditing: Bool = false
+    /// 直接以编辑态呈现：避免用户点了「编辑」后系统卡片仍停在查看态，还要再点一次。
+    var startsInEditMode: Bool = false
     let onCall: (String) -> Void
     let onMessage: (String) -> Void
 
@@ -2273,9 +2638,18 @@ private struct NativeContactCard: UIViewControllerRepresentable {
         controller.contactStore = store
         controller.delegate = context.coordinator
         // 只有通讯录里真实存在的联系人才能进入编辑态；陌生号码的临时卡片不可编辑。
-        controller.allowsEditing = allowsEditing && (contact != nil || identifier != nil)
+        let canEdit = allowsEditing && (contact != nil || identifier != nil)
+        controller.allowsEditing = canEdit
         controller.allowsActions = true
         context.coordinator.contactViewController = controller
+
+        if canEdit, startsInEditMode {
+            // `setEditing` 是 UIKit 公开 API，系统卡片的「编辑」按钮走的也是它，
+            // 因此这里可以让卡片一出现就是编辑态，不再套一层查看页。
+            DispatchQueue.main.async {
+                controller.setEditing(true, animated: false)
+            }
+        }
 
         // 不要导航栏时直接返回卡片本身：多包一层 UINavigationController 会
         // 在详情列里多出一条空导航栏（顶部留白 + 两个返回按钮）。
@@ -2311,6 +2685,14 @@ private struct NativeContactCard: UIViewControllerRepresentable {
 
         @objc func dismissCard() {
             contactViewController?.dismiss(animated: true)
+        }
+
+        /// 编辑保存（或取消）后收起卡片，由 SwiftUI 侧的 onDismiss 触发通讯录刷新。
+        func contactViewController(
+            _ viewController: CNContactViewController,
+            didCompleteWith contact: CNContact?
+        ) {
+            viewController.dismiss(animated: true)
         }
 
         /// 号码动作先弹系统选择器：系统无法区分「呼叫 / 发信息」两个圆钮，

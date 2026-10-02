@@ -148,6 +148,45 @@ final class ContactStore: ObservableObject {
         }
     }
 
+    /// 删除系统通讯录里的联系人（列表多选删除）。
+    /// 删除请求必须在后台线程执行，成功后同步刷新本机副本与缓存。
+    @discardableResult
+    func delete(ids: Set<String>) async -> Bool {
+        guard !ids.isEmpty else { return false }
+        let removed = await Task.detached(priority: .userInitiated) { () -> Bool in
+            let store = CNContactStore()
+            let request = CNSaveRequest()
+            var hasTarget = false
+            for identifier in ids {
+                guard let contact = try? store.unifiedContact(
+                    withIdentifier: identifier,
+                    keysToFetch: [CNContactIdentifierKey as CNKeyDescriptor]
+                ), let mutable = contact.mutableCopy() as? CNMutableContact else { continue }
+                request.delete(mutable)
+                hasTarget = true
+            }
+            guard hasTarget else { return false }
+            do {
+                try store.execute(request)
+                return true
+            } catch {
+                return false
+            }
+        }.value
+        guard removed else {
+            errorMessage = "无法删除联系人，请检查通讯录权限后重试"
+            return false
+        }
+        let remaining = contacts.filter { !ids.contains($0.id) }
+        contacts = remaining
+        if !cache.save(remaining) {
+            errorMessage = "联系人已删除，但更新本机副本失败"
+        } else {
+            errorMessage = nil
+        }
+        return true
+    }
+
     func contact(for number: String) -> Contact? {
         let target = Self.normalized(number)
         guard !target.isEmpty else { return nil }

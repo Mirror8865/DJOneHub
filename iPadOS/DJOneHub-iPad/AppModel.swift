@@ -124,9 +124,19 @@ final class AppModel: ObservableObject {
     private let maxMessageCount = 2_000
     /// 已见过的呼入短信 ID 集合；后台刷新时只对集合外的新短信发通知，避免重复提醒。
     private var seenIncomingSMSIDs: Set<String> = []
+    /// 用户在本机删除的通话记录 / 短信 ID。
+    /// 模块接口每轮都会回传完整历史，不做墓碑过滤的话，用户刚删掉的记录下一轮就会复活。
+    private var deletedCallIDs: Set<String> = []
+    private var deletedMessageIDs: Set<String> = []
+    private let deletedCallIDsKey = "djonehub.deleted-call-ids"
+    private let deletedMessageIDsKey = "djonehub.deleted-message-ids"
+    /// 墓碑集合上限，避免长期使用后 UserDefaults 无限增长。
+    private let maxDeletedIDCount = 3_000
 
     init(api: DJOneHubAPI = DJOneHubAPI()) {
         self.api = api
+        deletedCallIDs = Set(UserDefaults.standard.stringArray(forKey: deletedCallIDsKey) ?? [])
+        deletedMessageIDs = Set(UserDefaults.standard.stringArray(forKey: deletedMessageIDsKey) ?? [])
         AppModel.shared = self
         callKit.handler = self
         // 背景启动时 SwiftUI 不会走 onAppear，这里延后一拍自行恢复轮询与保活。
@@ -846,6 +856,8 @@ final class AppModel: ObservableObject {
     }
 
     func clearLocalMessages() {
+        // 先记墓碑：模块侧仍保存着这些短信，只清本机列表的话下一轮刷新会全部复活。
+        recordDeletedMessageIDs(Set(messages.map(\.id)))
         guard historyStore.saveMessages([]) else {
             errorMessage = "无法清空本机短信，请稍后重试"
             return
@@ -856,9 +868,52 @@ final class AppModel: ObservableObject {
         errorMessage = nil
     }
 
+    /// 删除选中的本机短信（系统「信息」App 的多选删除语义）。
+    func deleteMessages(ids: Set<String>) {
+        guard !ids.isEmpty else { return }
+        let remaining = messages.filter { !ids.contains($0.id) }
+        guard historyStore.saveMessages(remaining) else {
+            errorMessage = "无法删除短信，请稍后重试"
+            return
+        }
+        messages = remaining
+        seenIncomingSMSIDs.subtract(ids)
+        recordDeletedMessageIDs(ids)
+        errorMessage = nil
+    }
+
+    /// 删除选中的本机通话记录（系统「电话」App 的多选删除语义）。
+    func deleteCalls(ids: Set<String>) {
+        guard !ids.isEmpty else { return }
+        let remaining = callHistory.filter { !ids.contains($0.id) }
+        guard historyStore.saveCallHistory(remaining) else {
+            errorMessage = "无法删除通话记录，请稍后重试"
+            return
+        }
+        callHistory = remaining
+        recordDeletedCallIDs(ids)
+        errorMessage = nil
+    }
+
+    private func recordDeletedCallIDs(_ ids: Set<String>) {
+        deletedCallIDs.formUnion(ids)
+        if deletedCallIDs.count > maxDeletedIDCount {
+            deletedCallIDs = Set(deletedCallIDs.suffix(maxDeletedIDCount))
+        }
+        UserDefaults.standard.set(Array(deletedCallIDs), forKey: deletedCallIDsKey)
+    }
+
+    private func recordDeletedMessageIDs(_ ids: Set<String>) {
+        deletedMessageIDs.formUnion(ids)
+        if deletedMessageIDs.count > maxDeletedIDCount {
+            deletedMessageIDs = Set(deletedMessageIDs.suffix(maxDeletedIDCount))
+        }
+        UserDefaults.standard.set(Array(deletedMessageIDs), forKey: deletedMessageIDsKey)
+    }
+
     /// 将磁盘副本并入当前内存，只增加或更新记录，绝不以空读取清掉现有界面数据。
     private func restoreLocalHistory() {
-        let storedCalls = historyStore.loadCallHistory()
+        let storedCalls = historyStore.loadCallHistory().filter { !deletedCallIDs.contains($0.id) }
         if !storedCalls.isEmpty {
             var callsByID: [String: CallRecord] = [:]
             for record in callHistory { callsByID[record.id] = record }
@@ -869,7 +924,7 @@ final class AppModel: ObservableObject {
             callHistory = normalizedCallHistory(Array(callsByID.values))
         }
 
-        let storedMessages = historyStore.loadMessages()
+        let storedMessages = historyStore.loadMessages().filter { !deletedMessageIDs.contains($0.id) }
         if !storedMessages.isEmpty {
             var messagesByID: [String: SMSMessage] = [:]
             for message in messages { messagesByID[message.id] = message }
@@ -880,39 +935,43 @@ final class AppModel: ObservableObject {
 
     /// 远端列表可能因模块重启、自动清理或离线而变短，因此只做并集，不删除手机副本。
     private func mergeCallHistory(_ remote: [CallRecord]) async -> [CallRecord] {
+        // 本机已删除的记录不再并入：模块仍会回传它们，墓碑集合负责过滤。
+        let pendingRecords = remote.filter { !deletedCallIDs.contains($0.id) }
         var byID: [String: CallRecord] = [:]
         for record in callHistory {
             if let existing = byID[record.id], existing.updatedAt >= record.updatedAt { continue }
             byID[record.id] = record
         }
-        for record in remote {
+        for record in pendingRecords {
             if let local = byID[record.id], local.updatedAt > record.updatedAt {
                 continue
             }
             byID[record.id] = record
         }
         let merged = normalizedCallHistory(Array(byID.values))
-        if !remote.isEmpty, historyStore.saveCallHistory(merged) {
+        if !pendingRecords.isEmpty, historyStore.saveCallHistory(merged) {
             // 只有手机副本写入成功才确认模块，断线时模块仍会保留未交付队列。
             let persistedIDs = Set(merged.map(\.id))
-            let acknowledgedIDs = remote.map(\.id).filter { persistedIDs.contains($0) }
+            let acknowledgedIDs = pendingRecords.map(\.id).filter { persistedIDs.contains($0) }
             try? await api.acknowledgeCallHistory(ids: acknowledgedIDs)
         }
         return merged
     }
 
     private func mergeMessages(_ remote: [SMSMessage]) async -> [SMSMessage] {
+        // 同 mergeCallHistory：本机已删除的短信不能被模块回传复活。
+        let pendingMessages = remote.filter { !deletedMessageIDs.contains($0.id) }
         var byID: [String: SMSMessage] = [:]
         for message in messages { byID[message.id] = message }
-        for var message in remote {
+        for var message in pendingMessages {
             // 旧版模块没有 delivery_id 时保留手机已有标识，避免新旧版本来回覆盖。
             if message.deliveryID == nil { message.deliveryID = byID[message.id]?.deliveryID }
             byID[message.id] = message
         }
         let merged = normalizedMessages(Array(byID.values))
-        if !remote.isEmpty, historyStore.saveMessages(merged) {
+        if !pendingMessages.isEmpty, historyStore.saveMessages(merged) {
             let persistedIDs = Set(merged.map(\.id))
-            let acknowledgedIDs = remote
+            let acknowledgedIDs = pendingMessages
                 .filter { persistedIDs.contains($0.id) }
                 .compactMap(\.deliveryID)
             try? await api.acknowledgeMessages(ids: acknowledgedIDs)

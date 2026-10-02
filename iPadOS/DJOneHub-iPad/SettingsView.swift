@@ -229,35 +229,47 @@ struct SettingsView: View {
     /// 左栏按系统设置 App 分成「DJOneHub 设置 / 模块设置 / 高级」三组，
     /// 右栏只承载当前分区的分组表单，不再使用自绘玻璃卡片。
     private var settingsSplitView: some View {
-        NavigationSplitView {
-            List(selection: $selectedSection) {
-                ForEach(filteredGroups) { group in
-                    Section(L10n.t(group.title)) {
-                        ForEach(group.sections) { section in
-                            SettingsSidebarRow(section: section)
-                                .tag(section)
+        NavigationStack {
+            // 与通话 / 联系人 / 信息三个板块保持同一套版式：
+            // 页内分栏 + 一条顶栏 + 内容铺满全屏（顶部交给系统的滚动边缘渐变模糊）。
+            HStack(spacing: 0) {
+                VStack(spacing: 0) {
+                    PhoneSearchField(placeholder: L10n.t("搜索"), text: $settingsSearch)
+                        .padding(.horizontal, 16)
+                        .padding(.top, 4)
+                        .padding(.bottom, 8)
+                    List(selection: $selectedSection) {
+                        ForEach(filteredGroups) { group in
+                            Section(L10n.t(group.title)) {
+                                ForEach(group.sections) { section in
+                                    SettingsSidebarRow(section: section)
+                                        .tag(section)
+                                }
+                            }
+                        }
+                    }
+                    .listStyle(.sidebar)
+                    // 侧栏选中高亮用系统蓝，避免父级 primary tint 把选中行染成黑色。
+                    .tint(Color(uiColor: .systemBlue))
+                    .scrollDismissesKeyboard(.interactively)
+                }
+                .frame(width: 320)
+
+                Divider()
+
+                // 右栏严格按系统设置 App 的分组表单呈现：没有卡片、没有玻璃底板。
+                Form {
+                    sectionContent(selectedSection ?? .status)
+                    if !actionMessage.isEmpty {
+                        Section {
+                            Text(actionMessage).font(.footnote).foregroundStyle(.secondary)
                         }
                     }
                 }
+                .formStyle(.grouped)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .listStyle(.sidebar)
-            // 侧栏选中高亮用系统蓝，避免父级 primary tint 把选中行染成黑色。
-            .tint(Color(uiColor: .systemBlue))
             .navigationTitle(L10n.t("设置"))
-            .searchable(text: $settingsSearch, placement: .sidebar, prompt: Text(L10n.t("搜索")))
-            .navigationSplitViewColumnWidth(min: 250, ideal: 290, max: 380)
-        } detail: {
-            // 右栏严格按系统设置 App 的分组表单呈现：没有卡片、没有玻璃底板。
-            Form {
-                sectionContent(selectedSection ?? .status)
-                if !actionMessage.isEmpty {
-                    Section {
-                        Text(actionMessage).font(.footnote).foregroundStyle(.secondary)
-                    }
-                }
-            }
-            .formStyle(.grouped)
-            .navigationTitle(L10n.t((selectedSection ?? .status).title))
             .navigationBarTitleDisplayMode(.inline)
             .immersiveBars()
             .monochromeBarControls()
