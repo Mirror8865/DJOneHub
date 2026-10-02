@@ -912,7 +912,7 @@ struct CallsView: View {
                 .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                     if !isEditing {
                         Button(role: .destructive) {
-                            model.deleteCalls(ids: [call.id])
+                            model.deleteCalls(ids: Set([call.id]))
                             if selection == call.id { selection = nil }
                         } label: {
                             Label(L10n.t("删除"), systemImage: "trash")
@@ -956,7 +956,7 @@ struct CallsView: View {
                     .listRowInsets(rowInsets)
                     .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                         Button(role: .destructive) {
-                            model.deleteCalls(ids: [call.id])
+                            model.deleteCalls(ids: Set([call.id]))
                             if selection == call.id { selection = nil }
                         } label: {
                             Label(L10n.t("删除"), systemImage: "trash")
@@ -1527,7 +1527,7 @@ struct ContactsView: View {
                             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                                 Button(role: .destructive) {
                                     Task {
-                                        let removed = await model.contacts.delete(ids: [contact.id])
+                                        let removed = await model.contacts.delete(ids: Set([contact.id]))
                                         guard removed else { return }
                                         if selection == contact.id { selection = nil }
                                     }
@@ -2108,7 +2108,7 @@ struct MessagesView: View {
                     .listRowInsets(rowInsets)
                     .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                         Button(role: .destructive) {
-                            model.deleteMessages(ids: conversation.messages.map(\.id))
+                            model.deleteMessages(ids: Set(conversation.messages.map(\.id)))
                             if selection == conversation.id { selection = nil }
                         } label: {
                             Label(L10n.t("删除"), systemImage: "trash")
