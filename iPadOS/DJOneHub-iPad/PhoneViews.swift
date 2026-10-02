@@ -530,15 +530,17 @@ struct PhoneSearchField: View {
 /// 自己画而不是直接用 `EditButton`，是为了让三个板块共用同一套多选删除逻辑。
 struct PhoneEditToggle: View {
     let isEditing: Bool
+    /// 进入多选时显示的标题；联系人页用「选择」，避免与详情页的「编辑」撞名。
+    var enterTitle: String = L10n.t("编辑")
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            Text(isEditing ? L10n.t("完成") : L10n.t("编辑"))
+            Text(isEditing ? L10n.t("完成") : enterTitle)
                 .fontWeight(isEditing ? .semibold : .regular)
         }
         .tint(Color.primary)
-        .accessibilityLabel(isEditing ? L10n.t("完成") : L10n.t("编辑"))
+        .accessibilityLabel(isEditing ? L10n.t("完成") : enterTitle)
     }
 }
 
@@ -1190,9 +1192,7 @@ struct ContactsView: View {
     @ToolbarContentBuilder
     private var contactsToolbar: some ToolbarContent {
         ToolbarItem(placement: .topBarLeading) {
-            if isEditing {
-                PhoneEditToggle(isEditing: true) { toggleEditing() }
-            }
+            PhoneEditToggle(isEditing: isEditing, enterTitle: L10n.t("选择")) { toggleEditing() }
         }
         ToolbarItem(placement: .topBarTrailing) {
             if isEditing {
