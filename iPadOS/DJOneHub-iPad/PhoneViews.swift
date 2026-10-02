@@ -269,7 +269,7 @@ struct DetailActionCircle: View {
                     .font(.system(size: 20, weight: .medium))
                     .foregroundStyle(foreground)
                     .frame(width: 56, height: 56)
-                    .background(Circle().fill(background))
+                    .modifier(GlassCircle(tint: background))
                 Text(title)
                     .font(.caption)
                     .foregroundStyle(foreground)
@@ -308,9 +308,9 @@ struct DialPadOverlay: View {
     @State private var deleteRepeatTask: Task<Void, Never>?
 
     private var isCompact: Bool { horizontalSizeClass == .compact }
-    private var keySize: CGFloat { isCompact ? 58 : 62 }
-    private var keySpacing: CGFloat { isCompact ? 20 : 24 }
-    private var rowSpacing: CGFloat { isCompact ? 8 : 10 }
+    private var keySize: CGFloat { isCompact ? 52 : 56 }
+    private var keySpacing: CGFloat { isCompact ? 16 : 20 }
+    private var rowSpacing: CGFloat { isCompact ? 6 : 8 }
     private var matchedName: String? {
         model.contacts.contact(for: model.numberInput)?.name
     }
@@ -330,21 +330,22 @@ struct DialPadOverlay: View {
             keypad
             callRow
         }
-        .padding(.horizontal, isCompact ? 16 : 20)
-        .padding(.vertical, isCompact ? 14 : 18)
-        .frame(maxWidth: 320)
+        .padding(.horizontal, isCompact ? 14 : 18)
+        .padding(.vertical, isCompact ? 12 : 16)
+        .frame(maxWidth: 268)
         .modifier(DialPadCardBackground())
+        .shadow(color: .black.opacity(0.22), radius: 24, y: 10)
     }
 
     private var numberDisplay: some View {
         VStack(spacing: 2) {
             Text(model.numberInput.isEmpty ? L10n.t("输入号码") : model.numberInput)
-                .font(.system(size: isCompact ? 26 : 30, weight: .regular, design: .rounded))
+                .font(.system(size: isCompact ? 22 : 26, weight: .regular, design: .rounded))
                 .foregroundStyle(model.numberInput.isEmpty ? Color.secondary : Color.primary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.45)
                 .frame(maxWidth: .infinity)
-                .frame(height: 36)
+                .frame(height: 32)
             if let matchedName {
                 Text(matchedName)
                     .font(.footnote)
@@ -489,6 +490,9 @@ struct PhoneSearchField: View {
     let placeholder: String
     @Binding var text: String
 
+    /// 获得焦点时系统会给搜索框描一圈强调色圆角边（iOS 26 文本输入焦点样式）。
+    @FocusState private var isFocused: Bool
+
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
@@ -500,6 +504,7 @@ struct PhoneSearchField: View {
                 .autocorrectionDisabled()
                 .textInputAutocapitalization(.never)
                 .submitLabel(.search)
+                .focused($isFocused)
                 .accessibilityLabel(placeholder)
             if !text.isEmpty {
                 Button {
@@ -520,9 +525,17 @@ struct PhoneSearchField: View {
         .padding(.horizontal, 10)
         .frame(height: 36)
         .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(Color(uiColor: .tertiarySystemFill))
         )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(
+                    isFocused ? Color(uiColor: .systemBlue) : Color.clear,
+                    lineWidth: 1.5
+                )
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 }
 
@@ -545,18 +558,54 @@ struct PhoneEditToggle: View {
 }
 
 /// 编辑态左侧的圆形复选框：选中为系统蓝实心对勾，未选中为灰色空心圈。
+/// 行本身已经是蓝底时（onHighlight）自动换成白色，避免蓝底上看不见蓝色对勾。
 struct PhoneSelectionCircle: View {
     let isSelected: Bool
+    var onHighlight: Bool = false
 
     var body: some View {
         Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
             .font(.system(size: 22, weight: .regular))
-            .foregroundStyle(
-                isSelected
-                    ? Color(uiColor: .systemBlue)
-                    : Color(uiColor: .tertiaryLabel)
-            )
+            .foregroundStyle(selectionColor)
             .accessibilityHidden(true)
+    }
+
+    private var selectionColor: Color {
+        if isSelected { return onHighlight ? Color.white : Color(uiColor: .systemBlue) }
+        return onHighlight ? Color.white.opacity(0.75) : Color(uiColor: .tertiaryLabel)
+    }
+}
+
+/// 列表选中 / 勾选高亮：系统蓝圆角矩形。行本身用 listRowInsets 左右各内缩 16pt，
+/// 所以高亮比列表容器窄一圈，左右边缘与左列顶部的搜索框对齐（iOS 26 列表选中样式）。
+struct PhoneSelectionHighlight: View {
+    var isActive: Bool
+    var cornerRadius: CGFloat = 12
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            .fill(isActive ? Color(uiColor: .systemBlue) : Color.clear)
+    }
+}
+
+/// 详情页信息卡底：iOS 26 液态玻璃；旧系统回退为半透明卡片。
+struct GlassCardBackground: ViewModifier {
+    var cornerRadius: CGFloat = 22
+
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content.glassEffect(
+                .regular,
+                in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            )
+        } else {
+            content
+                .background(
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .fill(Color.white.opacity(0.18))
+                )
+                .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        }
     }
 }
 
@@ -617,7 +666,7 @@ struct CallsView: View {
                 if showingKeypad {
                     ZStack {
                         // 点键盘以外的任意区域即可关闭键盘。
-                        Color.black.opacity(0.18)
+                        Color.black.opacity(0.10)
                             .ignoresSafeArea()
                             .contentShape(Rectangle())
                             .onTapGesture { dismissKeypad() }
@@ -735,7 +784,7 @@ struct CallsView: View {
                 }
                 .buttonStyle(.plain)
                 .listRowSeparator(.hidden)
-                .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                .listRowInsets(EdgeInsets(top: 2, leading: 16, bottom: 2, trailing: 16))
             }
         }
     }
@@ -759,11 +808,13 @@ struct CallsView: View {
                     }
                     .buttonStyle(.plain)
                     .listRowSeparator(.hidden)
-                    .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                    .listRowInsets(EdgeInsets(top: 2, leading: 16, bottom: 2, trailing: 16))
                 } else {
                     NavigationLink(value: call.id) {
                         RecentsRow(call: call, onCall: dialNumber, isSelected: false)
                     }
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 2, leading: 16, bottom: 2, trailing: 16))
                 }
             }
         }
@@ -840,10 +891,13 @@ private struct RecentsRow: View {
         return model.contacts.contact(for: number)?.photoData
     }
 
+    /// 蓝底高亮：普通选中与多选勾选共用同一套蓝底白字。
+    private var isHighlighted: Bool { isSelected || isChecked }
+
     var body: some View {
         HStack(spacing: 12) {
             if isEditing {
-                PhoneSelectionCircle(isSelected: isChecked)
+                PhoneSelectionCircle(isSelected: isChecked, onHighlight: isHighlighted)
             }
 
             InitialAvatar(name: name, photoData: photo, size: 44)
@@ -851,11 +905,11 @@ private struct RecentsRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(name)
                     .font(.body)
-                    .foregroundStyle(call.missed ? Color.red : Color.primary)
+                    .foregroundStyle(isHighlighted ? Color.white : (call.missed ? Color.red : Color.primary))
                     .lineLimit(1)
                 Text(subtitle)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(isHighlighted ? Color.white.opacity(0.85) : Color.secondary)
                     .lineLimit(1)
             }
 
@@ -863,7 +917,7 @@ private struct RecentsRow: View {
 
             Text(RecentCallTimeFormatter.string(for: call.updatedAt))
                 .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(isHighlighted ? Color.white.opacity(0.85) : Color.secondary)
 
             if !isEditing, let number = call.number {
                 Button { onCall(number) } label: {
@@ -871,24 +925,22 @@ private struct RecentsRow: View {
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(Color(uiColor: .systemBlue))
                         .frame(width: 32, height: 32)
-                        .background(Circle().fill(Color(uiColor: .systemBlue).opacity(0.14)))
+                        .background(
+                            Circle().fill(
+                                isHighlighted
+                                    ? Color.white
+                                    : Color(uiColor: .systemBlue).opacity(0.14)
+                            )
+                        )
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(L10n.t("呼叫"))
             }
         }
         .padding(.vertical, 8)
-        .padding(.horizontal, isEditing ? 12 : 16)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(rowBackground)
-        )
+        .padding(.horizontal, 12)
+        .background(PhoneSelectionHighlight(isActive: isHighlighted))
         .contentShape(Rectangle())
-    }
-
-    private var rowBackground: Color {
-        if isEditing { return isChecked ? Color(uiColor: .secondarySystemFill) : Color.clear }
-        return isSelected ? Color(uiColor: .secondarySystemFill) : Color.clear
     }
 
     private var subtitle: String {
@@ -1283,11 +1335,13 @@ struct ContactsView: View {
                             }
                             .buttonStyle(.plain)
                             .listRowSeparator(.hidden)
-                            .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                            .listRowInsets(EdgeInsets(top: 2, leading: 16, bottom: 2, trailing: 16))
                         } else if linkRows {
                             NavigationLink(value: contact.id) {
                                 ContactRow(contact: contact)
                             }
+                            .listRowSeparator(.hidden)
+                            .listRowInsets(EdgeInsets(top: 2, leading: 16, bottom: 2, trailing: 16))
                         } else {
                             Button {
                                 selection = contact.id
@@ -1296,7 +1350,7 @@ struct ContactsView: View {
                             }
                             .buttonStyle(.plain)
                             .listRowSeparator(.hidden)
-                            .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                            .listRowInsets(EdgeInsets(top: 2, leading: 16, bottom: 2, trailing: 16))
                         }
                     }
                 }
@@ -1353,28 +1407,23 @@ private struct ContactRow: View {
     var isEditing: Bool = false
     var isChecked: Bool = false
 
+    private var isHighlighted: Bool { isSelected || isChecked }
+
     var body: some View {
         HStack(spacing: 12) {
             if isEditing {
-                PhoneSelectionCircle(isSelected: isChecked)
+                PhoneSelectionCircle(isSelected: isChecked, onHighlight: isHighlighted)
             }
             InitialAvatar(name: contact.name, photoData: contact.photoData, size: 40)
             Text(contact.name)
+                .foregroundStyle(isHighlighted ? Color.white : Color.primary)
                 .lineLimit(1)
             Spacer(minLength: 0)
         }
         .padding(.vertical, 8)
-        .padding(.horizontal, isEditing ? 12 : 16)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(rowBackground)
-        )
+        .padding(.horizontal, 12)
+        .background(PhoneSelectionHighlight(isActive: isHighlighted))
         .contentShape(Rectangle())
-    }
-
-    private var rowBackground: Color {
-        if isEditing { return isChecked ? Color(uiColor: .secondarySystemFill) : Color.clear }
-        return isSelected ? Color(uiColor: .secondarySystemFill) : Color.clear
     }
 }
 
@@ -1578,11 +1627,7 @@ private struct InfoCard<Content: View>: View {
         VStack(spacing: 0) {
             content
         }
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color.white.opacity(0.18))
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .modifier(GlassCardBackground(cornerRadius: 22))
     }
 }
 
@@ -1840,11 +1885,13 @@ struct MessagesView: View {
                     }
                     .buttonStyle(.plain)
                     .listRowSeparator(.hidden)
-                    .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                    .listRowInsets(EdgeInsets(top: 2, leading: 16, bottom: 2, trailing: 16))
                 } else if linkRows {
                     NavigationLink(value: conversation.id) {
                         ConversationRow(conversation: conversation)
                     }
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 2, leading: 16, bottom: 2, trailing: 16))
                 } else {
                     Button {
                         selection = conversation.id
@@ -1853,7 +1900,7 @@ struct MessagesView: View {
                     }
                     .buttonStyle(.plain)
                     .listRowSeparator(.hidden)
-                    .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                    .listRowInsets(EdgeInsets(top: 2, leading: 16, bottom: 2, trailing: 16))
                 }
             }
         }
@@ -1920,7 +1967,7 @@ private struct ConversationRow: View {
     var body: some View {
         HStack(spacing: 12) {
             if isEditing {
-                PhoneSelectionCircle(isSelected: isChecked)
+                PhoneSelectionCircle(isSelected: isChecked, onHighlight: isHighlighted)
             }
 
             InitialAvatar(name: displayName, photoData: photoData, size: 50)
@@ -1928,33 +1975,27 @@ private struct ConversationRow: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(displayName)
                     .font(.body.weight(.semibold))
-                    .foregroundStyle(isSelected ? Color.white : Color.primary)
+                    .foregroundStyle(isHighlighted ? Color.white : Color.primary)
                     .lineLimit(1)
                 Text(conversation.last?.content ?? "")
                     .font(.subheadline)
-                    .foregroundStyle(isSelected ? Color.white.opacity(0.85) : Color.secondary)
+                    .foregroundStyle(isHighlighted ? Color.white.opacity(0.85) : Color.secondary)
                     .lineLimit(2)
             }
             Spacer(minLength: 8)
             if let timestamp = conversation.last?.timestamp {
                 Text(Self.rowTimestampText(timestamp))
                     .font(.caption2)
-                    .foregroundStyle(isSelected ? Color.white.opacity(0.85) : Color.secondary)
+                    .foregroundStyle(isHighlighted ? Color.white.opacity(0.85) : Color.secondary)
             }
         }
         .padding(.vertical, 8)
-        .padding(.horizontal, isEditing ? 12 : 14)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(rowBackground)
-        )
+        .padding(.horizontal, 12)
+        .background(PhoneSelectionHighlight(isActive: isHighlighted, cornerRadius: 14))
         .contentShape(Rectangle())
     }
 
-    private var rowBackground: Color {
-        if isEditing { return isChecked ? Color(uiColor: .secondarySystemFill) : Color.clear }
-        return isSelected ? Color(uiColor: .systemBlue) : Color.clear
-    }
+    private var isHighlighted: Bool { isSelected || isChecked }
 
     /// iMessage 规则：今天显示时分，本周显示星期几，更早显示日期。
     private static func rowTimestampText(_ date: Date) -> String {
@@ -2003,8 +2044,11 @@ struct ChatPane: View {
                         header
                             .padding(.bottom, 10)
                         ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
-                            if let day = dayHeader(for: message.timestamp, previous: index > 0 ? messages[index - 1].timestamp : nil) {
-                                Text(day)
+                            if let separator = timeSeparator(
+                                for: message.timestamp,
+                                previous: index > 0 ? messages[index - 1].timestamp : nil
+                            ) {
+                                Text(separator)
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                     .frame(maxWidth: .infinity)
@@ -2160,12 +2204,19 @@ struct ChatPane: View {
         }
     }
 
-    private func dayHeader(for date: Date, previous: Date?) -> String? {
+    /// 时间分隔：与日期同款，居中显示在消息窗口正中间。
+    /// 跨天显示「日期 + 时分」，同一天超过 5 分钟的空档显示时分，否则不显示。
+    private func timeSeparator(for date: Date, previous: Date?) -> String? {
         let calendar = Calendar.current
-        if let previous, calendar.isDate(previous, inSameDayAs: date) { return nil }
-        if calendar.isDateInToday(date) { return L10n.t("今天") }
-        if calendar.isDateInYesterday(date) { return L10n.t("昨天") }
-        return date.formatted(.dateTime.year().month().day().weekday(.wide))
+        let time = date.formatted(date: .omitted, time: .shortened)
+        guard let previous else { return time }
+        if !calendar.isDate(previous, inSameDayAs: date) {
+            if calendar.isDateInToday(date) { return L10n.t("今天") + " " + time }
+            if calendar.isDateInYesterday(date) { return L10n.t("昨天") + " " + time }
+            return date.formatted(.dateTime.weekday(.wide)) + " " + time
+        }
+        if date.timeIntervalSince(previous) > 300 { return time }
+        return nil
     }
 }
 
@@ -2188,30 +2239,47 @@ private struct MessageBubble: View {
         HStack {
             if message.isOutgoing { Spacer(minLength: 48) }
 
-            VStack(alignment: message.isOutgoing ? .trailing : .leading, spacing: 3) {
-                Text(message.content)
-                    .font(.body)
-                    .foregroundStyle(message.isOutgoing ? Color.white : Color.primary)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 9)
-                    .background(
-                        RoundedRectangle(cornerRadius: 18, style: .continuous)
-                            .fill(
-                                message.isOutgoing
-                                    ? Color(uiColor: .systemBlue)
-                                    : Color(uiColor: .secondarySystemBackground)
-                            )
-                    )
-                    .textSelection(.enabled)
-
-                Text(message.timestamp.formatted(date: .omitted, time: .shortened))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
+            Text(message.content)
+                .font(.body)
+                .foregroundStyle(message.isOutgoing ? Color.white : Color.primary)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 9)
+                .modifier(MessageBubbleBackground(isOutgoing: message.isOutgoing))
+                .textSelection(.enabled)
 
             if !message.isOutgoing { Spacer(minLength: 48) }
         }
         .id(message.id)
+    }
+}
+
+/// iMessage 同款气泡底：iOS 26 液态玻璃（发送方带系统蓝着色），旧系统回退为实心气泡。
+private struct MessageBubbleBackground: ViewModifier {
+    let isOutgoing: Bool
+
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            if isOutgoing {
+                content.glassEffect(
+                    .regular.tint(Color(uiColor: .systemBlue)),
+                    in: RoundedRectangle(cornerRadius: 20, style: .continuous)
+                )
+            } else {
+                content.glassEffect(
+                    .regular,
+                    in: RoundedRectangle(cornerRadius: 20, style: .continuous)
+                )
+            }
+        } else {
+            content.background(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(
+                        isOutgoing
+                            ? Color(uiColor: .systemBlue)
+                            : Color(uiColor: .secondarySystemBackground)
+                    )
+            )
+        }
     }
 }
 /// 对方详细信息面板（参考图三）：× / 编辑、大头像、号码/邮箱、三个圆钮、
@@ -2954,24 +3022,28 @@ private struct DTMFKeypadPanel: View {
     let onClose: () -> Void
 
     private var isCompact: Bool { horizontalSizeClass == .compact }
-    private var keySize: CGFloat { isCompact ? 64 : 74 }
-    private var keySpacing: CGFloat { isCompact ? 22 : 30 }
+    private var keySize: CGFloat { isCompact ? 54 : 60 }
+    private var keySpacing: CGFloat { isCompact ? 16 : 22 }
     private var keypadWidth: CGFloat { keySize * 3 + keySpacing * 2 }
 
     var body: some View {
-        VStack(spacing: 20) {
+        VStack(spacing: 14) {
             keypadRows
                 .frame(width: keypadWidth)
 
             Button(action: onClose) {
                 Text(L10n.t("隐藏键盘"))
-                    .font(.headline)
-                    .padding(.horizontal, 26)
-                    .padding(.vertical, 12)
+                    .font(.subheadline.weight(.semibold))
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 8)
             }
             .buttonStyle(.bordered)
             .accessibilityLabel(L10n.t("隐藏键盘"))
         }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 16)
+        .modifier(DialPadCardBackground())
+        .shadow(color: .black.opacity(0.22), radius: 24, y: 10)
     }
 
     private var keypadRows: some View {

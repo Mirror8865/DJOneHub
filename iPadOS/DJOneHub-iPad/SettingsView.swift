@@ -238,18 +238,30 @@ struct SettingsView: View {
                         .padding(.horizontal, 16)
                         .padding(.top, 4)
                         .padding(.bottom, 8)
-                    List(selection: $selectedSection) {
+                    // 与通话 / 联系人 / 信息三个板块完全同一套列表版式：
+                    // 自绘行 + 蓝色圆角高亮（比列表窄一圈）+ 无分割线，不用系统 sidebar 高亮。
+                    List {
                         ForEach(filteredGroups) { group in
                             Section(L10n.t(group.title)) {
                                 ForEach(group.sections) { section in
-                                    SettingsSidebarRow(section: section)
-                                        .tag(section)
+                                    Button {
+                                        withAnimation(.easeInOut(duration: 0.2)) {
+                                            selectedSection = section
+                                        }
+                                    } label: {
+                                        SettingsSidebarRow(
+                                            section: section,
+                                            isSelected: (selectedSection ?? .status) == section
+                                        )
+                                    }
+                                    .buttonStyle(.plain)
+                                    .listRowSeparator(.hidden)
+                                    .listRowInsets(EdgeInsets(top: 2, leading: 16, bottom: 2, trailing: 16))
                                 }
                             }
                         }
                     }
-                    .listStyle(.sidebar)
-                    // 侧栏选中高亮用系统蓝，避免父级 primary tint 把选中行染成黑色。
+                    .listStyle(.plain)
                     .tint(Color(uiColor: .systemBlue))
                     .scrollDismissesKeyboard(.interactively)
                 }
@@ -354,6 +366,7 @@ struct SettingsView: View {
             LabeledContent(L10n.t("网络模式"), value: modem?.networkMode ?? "--")
             LabeledContent(L10n.t("信号强度"), value: modem?.signalDBM.map { "\($0) dBm" } ?? "--")
         } header: {
+            // 刷新做成独立的圆形控件（32pt 命中区），比原来 13pt 的小箭头好点击。
             HStack(spacing: 8) {
                 Text(L10n.t("模块"))
                 Spacer(minLength: 0)
@@ -361,12 +374,17 @@ struct SettingsView: View {
                     Task { await refreshAll() }
                 } label: {
                     Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Color.primary)
+                        .frame(width: 32, height: 32)
+                        .modifier(GlassCircle())
                 }
                 .buttonStyle(.plain)
                 .disabled(busy)
+                .opacity(busy ? 0.45 : 1)
                 .accessibilityLabel(L10n.t("刷新"))
             }
+            .textCase(nil)
         }
         Section {
             LabeledContent(L10n.t("下载速度"), value: rateText(downloadRate))
@@ -1128,9 +1146,10 @@ private struct SettingsGroupView: Identifiable {
     let sections: [SettingsSection]
 }
 
-/// 系统设置 App 式侧栏行：彩色圆角图标 + 标题，选中高亮由系统 sidebar 列表提供。
+/// 系统设置 App 式侧栏行：彩色圆角图标 + 标题，选中态与其它三个板块一致（蓝色圆角矩形）。
 private struct SettingsSidebarRow: View {
     let section: SettingsSection
+    var isSelected: Bool = false
 
     var body: some View {
         HStack(spacing: 12) {
@@ -1153,6 +1172,12 @@ private struct SettingsSidebarRow: View {
                         .strokeBorder(Color.white.opacity(0.18), lineWidth: 0.5)
                 )
             Text(L10n.t(section.title))
+                .foregroundStyle(isSelected ? Color.white : Color.primary)
+            Spacer(minLength: 0)
         }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 12)
+        .background(PhoneSelectionHighlight(isActive: isSelected))
+        .contentShape(Rectangle())
     }
 }
