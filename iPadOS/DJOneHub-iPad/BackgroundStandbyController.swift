@@ -710,6 +710,14 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
         // 5 分钟没有任何定位回调：**只补一次 startUpdatingLocation()**，绝不 stop + start。
         // 从后台重新协商定位会话会被系统延迟投递甚至直接拒绝，那正是「切后台 /
         // 锁屏收不到通知」的老根因；而重复 start 是幂等的，只会让请求更稳。
+        // Reminders must not hang off the location stream alone. While the device sits
+        // still the delivery of location updates thins out, and a stream that went quiet
+        // for a few minutes left the chat and call reminders pending until the app was
+        // opened again. The watchdog therefore drives a sweep on its own; it shares the
+        // 15 second dedup with the location callbacks (see `dispatchBackgroundWake`).
+        if appIsBackground {
+            dispatchBackgroundWake()
+        }
         guard Date().timeIntervalSince(lastDeliveryAt) > 300 else { return }
         manager.startUpdatingLocation()
     }

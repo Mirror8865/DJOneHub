@@ -64,6 +64,20 @@ struct SMSMessage: Codable, Equatable, Sendable, Identifiable {
 
     var isOutgoing: Bool { direction == .outgoing }
 
+    /// Storage slot of a module text-mode record. The delivery id is shaped
+    /// `SM-3-1a2b...`, so its middle field is the slot the modem kept the record in.
+    ///
+    /// The slot follows arrival order, which is the only stable way to put the records
+    /// of one long SMS back into reading order: the module hands a concatenated SMS back
+    /// as one record per segment and all of those share one SCTS. PDU assembled messages
+    /// carry no delivery id and answer nil here.
+    var deliverySlotIndex: Int? {
+        guard let deliveryID else { return nil }
+        let parts = deliveryID.split(separator: "-")
+        guard parts.count >= 2 else { return nil }
+        return Int(parts[1])
+    }
+
     /// 后端短信没有独立 ID，以稳定字段组合生成列表标识。
     var id: String { "\(sender)\u{0}\(timestamp.timeIntervalSince1970)\u{0}\(content)\u{0}\(direction?.rawValue ?? SMSDirection.incoming.rawValue)" }
 
@@ -83,6 +97,15 @@ extension SMSMessage {
     static func chronological(_ messages: [SMSMessage]) -> [SMSMessage] {
         messages.sorted { lhs, rhs in
             if lhs.timestamp != rhs.timestamp { return lhs.timestamp < rhs.timestamp }
+            // Every segment of one long SMS carries the same SCTS, so the tie has to be
+            // broken by the module storage slot, which is arrival order. Breaking it with
+            // `id` compared the body text instead, which scrambled the paragraph order
+            // inside the bubble.
+            let left = lhs.deliverySlotIndex
+            let right = rhs.deliverySlotIndex
+            if let left, let right, left != right { return left < right }
+            if left != nil, right == nil { return true }
+            if left == nil, right != nil { return false }
             return lhs.id < rhs.id
         }
     }
@@ -130,10 +153,28 @@ enum SMSDecoder {
     static let unsegmentedJoinWindow: TimeInterval = 60
     /// 判定「下一条记录是这条长短信的后续分段」的间隔：同一条长短信的各段
     /// 几乎同时到达，间隔再大就当成两条独立短信，不再拼在一起。
-    static let unsegmentedSiblingWindow: TimeInterval = 8
+    static let unsegmentedSiblingWindow: TimeInterval = 30
+    // Widened from 8 seconds: network jitter sometimes spreads the segments of a single
+    // SMS over more than eight seconds, and a run cut in half was delivered as a second
+    // bubble even though both halves belonged to one message.
     /// 带 UDH 的长短信长时间收不齐时的兜底时长：超过它就先把已到的部分交出来，
     /// 宁可显示「半条」也不整条吞掉；正常情况远早于此就收齐了。
     static let incompleteGroupTimeout: TimeInterval = 90
+    /// A concatenation reference is only 8 bits wide and the network recycles it. Parts
+    /// further apart than this cannot belong to the same message, so they are assembled
+    /// as separate groups instead of being joined into one scrambled body.
+    static let groupClusterGap: TimeInterval = 300
+
+    /// Capacity in UTF-16 units of one segment of a long SMS that carries no UDH.
+    ///
+    /// The module splits its own long SMS at 70 UTF-16 units, while a segment that came
+    /// through a real network carries a 6 octet UDH and leaves 134 octets for UCS-2 text,
+    /// that is 67 UTF-16 units. Measuring a 67 unit segment against 70 declared every
+    /// segment of a received long Chinese SMS to be a complete message, so one SMS turned
+    /// into one bubble per segment.
+    static func unsegmentedSegmentUnits(for text: String) -> Int {
+        text.unicodeScalars.contains { $0.value > 0x7F } ? 67 : unsegmentedFragmentUnits
+    }
 
     /// 解析一个存储区的 `AT+CMGL=4` 响应。
     static func parseListing(_ response: String, memory: String) -> [SMSListingEntry] {
@@ -197,8 +238,12 @@ enum SMSDecoder {
         var singles: [(offset: Int, index: Int, delivery: SMSDecodedDelivery)] = []
         for (offset, entry) in entries.enumerated() {
             guard let delivery = decode(entry.pdu) else { continue }
-            if let reference = delivery.reference, let total = delivery.total, delivery.sequence != nil {
-                groups["\(delivery.sender)|\(reference)|\(total)", default: []]
+            if let reference = delivery.reference, delivery.sequence != nil {
+                // The total segment count is deliberately not part of the key: some
+                // networks write 0 into the last segment to mean "unknown", and that one
+                // segment would then form a group of its own and reach the chat as a
+                // complete message, cutting the body short.
+                groups["\(delivery.sender)|\(reference)", default: []]
                     .append((offset, entry.index, delivery))
             } else {
                 singles.append((offset, entry.index, delivery))
@@ -207,6 +252,31 @@ enum SMSDecoder {
 
         var deliveries: [SMSDecodedDelivery] = []
         var consumedOffsets: [Int] = []
+        // The network recycles the concatenation reference, so an unfinished group left in
+        // storage can be picked up by a later, unrelated message that happens to reuse the
+        // same number, joining two messages into one scrambled body. The parts of one
+        // message always arrive within the same short window, so split each key into
+        // arrival clusters and assemble every cluster on its own.
+        var clusters: [String: [(offset: Int, index: Int, delivery: SMSDecodedDelivery)]] = [:]
+        for (key, parts) in groups {
+            let orderedParts = parts.sorted { lhs, rhs in
+                let left = lhs.delivery.sequence ?? 0
+                let right = rhs.delivery.sequence ?? 0
+                if left != right { return left < right }
+                return lhs.index < rhs.index
+            }
+            var cluster = 0
+            var previous: Date?
+            for part in orderedParts {
+                if let previous,
+                   part.delivery.timestamp.timeIntervalSince(previous) > groupClusterGap {
+                    cluster += 1
+                }
+                previous = part.delivery.timestamp
+                clusters["\(key)|\(cluster)", default: []].append(part)
+            }
+        }
+        groups = clusters
         for parts in groups.values {
             let ordered = parts.sorted { lhs, rhs in
                 let left = lhs.delivery.sequence ?? 0
@@ -215,7 +285,10 @@ enum SMSDecoder {
                 return lhs.index < rhs.index
             }
             guard let last = ordered.last else { continue }
-            let total = last.delivery.total ?? ordered.count
+            // Trust the totals the segments declare. A 0 there means "unknown", so one
+            // zero on the last segment must not make it look like a complete message.
+            let total = ordered.map { $0.delivery.total }.compactMap { $0 }.filter { $0 > 0 }.max()
+                ?? ordered.count
             let present = Set(ordered.compactMap(\.delivery.sequence))
             // 收齐了才交付；长时间收不齐（丢段）时兜底先交已到的部分，绝不整条吞掉。
             guard present.count >= total
@@ -396,7 +469,8 @@ enum SMSDecoder {
                 // 原先只要 run 里有两条就直接交付，于是长短信的各段还在分批到达时，
                 // 半条短信会被当成完整短信交付并从模块里删掉，剩下的分段
                 // 再拼成第二个气泡——这就是「一条短信被分割成多条、顺序还乱」的来源。
-                var complete = ordered[cursor].delivery.text.utf16.count < unsegmentedFragmentUnits
+                var complete = ordered[cursor].delivery.text.utf16.count
+                    < unsegmentedSegmentUnits(for: ordered[cursor].delivery.text)
                 while !complete,
                       let tail = run.last,
                       cursor + 1 < ordered.count,
@@ -404,7 +478,8 @@ enum SMSDecoder {
                         .timeIntervalSince(tail.delivery.timestamp) <= unsegmentedSiblingWindow {
                     cursor += 1
                     run.append(ordered[cursor])
-                    complete = ordered[cursor].delivery.text.utf16.count < unsegmentedFragmentUnits
+                    complete = ordered[cursor].delivery.text.utf16.count
+                        < unsegmentedSegmentUnits(for: ordered[cursor].delivery.text)
                 }
                 defer { cursor += 1 }
                 guard let last = run.last else { continue }

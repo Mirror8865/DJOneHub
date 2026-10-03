@@ -501,9 +501,23 @@ final class AppModel: ObservableObject {
     func performBackgroundNotificationSweep() async {
         guard hasStarted else { return }
         var summary: String
-        do {
-            let remote = try await api.messages()
-            let incoming = remote.filter { !$0.isOutgoing }
+        // The background window is short and the module link is occasionally unreachable
+        // for a moment: USB re-enumeration, or the module holding the AT port during its own
+        // eight second poll. Losing a whole wake to one failed request is what left the
+        // reminders pending until the app was opened again, so retry once.
+        var fetched: [SMSMessage]?
+        var fetchError: Error?
+        for attempt in 0..<2 {
+            do {
+                fetched = try await api.messages()
+                break
+            } catch {
+                fetchError = error
+                if attempt == 0 { try? await Task.sleep(for: .seconds(1.5)) }
+            }
+        }
+        if let remote = fetched {
+            let incoming = joiningFragments(remote.filter { !$0.isOutgoing })
             let smsNotificationsEnabled =
                 UserDefaults.standard.object(forKey: smsNotificationKey) as? Bool ?? true
             let fresh = incoming.filter {
@@ -525,9 +539,11 @@ final class AppModel: ObservableObject {
             // channel assembles the same message moments later and must not announce
             // it again.
             rememberNotifiedSMS(grouped)
-            summary = posted > 0 ? "\u{65B0}\u{77ED}\u{4FE1} \(posted)" : "\u{65E0}\u{65B0}\u{77ED}\u{4FE1}"
-        } catch {
-            summary = "\u{53D6}\u{6570}\u{5931}\u{8D25}\u{FF1A}\(error.localizedDescription)"
+            summary = posted > 0
+                ? "\u{65B0}\u{77ED}\u{4FE1} \(posted)"
+                : "\u{65E0}\u{65B0}\u{77ED}\u{4FE1}"
+        } else {
+            summary = "\u{53D6}\u{6570}\u{5931}\u{8D25}\u{FF1A}\(fetchError?.localizedDescription ?? "")"
         }
         // A missed call only ever shows up as a history record (missed == true,
         // active == nil), so it never travels through the activeCall path.
@@ -535,6 +551,10 @@ final class AppModel: ObservableObject {
             let history = await mergeCallHistory(status.history ?? [])
             if callHistory != history { callHistory = history }
             notifyMissedCalls(in: history)
+        } else {
+            // A failed call fetch is reported separately from a failed SMS fetch; the
+            // settings status line is the only place that can tell the two apart.
+            summary += " \u{00B7} \u{6765}\u{7535}\u{53D6}\u{6570}\u{5931}\u{8D25}"
         }
         recordBackgroundSweep(summary)
     }
@@ -1316,9 +1336,21 @@ final class AppModel: ObservableObject {
 
     /// 本机已落盘后让模块清掉对应记录，SIM/ME 存储区不会被历史短信塞满。
     private func acknowledgeDeliveredRecords(moduleIDs: [String], consumed: [SMSListingEntry]) async {
-        if !moduleIDs.isEmpty {
+        // Only the slots this round really assembled into a delivered message may be
+        // deleted. The module delivery id is shaped `<memory>-<slot>-<digest>`, so match
+        // on the slot: while a long SMS is still arriving, the slots it already occupies
+        // belong to no delivered message yet, and removing them takes away the leading
+        // segments the remaining parts need in order to be joined at all. That deletion
+        // is what turned one long SMS into two partial bubbles with scrambled order.
+        let consumedSlots = Set(consumed.map { "\($0.memory)-\($0.index)" })
+        let acknowledged = moduleIDs.filter { id in
+            let parts = id.split(separator: "-")
+            guard parts.count >= 2 else { return false }
+            return consumedSlots.contains("\(parts[0])-\(parts[1])")
+        }
+        if !acknowledged.isEmpty {
             do {
-                try await api.acknowledgeMessages(ids: moduleIDs)
+                try await api.acknowledgeMessages(ids: acknowledged)
                 return
             } catch {
                 // 模块确认失败（记录可能已被清掉）时继续走本地兜底删除。
@@ -1574,6 +1606,51 @@ final class AppModel: ObservableObject {
         return merged
     }
 
+    /// Rejoin the records of one long SMS with the same rule the PDU channel uses.
+    ///
+    /// The module text-mode list holds one record per stored segment and the UDH is
+    /// already gone, so the segments have to be rejoined here: keep absorbing the next
+    /// record while the previous one fills a whole segment, and order the records by
+    /// module storage slot instead of by body text. Showing the raw records is what made
+    /// one SMS flicker between a single bubble and several scrambled ones. The timestamp
+    /// of the joined message is the one of its last segment, exactly like the assembled
+    /// message, so the two channels produce the same `SMSMessage.id` instead of two
+    /// competing bubbles.
+    private func joiningFragments(_ records: [SMSMessage]) -> [SMSMessage] {
+        let ordered = records.sorted { lhs, rhs in
+            if lhs.timestamp != rhs.timestamp { return lhs.timestamp < rhs.timestamp }
+            let left = lhs.deliverySlotIndex
+            let right = rhs.deliverySlotIndex
+            if let left, let right, left != right { return left < right }
+            if left != nil, right == nil { return true }
+            if left == nil, right != nil { return false }
+            return lhs.id < rhs.id
+        }
+        var joined: [SMSMessage] = []
+        for record in ordered {
+            guard !record.isOutgoing,
+                  let previous = joined.last,
+                  !previous.isOutgoing,
+                  previous.sender == record.sender,
+                  record.timestamp.timeIntervalSince(previous.timestamp)
+                    <= SMSDecoder.unsegmentedSiblingWindow,
+                  previous.content.utf16.count
+                    >= SMSDecoder.unsegmentedSegmentUnits(for: previous.content) else {
+                joined.append(record)
+                continue
+            }
+            joined[joined.count - 1] = SMSMessage(
+                sender: previous.sender,
+                content: previous.content + record.content,
+                code: previous.code ?? record.code,
+                timestamp: record.timestamp,
+                deliveryID: nil,
+                direction: .incoming
+            )
+        }
+        return joined
+    }
+
     /// Display-only merge of the module text-mode list.
     ///
     /// Unlike a PDU-assembled message, one text-mode record may be only a segment of a
@@ -1581,7 +1658,9 @@ final class AppModel: ObservableObject {
     /// module drop the segments, after which the PDU channel can never assemble the
     /// complete message and the chat keeps showing several fragment bubbles forever.
     private func mergeDisplayOnly(_ remote: [SMSMessage]) -> [SMSMessage] {
-        let pendingMessages = remote.filter { !deletedMessageIDs.contains($0.id) }
+        let pendingMessages = joiningFragments(
+            remote.filter { !deletedMessageIDs.contains($0.id) }
+        )
         var byID: [String: SMSMessage] = [:]
         for message in messages { byID[message.id] = message }
         for var message in pendingMessages {
@@ -1623,6 +1702,14 @@ final class AppModel: ObservableObject {
         Array(records
             .sorted { lhs, rhs in
                 if lhs.timestamp != rhs.timestamp { return lhs.timestamp > rhs.timestamp }
+                // Same tie as `chronological`: the segments of one long SMS share a SCTS,
+                // so order them by module storage slot rather than by body text. This list
+                // is newest first, hence the slot is compared descending.
+                let left = lhs.deliverySlotIndex
+                let right = rhs.deliverySlotIndex
+                if let left, let right, left != right { return left > right }
+                if left != nil, right == nil { return true }
+                if left == nil, right != nil { return false }
                 return lhs.id < rhs.id
             }
             .prefix(maxMessageCount))
