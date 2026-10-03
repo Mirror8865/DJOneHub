@@ -352,6 +352,25 @@ struct SettingsView: View {
     /// 状态：系统设置式分组行（LabeledContent），每行一项，不再做两列卡片。
     @ViewBuilder
     private var statusSection: some View {
+        // App 自己修不了的链路状态（模块 DHCP 掉线 / 接口不见）：
+        // 直接告诉用户该怎么做，并提供一键重新检测。
+        if let hint = model.moduleLinkState.recoveryHint {
+            Section {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label(L10n.t("链路需要修复"), systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(Color.orange)
+                        .font(.subheadline.weight(.semibold))
+                    Text(hint)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                Button {
+                    model.recheckModuleLink()
+                } label: {
+                    Label(L10n.t("重新检测链路"), systemImage: "arrow.clockwise")
+                }
+            }
+        }
         // 模块状态板块顶部的模块实拍图（已去白底，随浅色/深色外观自适应）。
         Section {
             Image("ModuleHero")

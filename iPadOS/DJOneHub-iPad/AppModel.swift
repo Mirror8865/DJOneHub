@@ -108,6 +108,10 @@ final class AppModel: ObservableObject {
     private var nextModuleMetadataRefresh = Date.distantPast
     private var nextMobileProfileAttempt = Date.distantPast
     private var mobileProfileSwitching = false
+    /// 每个 App 生命周期最多自动请求一次「切到 iPad 直连」。切换会重写模块
+    /// USB gadget 并重启模块，iPad 必须重新获取 DHCP 地址，重复请求只会
+    /// 反复重枚举 USB 并让 iPad 掉租约。
+    private var mobileProfileSwitchRequested = false
     private var audioWarmupCallID: String?
     private var lowPowerModeEnabled = true
     private lazy var embeddedAgentVersion: String = {
@@ -210,6 +214,13 @@ final class AppModel: ObservableObject {
         if link != moduleLinkState { moduleLinkState = link }
     }
 
+    /// 用户重新插拔模块后手动触发：重建 USB 链路解析并立刻重读链路状态。
+    /// 不会发起 HTTP，也不会改动模块配置。
+    func recheckModuleLink() {
+        api.resetLocalConnectionState()
+        refreshModuleLinkState()
+    }
+
     /// 被系统在后台唤醒（显著位置变化 / 后台刷新任务）时恢复保活与轮询。
     /// 即使进程此前已被系统回收，这条路径也会重新建立轮询并补发遗漏的来电与短信通知。
     func resumeForBackgroundWake() async {
@@ -264,15 +275,11 @@ final class AppModel: ObservableObject {
                 try? await Task.sleep(for: .seconds(delay))
             }
         }
-        // Mac 完整模式的轻量 Agent 不占用 AT 端口。手机检测到它后可自行请求
-        // mobile 组合，避免用户在“离线”状态下无法手动切换模式。
+        // Mac 完整模式的轻量 Agent 不占用 AT 端口，但探测它在模块侧要走
+        // AT+QCFG="usbcfg"，会与通话/SMS 轮询争抢同一条 AT 通道。因此不再
+        // 常驻高频探测，改由轮询失败路径低频兜底（见 poll 的失败分支）。
         mobileProfileTask?.cancel()
-        mobileProfileTask = Task { [weak self] in
-            while !Task.isCancelled {
-                await self?.attemptAutomaticMobileProfile()
-                try? await Task.sleep(for: .milliseconds(750))
-            }
-        }
+        mobileProfileTask = nil
     }
 
     /// 模块在线时与其 1 秒 AT 轮询对齐；离线后退避，避免断开模块时持续唤醒手机和 USB 栈。
@@ -478,10 +485,15 @@ final class AppModel: ObservableObject {
                 // 连续失败说明链路或模块代理已经变了：丢掉缓存的 USB
                 // 网卡与路径监控，让下一次轮询从全新的 NWPathMonitor 重新解析，
                 // 避免旧接口对象把 App 永久钉在离线状态（旧行为要重启设备才恢复）。
-                api.resetLocalConnectionState()
+                // 只在失败连击的起点重建一次解析器；之后每次失败只重读链
+                // 路状态（getifaddrs，几乎零成本），避免反复重建 NWPathMonitor。
+                if consecutivePollFailures == 3 { api.resetLocalConnectionState() }
                 refreshModuleLinkState()
                 // 后台轮询失败只更新离线状态；否则用户关闭弹窗后一秒又会被同一错误轰炸。
                 connectionMessage = moduleLinkState.pollFailureDescription
+                // 链路确实不可用时才低频兜底探测模块是否还停留在 Mac 组合；
+                // 一旦请求切换，上面的提示会被替换成「请拔插」。
+                Task { [weak self] in await self?.attemptAutomaticMobileProfile() }
             }
         }
 
@@ -525,24 +537,35 @@ final class AppModel: ObservableObject {
         )
     }
 
-    /// Mac 模式保留的控制服务只提供健康检查和 USB 模式切换。检测到它时，
-    /// 自动切为手机直连组合；重枚举期间的连接失败属于预期，不污染离线提示。
+    /// Mac 模式保留的控制服务只提供健康检查和 USB 模式切换。只有在链路已经
+    /// 连续多次不可用时才低频探测一次，并在确认对方是 Mac 组合时请求切换为
+    /// 手机直连；重枚举期间的连接失败属于预期，不污染离线提示。
+    ///
+    /// 这里刻意不做常驻轮询：模块侧的 `GET /api/usb/profile` 要占用 AT 通道，
+    /// 与每一次通话/SMS 轮询争抢；而一旦误判成 Mac 组合就会改写 USB gadget
+    /// （`enable=0` → 改 functions → `enable=1`），iPad 侧网卡随之掉租约并退回
+    /// 169.254.x，App 再也连不上模块（旧行为表现为「用一会儿就失联」）。
     private func attemptAutomaticMobileProfile() async {
-        // 后台不做高频模式探测，避免为了便利切换而持续消耗手机和模块电量。
-        guard appIsActive, !mobileProfileSwitching, Date() >= nextMobileProfileAttempt else { return }
+        // 仅在连续失败、确实连不上模块时兜底；链路正常时一次都不探测。
+        guard appIsActive,
+              !mobileProfileSwitching,
+              !mobileProfileSwitchRequested,
+              consecutivePollFailures >= 3,
+              Date() >= nextMobileProfileAttempt else { return }
         mobileProfileSwitching = true
-        nextMobileProfileAttempt = Date().addingTimeInterval(1)
+        // 探测本身也要走 AT 通道，失败后保持 20 秒冷却。
+        nextMobileProfileAttempt = Date().addingTimeInterval(20)
         defer { mobileProfileSwitching = false }
 
         do {
             let profile = try await api.usbProfile()
-            if profile.mode == "mac" {
-                connectionMessage = "正在自动切换为手机直连模式…"
-                _ = try await api.setUSBProfile("mobile")
-            } else {
-                // 已进入手机模式后降频探测；重新插拔会重建任务并立即重新检查。
-                nextMobileProfileAttempt = Date().addingTimeInterval(15)
-            }
+            guard profile.mode == "mac" else { return }
+            // 请求切换会重写模块 USB gadget 并重启模块，iPad 必须重新获取
+            // DHCP 地址——模块侧也要求切换后重新插拔 USB。所以每个 App 生命
+            // 周期只请求一次，并把「需要拔插」明确写进提示。
+            mobileProfileSwitchRequested = true
+            connectionMessage = "正在切换为 iPad 直连模式；切换后请拔下模块再插回。"
+            _ = try await api.setUSBProfile("mobile")
         } catch {
             // USB 重枚举和控制 Agent 冷启动期间无法访问是正常情况。
         }

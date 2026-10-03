@@ -199,6 +199,19 @@ enum ModuleUSBLinkState: Equatable, Sendable {
         }
     }
 
+    /// 「App 自己修不了、需要用户动手」时给出的说明；
+    /// 正常与尚未检测时为 nil。
+    var recoveryHint: String? {
+        switch self {
+        case .ready, .unknown:
+            return nil
+        case .leaseMissing:
+            return "模块 DHCP 未响应（模块内 dnsmasq 绑定在 bridge0）：iPad 当前拿到的是系统自分配的 169.254 地址，与模块（192.168.225.1）不在同一网段，App 无法连接，也无权修改系统网络配置。请拔下模块再插回：USB 重新枚举会让 iPad 重新获取 192.168.225.x 地址，不需要重启 iPad。"
+        case .missing:
+            return "没有检测到模块的以太网接口：请检查 USB 连接（换一根数据线或换一个端口）。"
+        }
+    }
+
     /// 轮询连续失败时给用户看的可执行诊断。
     var pollFailureDescription: String {
         switch self {
