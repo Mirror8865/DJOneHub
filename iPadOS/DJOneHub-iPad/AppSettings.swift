@@ -122,7 +122,7 @@ enum L10n {
         "始终允许定位": "Always Allow Location", "通知": "Notifications",
         "本地网络": "Local Network", "通讯录": "Contacts",
         "通话语音需要麦克风": "Calls need microphone access",
-        "保活与后台唤醒需要「始终允许」": "Keep-alive needs \u201cAlways\u201d location",
+        "保活与后台唤醒需要「始终允许」": "Keep-alive needs “Always” location",
         "接收来电与短信提醒": "Call and message alerts",
         "访问模块与本机所在网络上的设备": "Reach the module and devices on your network",
         "来电显示联系人姓名与头像": "Show contact names and photos",
