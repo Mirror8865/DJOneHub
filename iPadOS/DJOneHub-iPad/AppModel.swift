@@ -500,19 +500,35 @@ final class AppModel: ObservableObject {
     /// the lossy text-mode records into local history.
     func performBackgroundNotificationSweep() async {
         guard hasStarted else { return }
-        var summary: String
-        // The background window is short and the module link is occasionally unreachable
-        // for a moment: USB re-enumeration, or the module holding the AT port during its own
-        // eight second poll. Losing a whole wake to one failed request is what left the
-        // reminders pending until the app was opened again, so retry once.
+        // The reminder path that was verified working in the field: run the real SMS
+        // refresh. It asks the module to pull new messages out of the modem
+        // (api.refreshSMS), assembles long SMS through the PDU channel and posts the
+        // reminders through the same handler the foreground uses. The later "light"
+        // wake only read the module list and never triggered that fetch, so a
+        // background wake saw nothing new and every reminder waited until the app was
+        // opened again.
+        await refreshMessages(silently: true)
+        var summary = "\u{5DF2}\u{626B}\u{63CF}"
+        // A missed call only ever shows up as a history record (missed == true,
+        // active == nil), so it never travels through the activeCall path.
+        if let status = try? await api.callStatus() {
+            let history = await mergeCallHistory(status.history ?? [])
+            if callHistory != history { callHistory = history }
+            notifyMissedCalls(in: history)
+        } else {
+            summary += " \u{00B7} \u{6765}\u{7535}\u{53D6}\u{6570}\u{5931}\u{8D25}"
+        }
+        // Second chance: the module list can still hold a message the refresh above did
+        // not deliver (a transient AT or link failure while backgrounded). Post it
+        // directly; the shared notifiedSMSKeys set keeps this from double announcing.
         var fetched: [SMSMessage]?
-        var fetchError: Error?
+        var fetchFailed = false
         for attempt in 0..<2 {
             do {
                 fetched = try await api.messages()
                 break
             } catch {
-                fetchError = error
+                fetchFailed = true
                 if attempt == 0 { try? await Task.sleep(for: .seconds(1.5)) }
             }
         }
@@ -535,26 +551,12 @@ final class AppModel: ObservableObject {
                 }
             }
             rememberNotifiedSMS(incoming)
-            // The coalesced form carries the whole body, so remember it too: the PDU
-            // channel assembles the same message moments later and must not announce
-            // it again.
             rememberNotifiedSMS(grouped)
             summary = posted > 0
                 ? "\u{65B0}\u{77ED}\u{4FE1} \(posted)"
                 : "\u{65E0}\u{65B0}\u{77ED}\u{4FE1}"
-        } else {
-            summary = "\u{53D6}\u{6570}\u{5931}\u{8D25}\u{FF1A}\(fetchError?.localizedDescription ?? "")"
-        }
-        // A missed call only ever shows up as a history record (missed == true,
-        // active == nil), so it never travels through the activeCall path.
-        if let status = try? await api.callStatus() {
-            let history = await mergeCallHistory(status.history ?? [])
-            if callHistory != history { callHistory = history }
-            notifyMissedCalls(in: history)
-        } else {
-            // A failed call fetch is reported separately from a failed SMS fetch; the
-            // settings status line is the only place that can tell the two apart.
-            summary += " \u{00B7} \u{6765}\u{7535}\u{53D6}\u{6570}\u{5931}\u{8D25}"
+        } else if fetchFailed {
+            summary += " \u{00B7} \u{53D6}\u{6570}\u{5931}\u{8D25}"
         }
         recordBackgroundSweep(summary)
     }
