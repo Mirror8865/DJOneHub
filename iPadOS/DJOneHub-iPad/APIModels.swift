@@ -128,6 +128,9 @@ enum SMSDecoder {
     static let unsegmentedFragmentUnits = 70
     /// 无 UDH 分段重聚的时间窗：模块发送的多段几乎同时到达。
     static let unsegmentedJoinWindow: TimeInterval = 60
+    /// 判定「下一条记录是这条长短信的后续分段」的间隔：同一条长短信的各段
+    /// 几乎同时到达，间隔再大就当成两条独立短信，不再拼在一起。
+    static let unsegmentedSiblingWindow: TimeInterval = 8
     /// 带 UDH 的长短信长时间收不齐时的兜底时长：超过它就先把已到的部分交出来，
     /// 宁可显示「半条」也不整条吞掉；正常情况远早于此就收齐了。
     static let incompleteGroupTimeout: TimeInterval = 90
@@ -389,15 +392,27 @@ enum SMSDecoder {
             var cursor = 0
             while cursor < ordered.count {
                 var run = [ordered[cursor]]
-                while let tail = run.last,
-                      tail.delivery.text.utf16.count == unsegmentedFragmentUnits,
+                // 只有「最后一段长度不足一整段」才说明这条长短信已经收齐。
+                // 原先只要 run 里有两条就直接交付，于是长短信的各段还在分批到达时，
+                // 半条短信会被当成完整短信交付并从模块里删掉，剩下的分段
+                // 再拼成第二个气泡——这就是「一条短信被分割成多条、顺序还乱」的来源。
+                var complete = ordered[cursor].delivery.text.utf16.count < unsegmentedFragmentUnits
+                while !complete,
+                      let tail = run.last,
                       cursor + 1 < ordered.count,
-                      ordered[cursor + 1].delivery.timestamp.timeIntervalSince(tail.delivery.timestamp) <= unsegmentedJoinWindow {
+                      ordered[cursor + 1].delivery.timestamp
+                        .timeIntervalSince(tail.delivery.timestamp) <= unsegmentedSiblingWindow {
                     cursor += 1
                     run.append(ordered[cursor])
+                    complete = ordered[cursor].delivery.text.utf16.count < unsegmentedFragmentUnits
                 }
                 defer { cursor += 1 }
                 guard let last = run.last else { continue }
+
+                // 还没收齐、又还在等待窗口内：整段留在模块里等后续分段，
+                // 既不交付也不确认删除（删了就永远拼不完整）。
+                let stale = now.timeIntervalSince(last.delivery.timestamp) > unsegmentedJoinWindow
+                guard complete || stale else { continue }
 
                 if run.count > 1 {
                     result.append(
@@ -410,19 +425,10 @@ enum SMSDecoder {
                             sequence: nil
                         )
                     )
-                    consumed += run.map(\.position)
-                    continue
+                } else {
+                    result.append(last.delivery)
                 }
-
-                // 单条且长度正好是第一段的标准长度：很可能后面还有分段。
-                // 先压一小段时间等后续分段到达，避免同一条短信反复裂开又合上；
-                // 超过时间窗仍没有后续，就按完整短信交付，不会把短信卡住。
-                if last.delivery.text.utf16.count == unsegmentedFragmentUnits,
-                   now.timeIntervalSince(last.delivery.timestamp) <= unsegmentedJoinWindow {
-                    continue
-                }
-                result.append(last.delivery)
-                consumed.append(last.position)
+                consumed += run.map(\.position)
             }
         }
         return UnsegmentedRejoin(deliveries: result, consumedPositions: consumed)

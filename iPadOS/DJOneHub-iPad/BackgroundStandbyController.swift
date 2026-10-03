@@ -266,7 +266,19 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
             } else {
                 wakeAge = "尚未"
             }
-            return "保活运行中（\(beat)\(backgroundBeat)\(modernChannel) · 后台唤醒 \(wakeCount) 次（\(wakeAge)） · 状态栏无指示）"
+            // 后台补发的结果：「取数成功但没新短信」与「取数失败」
+            // 是两回事，分开显示才能一眼看出后台通知为什么没弹。
+            let sweep: String
+            if let lastSweep = UserDefaults.standard.object(
+                forKey: "djonehub.standby.last-sweep"
+            ) as? Date {
+                let result = UserDefaults.standard.string(forKey: "djonehub.standby.last-sweep-result") ?? ""
+                let age = max(0, Int(Date().timeIntervalSince(lastSweep)))
+                sweep = " · 后台取数 \(age) 秒前" + (result.isEmpty ? "" : "（\(result)）")
+            } else {
+                sweep = ""
+            }
+            return "保活运行中（\(beat)\(backgroundBeat)\(modernChannel) · 后台唤醒 \(wakeCount) 次（\(wakeAge)）\(sweep) · 状态栏无指示）"
         case .authorizedWhenInUse:
             // 只拿到「使用期间」时系统会优先回收进程，保活随时可能失效，
             // 所以这里明确提示去升级授权。

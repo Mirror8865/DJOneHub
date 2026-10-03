@@ -173,6 +173,8 @@ final class AppModel: ObservableObject {
     private var pollingGeneration = 0
     private var hasStarted = false
     private var consecutivePollFailures = 0
+    /// Last time the cached USB interface objects were invalidated; see resumeForBackgroundWake.
+    private var lastLocalConnectionReset = Date.distantPast
     private var nextMessagesRefresh = Date.distantPast
     /// 短信刷新任务：PDU 读取要跑好几条 AT 指令，不能占着 1 秒一次的通话轮询。
     private var messagesRefreshTask: Task<Void, Never>?
@@ -203,6 +205,16 @@ final class AppModel: ObservableObject {
     private let maxMessageCount = 2_000
     /// 已见过的呼入短信 ID 集合；后台刷新时只对集合外的新短信发通知，避免重复提醒。
     private var seenIncomingSMSIDs: Set<String> = []
+    /// Notification dedup keys (see `smsNotificationKey(for:)`), persisted on disk.
+    ///
+    /// Persisted because a process reclaimed and relaunched in the background starts
+    /// with an empty in-memory set, and would then re-announce every SMS the module
+    /// still caches. Keyed on sender plus body prefix so that one long SMS delivered
+    /// as several fragments and the same SMS delivered already joined share one key.
+    private var notifiedSMSKeys: Set<String> = []
+    private let notifiedSMSKeysKey = "djonehub.notified-sms-keys"
+    private let maxNotifiedSMSKeys = 600
+
     /// 已经提醒过的未接来电 id：模块每轮都回传完整历史，不去重会反复弹。
     private var notifiedMissedCallIDs: Set<String> = []
     /// 用户在本机接听 / 拒接 / 挂断过的通话 id。
@@ -222,6 +234,7 @@ final class AppModel: ObservableObject {
         self.api = api
         deletedCallIDs = Set(UserDefaults.standard.stringArray(forKey: deletedCallIDsKey) ?? [])
         deletedMessageIDs = Set(UserDefaults.standard.stringArray(forKey: deletedMessageIDsKey) ?? [])
+        notifiedSMSKeys = Set(UserDefaults.standard.stringArray(forKey: notifiedSMSKeysKey) ?? [])
         AppModel.shared = self
         callKit.handler = self
         // 背景启动时 SwiftUI 不会走 onAppear，这里延后一拍自行恢复轮询与保活。
@@ -446,8 +459,20 @@ final class AppModel: ObservableObject {
         if !hasStarted {
             start()
         } else {
+            let hadFailures = consecutivePollFailures > 0
             consecutivePollFailures = 0
-            api.resetLocalConnectionState()
+            // Invalidate the cached USB interface objects only when the link actually
+            // failed, or when they have not been rebuilt for a while. A reset drops the
+            // already resolved interface, so every later request degrades to the
+            // interface-type fallback until NWPathMonitor delivers a fresh path.
+            // Background wakes arrive every 15 seconds, and invalidating on each one kept
+            // the module requests pinned to that fallback path: the background fetch got
+            // nothing back, so no notification was ever posted.
+            let resetNow = Date()
+            if hadFailures || resetNow.timeIntervalSince(lastLocalConnectionReset) > 90 {
+                api.resetLocalConnectionState()
+                lastLocalConnectionReset = resetNow
+            }
             restartCallEventBridge()
             restartPolling()
         }
@@ -463,19 +488,62 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// 后台唤醒专用：一轮「短信 + 未接来电」扫描并立刻投递通知。
+    /// One background wake: a single cheap SMS list GET plus a call status GET, then
+    /// post whatever reminders are still missing.
     ///
-    /// 与常规轮询分开，是因为唤醒窗口只有几十秒，必须在这个窗口内把通知发完，
-    /// 不能等轮询节奏。短信读取复用 refreshMessages 的串行闸门，不会和轮询抢 AT 口。
+    /// Deliberately not the PDU/AT assembly path. That one has to run three or four AT
+    /// commands in a row on a single AT port while the module itself flips the SMS mode
+    /// back to text every 8 seconds, so in the background it fails often and falls back
+    /// to the text-mode cache, which has no UDH and returns one long SMS as several
+    /// records. A reminder only needs the fact that a new SMS exists, and one GET is the
+    /// cheapest, most reliable way to learn it. It touches no AT port and never writes
+    /// the lossy text-mode records into local history.
     func performBackgroundNotificationSweep() async {
         guard hasStarted else { return }
-        await refreshMessages(silently: true)
-        guard let status = try? await api.callStatus() else { return }
-        let history = await mergeCallHistory(status.history ?? [])
-        if callHistory != history { callHistory = history }
-        // 未接来电只能在这里补：模块把它写成历史记录（missed == true、active == nil），
-        // 永远不经过 activeCall 通路，后台唤醒时必须主动扫一遍。
-        notifyMissedCalls(in: history)
+        var summary: String
+        do {
+            let remote = try await api.messages()
+            let incoming = remote.filter { !$0.isOutgoing }
+            let smsNotificationsEnabled =
+                UserDefaults.standard.object(forKey: smsNotificationKey) as? Bool ?? true
+            let fresh = incoming.filter {
+                !notifiedSMSKeys.contains(Self.smsNotificationKey(for: $0))
+            }
+            let grouped = coalescedForNotification(fresh)
+            var posted = 0
+            if smsNotificationsEnabled {
+                for message in grouped where !isViewingConversation(message.sender) {
+                    smsNotifier.post(
+                        message: message,
+                        displayName: contacts.displayName(for: message.sender)
+                    )
+                    posted += 1
+                }
+            }
+            rememberNotifiedSMS(incoming)
+            // The coalesced form carries the whole body, so remember it too: the PDU
+            // channel assembles the same message moments later and must not announce
+            // it again.
+            rememberNotifiedSMS(grouped)
+            summary = posted > 0 ? "\u65b0\u77ed\u4fe1 \(posted)" : "\u65e0\u65b0\u77ed\u4fe1"
+        } catch {
+            summary = "\u53d6\u6570\u5931\u8d25\uff1a\(error.localizedDescription)"
+        }
+        // A missed call only ever shows up as a history record (missed == true,
+        // active == nil), so it never travels through the activeCall path.
+        if let status = try? await api.callStatus() {
+            let history = await mergeCallHistory(status.history ?? [])
+            if callHistory != history { callHistory = history }
+            notifyMissedCalls(in: history)
+        }
+        recordBackgroundSweep(summary)
+    }
+
+    /// Store what the last background sweep managed to do. The settings status line shows
+    /// it, which tells "fetched, nothing new" apart from "fetch failed".
+    private func recordBackgroundSweep(_ summary: String) {
+        UserDefaults.standard.set(Date(), forKey: "djonehub.standby.last-sweep")
+        UserDefaults.standard.set(summary, forKey: "djonehub.standby.last-sweep-result")
     }
 
     func setBackgroundStandbyEnabled(_ enabled: Bool) {
@@ -1179,7 +1247,7 @@ final class AppModel: ObservableObject {
         do {
             if forceModuleScan { try await api.refreshSMS() }
             let remoteMessages = try await api.messages()
-            let mergedMessages = await mergeMessages(remoteMessages)
+            let mergedMessages = mergeDisplayOnly(remoteMessages)
             if messages != mergedMessages { messages = mergedMessages }
             if !silently { errorMessage = nil }
             handleIncomingSMSNotifications(mergedMessages)
@@ -1209,15 +1277,41 @@ final class AppModel: ObservableObject {
         return (assembly.messages, assembly.consumed, moduleIDs)
     }
 
-    /// 把 PDU 解出的完整短信并入本机历史；用户删过的（墓碑集合）不再复活。
+    /// Merge the PDU-assembled complete SMS into local history; anything the user
+    /// deleted (tombstone set) must not come back.
     private func mergeIncomingMessages(_ remote: [SMSMessage]) async -> [SMSMessage] {
         let pendingMessages = remote.filter { !deletedMessageIDs.contains($0.id) }
         var byID: [String: SMSMessage] = [:]
         for message in messages { byID[message.id] = message }
         for message in pendingMessages { byID[message.id] = message }
-        let merged = normalizedMessages(Array(byID.values))
+        // Records that only the text-mode fallback ever saw carry a module delivery id;
+        // PDU-assembled messages do not, and their body contains the segments they were
+        // joined from. Dropping those fragments here keeps one paragraph from showing up
+        // twice, once as fragments and once as the joined message.
+        let merged = removingSupersededFragments(
+            normalizedMessages(Array(byID.values)),
+            complete: pendingMessages
+        )
         if !pendingMessages.isEmpty { _ = historyStore.saveMessages(merged) }
         return merged
+    }
+
+    /// Drop text-mode fragments whose body a complete message of the same sender contains.
+    private func removingSupersededFragments(
+        _ records: [SMSMessage],
+        complete: [SMSMessage]
+    ) -> [SMSMessage] {
+        let completeIncoming = complete.filter { !$0.isOutgoing && $0.deliveryID == nil }
+        guard !completeIncoming.isEmpty else { return records }
+        return records.filter { record in
+            guard !record.isOutgoing, record.deliveryID != nil else { return true }
+            let text = record.content
+            // Short bodies, a verification code for instance, collide too easily.
+            guard text.utf16.count >= 24 else { return true }
+            return !completeIncoming.contains {
+                $0.sender == record.sender && $0.content.contains(text)
+            }
+        }
     }
 
     /// 本机已落盘后让模块清掉对应记录，SIM/ME 存储区不会被历史短信塞满。
@@ -1251,12 +1345,14 @@ final class AppModel: ObservableObject {
         _ = historyStore.saveMessages(messages)
     }
 
-    /// 记录当前已知短信作为后台新短信通知的基线；前台刷新同样并入，
-    /// 保证用户正在看 App 时不会为已显示的消息重复弹通知。
+    /// Record every SMS already known as the baseline for background reminders, so the
+    /// user is never notified about a message that is already on screen.
     private func captureSMSSnapshot() {
-        // 基线必须和发通知用同一套 ID（合并后的），否则一条长短信的每一段
-        // 都会被当成一条独立短信，反复提醒。
-        seenIncomingSMSIDs.formUnion(receivedMessages(from: messages).map(\.id))
+        let incoming = receivedMessages(from: messages)
+        // The baseline must use the same keys as the notifier, otherwise every segment of
+        // one long SMS would count as a separate message and be announced again.
+        seenIncomingSMSIDs.formUnion(incoming.map(\.id))
+        rememberNotifiedSMS(incoming)
     }
 
     /// 收到的短信（不含本机发出的）。
@@ -1267,29 +1363,80 @@ final class AppModel: ObservableObject {
         records.filter { !$0.isOutgoing }
     }
 
-    /// 前台把新短信直接并入已见集合；后台对未见过的呼入短信发送本地通知，
-    /// 发送后并入集合，避免同一会话里反复提醒同一条消息。
+    /// Foreground merges new SMS into the seen set; an unseen incoming SMS is announced
+    /// with a local notification first and marked afterwards, so the same message is
+    /// never announced twice.
     private func handleIncomingSMSNotifications(_ merged: [SMSMessage]) {
-        // 先把各段合并回一条再判断「是不是新短信」：直接用未合并的记录，
-        // 一条长短信会变成好几条通知，且先后是模块的存储顺序而不是阅读顺序。
         let incoming = receivedMessages(from: merged)
-        let smsNotificationsEnabled = UserDefaults.standard.object(forKey: smsNotificationKey) as? Bool ?? true
-        let freshMessages = incoming.filter { !seenIncomingSMSIDs.contains($0.id) }
+        let smsNotificationsEnabled =
+            UserDefaults.standard.object(forKey: smsNotificationKey) as? Bool ?? true
+        let freshMessages = incoming.filter {
+            !notifiedSMSKeys.contains(Self.smsNotificationKey(for: $0))
+        }
+        let grouped = coalescedForNotification(freshMessages)
         if smsNotificationsEnabled {
-            // 按「旧 → 新」投递：系统把最后投递的排在最上面，所以最新的一条在最前，
-            // 与「信息」App 的通知顺序一致（原先是新在前，投递后顺序正好反了）。
-            //
-            // 不再用「appIsActive 就整个跳过」：那条提前返回会把前台期间到达的所有
-            // 新短信一次性标记为已见而不发通知，表现就是「同一个人连发多条只有第一
-            // 条有通知」。现在只跳过「用户正开着的那个会话」，其余照常提醒。
-            for message in freshMessages where !isViewingConversation(message.sender) {
+            // Only the conversation the user is currently reading is skipped. Skipping
+            // everything while the app is active is what made a second message from the
+            // same sender stay silent.
+            for message in grouped where !isViewingConversation(message.sender) {
                 smsNotifier.post(
                     message: message,
                     displayName: contacts.displayName(for: message.sender)
                 )
             }
         }
-        seenIncomingSMSIDs.formUnion(incoming.map(\.id))
+        rememberNotifiedSMS(incoming)
+        // The coalesced form carries the whole body, so remember it too: the PDU channel
+        // assembles the same message moments later and must not announce it again.
+        rememberNotifiedSMS(grouped)
+    }
+
+    /// Notification dedup key: sender, body length and body prefix.
+    ///
+    /// One long SMS, whether it arrives as several fragments or already assembled, has
+    /// the same total length and the same opening characters, so both forms collapse
+    /// into a single reminder; two genuinely different messages differ in length or in
+    /// their first characters.
+    private static func smsNotificationKey(for message: SMSMessage) -> String {
+        "\(message.sender)\u{1}\(message.content.utf16.count)\u{1}\(message.content.prefix(12))"
+    }
+
+    private func rememberNotifiedSMS(_ records: [SMSMessage]) {
+        let incoming = records.filter { !$0.isOutgoing }
+        guard !incoming.isEmpty else { return }
+        let before = notifiedSMSKeys.count
+        for message in incoming { notifiedSMSKeys.insert(Self.smsNotificationKey(for: message)) }
+        if notifiedSMSKeys.count > maxNotifiedSMSKeys { notifiedSMSKeys.removeAll() }
+        guard notifiedSMSKeys.count != before else { return }
+        UserDefaults.standard.set(Array(notifiedSMSKeys), forKey: notifiedSMSKeysKey)
+    }
+
+    /// Collapse records that arrive from one sender within the same second into a single
+    /// reminder: the module text-mode list hands a long SMS back as one record per stored
+    /// segment, and announcing each record rings several times with the segments in
+    /// storage order instead of reading order.
+    private func coalescedForNotification(_ records: [SMSMessage]) -> [SMSMessage] {
+        var order: [String] = []
+        var groups: [String: [SMSMessage]] = [:]
+        for record in records {
+            let key = "\(record.sender)\u{1}\(Int(record.timestamp.timeIntervalSince1970))"
+            if groups[key] == nil { order.append(key) }
+            groups[key, default: []].append(record)
+        }
+        return order.compactMap { key in
+            guard let items = groups[key], let first = items.first else { return nil }
+            guard items.count > 1 else { return first }
+            // Keep the order the module returned: its list follows arrival order, so the
+            // joined body reads the same way the assembled message does.
+            return SMSMessage(
+                sender: first.sender,
+                content: items.map(\.content).joined(),
+                code: first.code,
+                timestamp: first.timestamp,
+                deliveryID: nil,
+                direction: .incoming
+            )
+        }
     }
 
     /// 用户此刻是否正开在这个会话里（只有这种情况下才不打扰）。
@@ -1427,25 +1574,21 @@ final class AppModel: ObservableObject {
         return merged
     }
 
-    private func mergeMessages(_ remote: [SMSMessage]) async -> [SMSMessage] {
-        // 同 mergeCallHistory：本机已删除的短信不能被模块回传复活。
+    /// Display-only merge of the module text-mode list.
+    ///
+    /// Unlike a PDU-assembled message, one text-mode record may be only a segment of a
+    /// long SMS. It must neither be persisted nor acknowledged: acknowledging makes the
+    /// module drop the segments, after which the PDU channel can never assemble the
+    /// complete message and the chat keeps showing several fragment bubbles forever.
+    private func mergeDisplayOnly(_ remote: [SMSMessage]) -> [SMSMessage] {
         let pendingMessages = remote.filter { !deletedMessageIDs.contains($0.id) }
         var byID: [String: SMSMessage] = [:]
         for message in messages { byID[message.id] = message }
         for var message in pendingMessages {
-            // 旧版模块没有 delivery_id 时保留手机已有标识，避免新旧版本来回覆盖。
             if message.deliveryID == nil { message.deliveryID = byID[message.id]?.deliveryID }
             byID[message.id] = message
         }
-        let merged = normalizedMessages(Array(byID.values))
-        if !pendingMessages.isEmpty, historyStore.saveMessages(merged) {
-            let persistedIDs = Set(merged.map(\.id))
-            let acknowledgedIDs = pendingMessages
-                .filter { persistedIDs.contains($0.id) }
-                .compactMap(\.deliveryID)
-            try? await api.acknowledgeMessages(ids: acknowledgedIDs)
-        }
-        return merged
+        return normalizedMessages(Array(byID.values))
     }
 
     /// 将发送成功的短信保存为本机记录；`sender` 这里表示对话对端，沿用既有会话分组方式。
