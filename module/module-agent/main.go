@@ -20,7 +20,8 @@ import (
 
 const (
 	// 0.3.21：新增本地来电事件桥，让 iPhone 在模块状态变化时立即唤起 CallKit。
-	agentVersion = "0.3.21"
+	// 0.3.22：Agent 日志加 512 KB 上限，避免 15 MB 的 /data 卷被日志写满。
+	agentVersion = "0.3.22"
 	// 监听所有本机接口以容忍 ECM 地址晚于 init 服务出现；请求层仍只放行 USB 私网与环回。
 	listenAddress = "0.0.0.0:7575"
 	// DATA11 桥与原厂 DATA1 完全分离，禁止重新使用 ql_manager_server 占用的 /dev/smd7。
@@ -77,6 +78,10 @@ func main() {
 	if probed {
 		return
 	}
+
+	// 模块存储只有一个约 15 MB 的 UBIFS 卷，Agent 日志必须有上限：
+	// 写满后 Agent 起不来，App 会直接认不到模块。
+	startLogCap(logger)
 
 	controlOnly := len(os.Args) == 2 && os.Args[1] == "--control-only"
 	service := &agent{started: time.Now(), smsAuto: true, controlOnly: controlOnly}
