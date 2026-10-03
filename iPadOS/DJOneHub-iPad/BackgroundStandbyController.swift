@@ -156,6 +156,11 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
     private var monitoredRegion: CLCircularRegion?
     /// 后台唤醒去重时间戳：定位回调很密集，避免每一次回调都重建轮询。
     private var lastBackgroundWake = Date.distantPast
+    /// iOS 17+ 的后台活动会话。持续定位必须由一个「后台活动」承载：会话名下的
+    /// 定位回调在切后台、锁屏、甚至进程被系统回收后再拉起时都会继续投递，
+    /// 这是官方给「必须长期在后台运行」的 App 提供的标准通道。
+    /// 用 `Any?` 保存是因为它要求 iOS 17，而本 App 最低支持 16.1。
+    private var backgroundActivitySession: Any?
 
     /// 是否授予了「始终允许」；只有它才能让定位更新在后台持续投递。
     var hasAlwaysAuthorization: Bool {
@@ -173,10 +178,13 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
         if suspendedForCall { return "通话中已暂停" }
         switch manager.authorizationStatus {
         case .authorizedAlways:
-            if !appIsBackground { return "已就绪，进入后台后自动保活" }
-            return heartbeatActive ? "保活运行中" : "正在启动"
+            return heartbeatActive ? "保活运行中（后台与锁屏有效）" : "正在启动"
         case .authorizedWhenInUse:
-            return "需要在“设置 › 隐私与安全性 › 定位”里改为“始终允许”"
+            // 配合后台活动会话仍能收到后台定位回调，但没有「始终允许」时
+            // 系统会优先回收进程，所以这里明确提示去升级授权。
+            return heartbeatActive
+                ? "保活运行中；建议在“设置 › 隐私与安全性 › 定位”里改为“始终允许”"
+                : "需要在“设置 › 隐私与安全性 › 定位”里改为“始终允许”"
         case .notDetermined:
             return "等待定位授权"
         case .denied, .restricted:
@@ -205,6 +213,9 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
         if enabled {
             // 权限弹窗必须在前台出现，用户才能看到并授权；随后由进入后台触发心跳。
             requestAuthorizationIfNeeded()
+            // 后台活动会话必须在 App 仍在前台时创建，系统才会把它登记成
+            // 「允许在后台持续运行」的定位会话。
+            startBackgroundActivitySession()
             // 三条「被回收后仍能拉起进程」的通道全部登记：显著位置变化、访问事件、地理围栏。
             startSignificantChangeMonitoring()
             startVisitMonitoring()
@@ -214,6 +225,7 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
             restartTask?.cancel()
             restartTask = nil
             stopHeartbeat()
+            stopBackgroundActivitySession()
             stopSignificantChangeMonitoring()
             stopVisitMonitoring()
             stopRegionMonitoring()
@@ -222,14 +234,12 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
 
     func setApplicationIsBackground(_ isBackground: Bool) {
         appIsBackground = isBackground
-        // 前台由模块轮询本身维持进程；只有进入后台才需要定位心跳兜底，避免无谓耗电。
-        if isBackground {
-            startIfAuthorized()
-        } else {
-            restartTask?.cancel()
-            restartTask = nil
-            stopHeartbeat()
-        }
+        // 定位会话常驻：不是在进入后台的那一刻才启动。
+        // 系统对「已经在前台运行中的定位会话」会平滑续到后台；对「后台才临时启动」
+        // 的会话则常常延迟投递甚至直接拒绝，那正是「切后台/锁屏就收不到通知」的根因。
+        restartTask?.cancel()
+        restartTask = nil
+        startIfAuthorized()
     }
 
     /// 回到前台、被系统中断或通话结束后重新确认定位心跳仍在运行。
@@ -250,13 +260,15 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
     }
 
     private func startIfAuthorized() {
-        guard enabled, appIsBackground, !suspendedForCall else { return }
+        guard enabled, !suspendedForCall else { return }
         switch manager.authorizationStatus {
-        case .authorizedAlways:
+        case .authorizedAlways, .authorizedWhenInUse:
+            // 「使用期间」+ 后台活动会话同样能持续收到后台定位回调，
+            // 所以两种授权都直接把心跳跑起来，不再等用户升级到「始终允许」。
             guard !heartbeatActive else { return }
             heartbeatActive = true
             manager.startUpdatingLocation()
-        case .authorizedWhenInUse, .notDetermined:
+        case .notDetermined:
             requestAuthorizationIfNeeded()
         case .denied, .restricted:
             heartbeatActive = false
@@ -288,6 +300,33 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
         let status = manager.authorizationStatus
         guard status == .notDetermined || status == .authorizedWhenInUse else { return }
         manager.requestAlwaysAuthorization()
+    }
+
+    /// 只拿到「使用期间」时再补一次「始终允许」申请。
+    ///
+    /// 系统只允许在前台弹这层升级面板，所以每次回到前台都补申请一次；
+    /// 升到「始终允许」后，后台定位不再依赖蓝色指示条会话，进程最不容易被回收。
+    func requestAlwaysUpgradeIfNeeded() {
+        guard enabled else { return }
+        if manager.authorizationStatus == .authorizedWhenInUse {
+            manager.requestAlwaysAuthorization()
+        }
+    }
+
+    /// 建立后台活动会话（官方 iOS 17+ API，必须在前台创建）。
+    private func startBackgroundActivitySession() {
+        guard backgroundActivitySession == nil else { return }
+        if #available(iOS 17.0, *) {
+            backgroundActivitySession = CLBackgroundActivitySession()
+        }
+    }
+
+    private func stopBackgroundActivitySession() {
+        guard let session = backgroundActivitySession else { return }
+        backgroundActivitySession = nil
+        if #available(iOS 17.0, *), let typed = session as? CLBackgroundActivitySession {
+            typed.invalidate()
+        }
     }
 
     private func stopHeartbeat() {
@@ -372,7 +411,9 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
     /// 去重是为了让密集的定位回调不至于反复重启轮询任务。
     private func dispatchBackgroundWake() {
         guard enabled, !suspendedForCall else { return }
-        guard Date().timeIntervalSince(lastBackgroundWake) > 45 else { return }
+        // 去重窗口压到 15 秒：唤醒本身会立刻补一轮通知扫描，
+        // 窗口越长，来电 / 短信从「模块已收到」到「锁屏弹提醒」的延迟就越大。
+        guard Date().timeIntervalSince(lastBackgroundWake) > 15 else { return }
         lastBackgroundWake = Date()
         Task { @MainActor in
             await AppModel.shared?.resumeForBackgroundWake()
@@ -526,7 +567,8 @@ final class IncomingCallNotifier {
         // 通话已经离开振铃状态（被接听或结束）时立刻收掉锁屏上那条还在响的通知，
         // 避免点进去是一通早就结束的电话。
         if let call, !["incoming", "waiting"].contains(call.state) {
-            clearNotifications(for: call.id)
+            // 只收掉还在响的来电通知；未接来电通知必须留在锁屏上。
+            clearRingNotification(for: call.id)
         }
         guard !appIsActive,
               let call,
@@ -582,9 +624,22 @@ final class IncomingCallNotifier {
         UNUserNotificationCenter.current().add(request)
     }
 
-    /// 接听 / 拒接 / 挂断或通话结束后清掉这通电话留下的所有锁屏提醒。
+    /// 只收掉「还在振铃」的那条通知。
+    ///
+    /// 绝不能顺手把未接来电通知一起删：模块把一通未接电话写成一条历史记录
+    /// （`missed == true`、`active == nil`），同一轮轮询里刚补过「未接来电」通知，
+    /// 紧接着的「通话已结束」分支又会调用本方法。此前它连 missed 通知一起删掉，
+    /// 锁屏上就永远留不下未接来电——正是「未接电话的通知无法在锁屏界面保留」的原因。
+    func clearRingNotification(for callID: String) {
+        clear(identifiers: ["djonehub.incoming.\(callID)"])
+    }
+
+    /// 用户已经处理过这通电话（接听 / 拒接 / 主动挂断）后，两条通知都不该再留。
     func clearNotifications(for callID: String) {
-        let identifiers = ["djonehub.incoming.\(callID)", "djonehub.missed.\(callID)"]
+        clear(identifiers: ["djonehub.incoming.\(callID)", "djonehub.missed.\(callID)"])
+    }
+
+    private func clear(identifiers: [String]) {
         let center = UNUserNotificationCenter.current()
         center.removeDeliveredNotifications(withIdentifiers: identifiers)
         center.removePendingNotificationRequests(withIdentifiers: identifiers)
@@ -644,8 +699,9 @@ enum StandbyBackgroundScheduler {
     private static func scheduleRefresh() {
         guard isPermitted(refreshTaskIdentifier) else { return }
         let request = BGAppRefreshTaskRequest(identifier: refreshTaskIdentifier)
-        // earliestBeginDate 只是「不早于」，真实唤醒时机仍由系统按使用习惯决定。
-        request.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60)
+        // earliestBeginDate 只是「不早于」，真实唤醒时机仍由系统按使用习惯决定；
+        // 这里压到 4 分钟，让系统在愿意的时候有更早的补发机会。
+        request.earliestBeginDate = Date(timeIntervalSinceNow: 4 * 60)
         try? BGTaskScheduler.shared.submit(request)
     }
 
@@ -655,7 +711,7 @@ enum StandbyBackgroundScheduler {
         // 需要网络才能把积压的来电/短信补发出去；不强制外接电源，模块本身是 USB 供电。
         request.requiresNetworkConnectivity = true
         request.requiresExternalPower = false
-        request.earliestBeginDate = Date(timeIntervalSinceNow: 5 * 60)
+        request.earliestBeginDate = Date(timeIntervalSinceNow: 2 * 60)
         try? BGTaskScheduler.shared.submit(request)
     }
 

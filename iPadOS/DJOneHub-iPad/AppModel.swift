@@ -176,6 +176,9 @@ final class AppModel: ObservableObject {
     private var nextMessagesRefresh = Date.distantPast
     /// 短信刷新任务：PDU 读取要跑好几条 AT 指令，不能占着 1 秒一次的通话轮询。
     private var messagesRefreshTask: Task<Void, Never>?
+    /// 短信读取串行闸门：PDU 读取要在同一个 AT 口上连发多条指令，
+    /// 前台轮询、后台唤醒补扫、用户手动刷新可能同时打进来，必须串行化。
+    private var messagesRefreshInFlight = false
     private var nextAudioDiagnosticRefresh = Date.distantPast
     private var nextModuleMetadataRefresh = Date.distantPast
     private var audioWarmupCallID: String?
@@ -261,6 +264,9 @@ final class AppModel: ObservableObject {
         Task { await NetworkDiagnosticRecorder.shared.recordLifecycle("active") }
         consecutivePollFailures = 0
         backgroundStandby.setApplicationIsBackground(false)
+        // 只拿到「使用期间」时，每次回到前台都补一次「始终允许」升级申请：
+        // 系统只允许在前台弹这层面板，错过一次就要等下一次进前台。
+        backgroundStandby.requestAlwaysUpgradeIfNeeded()
         guard hasStarted else {
             start()
             return
@@ -433,12 +439,31 @@ final class AppModel: ObservableObject {
             restartCallEventBridge()
             restartPolling()
         }
-        // 后台唤醒给的时间窗很短，先借一段执行时间，跑完一轮轮询与通知再归还。
+        // 后台唤醒给的时间窗很短，先借一段执行时间，再跑通知补发。
         backgroundWakeLease.begin("djonehub.standby")
+        // 唤醒后立刻补一轮通知扫描：不等轮询的下一拍（后台为了省电是 4 秒以上），
+        // 读完短信与通话历史马上投递。BGAppRefresh / 后台处理任务 / 地理围栏 /
+        // 显著位置变化这几种唤醒都只有几十秒窗口，必须先把提醒发出去。
+        await performBackgroundNotificationSweep()
         Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(25))
             self?.backgroundWakeLease.end()
         }
+    }
+
+    /// 后台唤醒专用：一轮「短信 + 未接来电」扫描并立刻投递通知。
+    ///
+    /// 与常规轮询分开，是因为唤醒窗口只有几十秒，必须在这个窗口内把通知发完，
+    /// 不能等轮询节奏。短信读取复用 refreshMessages 的串行闸门，不会和轮询抢 AT 口。
+    func performBackgroundNotificationSweep() async {
+        guard hasStarted else { return }
+        await refreshMessages(silently: true)
+        guard let status = try? await api.callStatus() else { return }
+        let history = await mergeCallHistory(status.history ?? [])
+        if callHistory != history { callHistory = history }
+        // 未接来电只能在这里补：模块把它写成历史记录（missed == true、active == nil），
+        // 永远不经过 activeCall 通路，后台唤醒时必须主动扫一遍。
+        notifyMissedCalls(in: history)
     }
 
     func setBackgroundStandbyEnabled(_ enabled: Bool) {
@@ -494,7 +519,9 @@ final class AppModel: ObservableObject {
         // 用 1 秒一次的 AT 轮询兜底；每一条 AT 指令都会唤醒模块 CPU，这本身就是
         // 模块发热与耗电的主要来源之一。通话中或前台仍然保持 1 秒。
         if !appIsActive, activeCall == nil {
-            return lowPowerModeEnabled ? 8 : 5
+            // 后台轮询同时承担「发现模块侧新来电」的职责，8 秒一拍会让锁屏来电
+            // 晚到十几秒；压到 4 秒（省电模式）后依然远低于前台频率。
+            return lowPowerModeEnabled ? 4 : 3
         }
         // 前台空闲时也放慢：来电 / 新短信由长轮询事件桥与短信刷新单独负责，
         // 不需要每秒一条 AT 状态请求。通话中必须保持 1 秒以跟上状态变化。
@@ -663,7 +690,8 @@ final class AppModel: ObservableObject {
                 await startCallAudioIfReady()
             } else if status.active == nil, let finishedCall = previousCall {
                 // 电话已经结束（含响铃结束变成未接来电）：先收掉锁屏上那条还在响的通知。
-                incomingNotifier.clearNotifications(for: finishedCall.id)
+                // 只收掉振铃通知；若这通已经变成未接来电，那条提醒要留在锁屏上。
+                incomingNotifier.clearRingNotification(for: finishedCall.id)
                 audio.deactivate()
                 await registerAudioHost(false)
                 guard !Task.isCancelled, generation == pollingGeneration else { return }
@@ -720,9 +748,9 @@ final class AppModel: ObservableObject {
             // 读取放在独立任务里异步跑：同一个 AT 端口还承担 1 秒一次的通话轮询，
             // 同步等待会把来电检测拖慢，甚至错过 CallKit 上报窗口。
             let active = appIsActive
-            // 后台把 PDU 全量读取放慢：一次要跑 AT+CMGF/AT+CMGL 好几条指令，
-            // 是常驻 AT 流量里最重的一项；15 秒的接收延迟对后台短信提示可以接受。
-            nextMessagesRefresh = Date().addingTimeInterval(active ? 4 : 15)
+            // 后台也要及时收短信：原来 15 秒一拍，锁屏经常比模块晚十几秒才弹；
+            // 现在压到 6 秒。PDU 读取仍走串行闸门，不会和通话轮询抢 AT 口。
+            nextMessagesRefresh = Date().addingTimeInterval(active ? 4 : 6)
             if messagesRefreshTask == nil {
                 messagesRefreshTask = Task { [weak self] in
                     await self?.refreshMessages(silently: true)
@@ -1102,6 +1130,13 @@ final class AppModel: ObservableObject {
     ///
     /// - Parameter forceModuleScan: 走兜底通道时是否让模块立刻全量读取一次。
     func refreshMessages(silently: Bool = false, forceModuleScan: Bool = true) async {
+        // 同一个 AT 口不能并发跑两轮 PDU 读取：分段会互相插队，收到一半的长短信
+        // 会被当成新消息投递，正是「消息反复裂开 / 通知多条」的放大器。
+        // AppModel 是 @MainActor，这个布尔闸门天然无竞争；重叠调用直接返回，
+        // 由已经在跑的那一轮负责落盘与通知。
+        guard !messagesRefreshInFlight else { return }
+        messagesRefreshInFlight = true
+        defer { messagesRefreshInFlight = false }
         if let fetched = await fetchIncomingMessagesViaPDU() {
             purgeLegacyModuleFragmentsIfNeeded()
             let mergedMessages = await mergeIncomingMessages(fetched.messages)

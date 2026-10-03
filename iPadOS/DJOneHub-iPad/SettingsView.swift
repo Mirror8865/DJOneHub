@@ -249,9 +249,9 @@ struct SettingsView: View {
                             Section(L10n.t(group.title)) {
                                 ForEach(group.sections) { section in
                                     Button {
-                                        withAnimation(.easeInOut(duration: 0.2)) {
-                                            selectedSection = section
-                                        }
+                                        // 选中左侧分区是即时状态：右侧内容直接切换、不做出现动画，
+                                        // 与系统「设置」App 的左侧点选行为一致。
+                                        selectedSection = section
                                     } label: {
                                         SettingsSidebarRow(
                                             section: section,

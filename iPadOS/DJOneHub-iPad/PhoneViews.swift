@@ -561,9 +561,9 @@ struct PhoneEditToggle: View {
 /// 编辑态左侧的圆形复选框：选中为系统蓝实心对勾，未选中为灰色空心圈。
 /// 行本身已经是蓝底时（onHighlight）自动换成白色，避免蓝底上看不见蓝色对勾。
 ///
-/// 不在这里用 `contentTransition(.symbolEffect(.replace))`：`List` 回收单元格时
-/// 符号替换过渡会留下画了一半的圆环（看起来像复选框上方被遮住、显示不全），
-/// 改成固定尺寸 + 弹簧缩放的普通动画，任何情况下都能画完整。
+/// 勾选 / 取消勾选是即时状态，不做任何补间：`List` 回收单元格时，过渡动画会留下
+/// 画了一半的圆环（看起来像复选框被遮住、显示不全）；而且系统「信息 / 通讯录 / 电话」
+/// 的多选勾选本身就是立刻切换、不带动画的。
 struct PhoneSelectionCircle: View {
     let isSelected: Bool
     var onHighlight: Bool = false
@@ -574,8 +574,6 @@ struct PhoneSelectionCircle: View {
             .symbolRenderingMode(.monochrome)
             .foregroundStyle(selectionColor)
             .frame(width: 26, height: 26)
-            .scaleEffect(isSelected ? 1.06 : 1.0)
-            .animation(.spring(response: 0.30, dampingFraction: 0.68), value: isSelected)
             .accessibilityHidden(true)
     }
 
@@ -1103,17 +1101,18 @@ struct CallsView: View {
     }
 
     private func toggleEditing() {
-        withAnimation(.easeInOut(duration: 0.2)) { isEditing.toggle() }
+        // 进入 / 退出编辑是即时状态，不做过渡动画：系统「电话 / 通讯录 / 信息」
+        // 的编辑态切换本身就是瞬间完成。
+        isEditing.toggle()
         if !isEditing { checkedIDs.removeAll() }
     }
 
     private func toggleCheck(_ id: String) {
-        withAnimation(.spring(response: 0.30, dampingFraction: 0.78)) {
-            if checkedIDs.contains(id) {
-                checkedIDs.remove(id)
-            } else {
-                checkedIDs.insert(id)
-            }
+        // 勾选同理：状态直接切换，蓝色复选框立刻出现，不做补间。
+        if checkedIDs.contains(id) {
+            checkedIDs.remove(id)
+        } else {
+            checkedIDs.insert(id)
         }
     }
 
@@ -1130,7 +1129,7 @@ struct CallsView: View {
         model.deleteCalls(ids: ids)
         if let selection, ids.contains(selection) { self.selection = nil }
         checkedIDs.removeAll()
-        withAnimation(.easeInOut(duration: 0.2)) { isEditing = false }
+        isEditing = false
     }
 
     private func dismissKeypad() {
@@ -1655,17 +1654,18 @@ struct ContactsView: View {
     }
 
     private func toggleEditing() {
-        withAnimation(.easeInOut(duration: 0.2)) { isEditing.toggle() }
+        // 进入 / 退出编辑是即时状态，不做过渡动画：系统「电话 / 通讯录 / 信息」
+        // 的编辑态切换本身就是瞬间完成。
+        isEditing.toggle()
         if !isEditing { checkedIDs.removeAll() }
     }
 
     private func toggleCheck(_ id: String) {
-        withAnimation(.spring(response: 0.30, dampingFraction: 0.78)) {
-            if checkedIDs.contains(id) {
-                checkedIDs.remove(id)
-            } else {
-                checkedIDs.insert(id)
-            }
+        // 勾选同理：状态直接切换，蓝色复选框立刻出现，不做补间。
+        if checkedIDs.contains(id) {
+            checkedIDs.remove(id)
+        } else {
+            checkedIDs.insert(id)
         }
     }
 
@@ -1685,7 +1685,7 @@ struct ContactsView: View {
             guard removed else { return }
             if let selection, ids.contains(selection) { self.selection = nil }
             checkedIDs.removeAll()
-            withAnimation(.easeInOut(duration: 0.2)) { isEditing = false }
+            isEditing = false
         }
     }
 
@@ -2263,17 +2263,18 @@ struct MessagesView: View {
     }
 
     private func toggleEditing() {
-        withAnimation(.easeInOut(duration: 0.2)) { isEditing.toggle() }
+        // 进入 / 退出编辑是即时状态，不做过渡动画：系统「电话 / 通讯录 / 信息」
+        // 的编辑态切换本身就是瞬间完成。
+        isEditing.toggle()
         if !isEditing { checkedIDs.removeAll() }
     }
 
     private func toggleCheck(_ id: String) {
-        withAnimation(.spring(response: 0.30, dampingFraction: 0.78)) {
-            if checkedIDs.contains(id) {
-                checkedIDs.remove(id)
-            } else {
-                checkedIDs.insert(id)
-            }
+        // 勾选同理：状态直接切换，蓝色复选框立刻出现，不做补间。
+        if checkedIDs.contains(id) {
+            checkedIDs.remove(id)
+        } else {
+            checkedIDs.insert(id)
         }
     }
 
@@ -2294,7 +2295,7 @@ struct MessagesView: View {
         model.deleteMessages(ids: ids)
         if let selection, checkedIDs.contains(selection) { self.selection = nil }
         checkedIDs.removeAll()
-        withAnimation(.easeInOut(duration: 0.2)) { isEditing = false }
+        isEditing = false
     }
 }
 
@@ -2387,6 +2388,8 @@ struct ChatPane: View {
     @State private var draft = ""
     @State private var showingContactInfo = false
     @State private var showingMoreActions = false
+    /// 会话背景（iOS 26「信息」的会话背景）：气泡的液态玻璃会折射背景内容。
+    @StateObject private var chatBackgrounds = ChatBackgroundStore.shared
 
     private var messages: [SMSMessage] {
         // 一条长短信在模块侧是多条独立记录（发送按 70 个 UCS2 单元切段，
@@ -2406,27 +2409,32 @@ struct ChatPane: View {
         ZStack(alignment: .bottom) {
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(spacing: 4) {
-                        header
-                            .padding(.bottom, 10)
-                        ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
-                            if let separator = timeSeparator(
-                                for: message.timestamp,
-                                previous: index > 0 ? messages[index - 1].timestamp : nil
-                            ) {
-                                Text(separator)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 8)
+                    // 官方 Liquid Glass 规范：同一屏里的多个玻璃视图要放进同一个
+                    // GlassEffectContainer，系统才会一次渲染整组玻璃、并允许相邻气泡融合；
+                    // 逐个裸套 glassEffect 会各自渲一层，观感与性能都不符合规范。
+                    GlassEffectContainer(spacing: 6) {
+                        LazyVStack(spacing: 4) {
+                            header
+                                .padding(.bottom, 10)
+                            ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
+                                if let separator = timeSeparator(
+                                    for: message.timestamp,
+                                    previous: index > 0 ? messages[index - 1].timestamp : nil
+                                ) {
+                                    Text(separator)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 8)
+                                }
+                                // iMessage 规则：同一发件人连续多条时，只有最后一条带小角。
+                                MessageBubble(message: message, hasTail: isLastOfRun(at: index))
                             }
-                            // iMessage 规则：同一发件人连续多条时，只有最后一条带小角。
-                            MessageBubble(message: message, hasTail: isLastOfRun(at: index))
                         }
+                        .padding(.horizontal, 16)
+                        .padding(.top, 12)
+                        .padding(.bottom, 76)
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.top, 12)
-                    .padding(.bottom, 76)
                 }
                 .scrollDismissesKeyboard(.interactively)
                 .onAppear { scrollToLast(proxy, animated: false) }
@@ -2435,7 +2443,7 @@ struct ChatPane: View {
 
             composer
         }
-        .background(Color(uiColor: .systemBackground))
+        .background { conversationBackground }
         .ignoresSafeArea(.keyboard, edges: .bottom)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -2466,6 +2474,25 @@ struct ChatPane: View {
         }
         .navigationDestination(isPresented: $showingContactInfo) {
             ChatContactInfoPanel(handle: handle)
+        }
+    }
+
+    /// 会话背景：设了背景照片就铺满整屏（并压一层极淡的暗化，保证气泡与文字
+    /// 在任何照片上都有足够对比度）；没设就保持系统背景色，与系统「信息」默认会话一致。
+    @ViewBuilder
+    private var conversationBackground: some View {
+        if let image = chatBackgrounds.image(for: handle) {
+            GeometryReader { proxy in
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+                    .clipped()
+                    .overlay(Color.black.opacity(0.16))
+            }
+            .ignoresSafeArea()
+        } else {
+            Color(uiColor: .systemBackground).ignoresSafeArea()
         }
     }
 
@@ -2610,6 +2637,74 @@ struct ChatPane: View {
     }
 }
 
+/// 会话背景图存储：iOS 26「信息」支持给单个会话设置背景照片，气泡的液态玻璃
+/// 会折射背景内容。图片按对端号码存进沙盒，不依赖任何权限，也不会上传。
+final class ChatBackgroundStore: ObservableObject {
+    static let shared = ChatBackgroundStore()
+    /// 背景变更计数：@Published 让正在显示的会话立刻换成新背景。
+    @Published private(set) var revision = 0
+    private var cache: [String: UIImage] = [:]
+
+    private lazy var directory: URL = {
+        let base = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("DJOneHub/ChatBackgrounds", isDirectory: true)
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        return base
+    }()
+
+    func image(for handle: String) -> UIImage? {
+        if let cached = cache[handle] { return cached }
+        guard let data = try? Data(contentsOf: fileURL(for: handle)),
+              let image = UIImage(data: data) else { return nil }
+        cache[handle] = image
+        return image
+    }
+
+    func setImage(_ data: Data?, for handle: String) {
+        let target = fileURL(for: handle)
+        if let data, let image = UIImage(data: data) {
+            // 背景只要铺满一屏：先缩到 2048pt 长边再落盘，避免几 MB 的原图长期占内存。
+            let scaled = image.preparingThumbnail(of: CGSize(width: 2048, height: 2048)) ?? image
+            cache[handle] = scaled
+            try? scaled.jpegData(compressionQuality: 0.9)?.write(to: target, options: .atomic)
+        } else {
+            cache[handle] = nil
+            try? FileManager.default.removeItem(at: target)
+        }
+        revision &+= 1
+    }
+
+    private func fileURL(for handle: String) -> URL {
+        let name = String(handle.map { $0.isLetter || $0.isNumber ? $0 : "_" })
+        return directory.appendingPathComponent(name + ".jpg")
+    }
+}
+
+/// 信息卡里的纯标签行：用于 PhotosPicker 这类必须由系统控件触发的入口，
+/// 排版与 InfoCardRow 完全一致，保证「背景」分段的卡片风格统一。
+private struct InfoCardActionLabel: View {
+    let title: String
+    var systemImage: String? = nil
+    var isDestructive: Bool = false
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(title)
+                .font(.body)
+                .foregroundStyle(isDestructive ? Color(uiColor: .systemRed) : Color.white)
+            Spacer(minLength: 8)
+            if let systemImage {
+                Image(systemName: systemImage)
+                    .foregroundStyle(Color.white.opacity(0.85))
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .contentShape(Rectangle())
+    }
+}
+
 /// 长条液态玻璃胶囊底：iOS 26 用交互式系统 glassEffect，旧系统用系统填充色。
 private struct GlassCapsuleBackground: ViewModifier {
     func body(content: Content) -> some View {
@@ -2653,30 +2748,40 @@ private struct MessageBubbleShape: Shape {
     let isOutgoing: Bool
     let hasTail: Bool
 
+    /// 小角占用的固定槽位。
+    ///
+    /// 关键点：无论这一条有没有小角，槽位都留出来，气泡本体尺寸完全一致。
+    /// 旧实现让带角的那条少 7pt 宽、少 7pt 高，同一段消息里它明显比别的矮一截、
+    /// 文字也被顶高，看起来「不整齐」，与系统「信息」App 的规则不符。
+    // 用计算属性而不是存储属性：存储属性会参与自动合成的 memberwise init，
+    // 把它的访问级别拉成 private，同文件里另一个类型再构造本 Shape 就会编不过。
+    private var tail: CGFloat { 7 }
+    private var corner: CGFloat { 20 }
+
     func path(in rect: CGRect) -> Path {
-        let tail: CGFloat = hasTail ? 7 : 0
-        // 小角占据底部与外角的一小条空间，正文区域相应内缩，保证文字不被角压住。
         let body = CGRect(
             x: rect.minX + (isOutgoing ? 0 : tail),
             y: rect.minY,
             width: rect.width - tail,
-            height: rect.height - tail
+            height: rect.height
         )
-        var path = Path(roundedRect: body, cornerRadius: 20, style: .continuous)
+        var path = Path(roundedRect: body, cornerRadius: corner, style: .continuous)
         guard hasTail else { return path }
 
-        // 从底边靠近角落处向外收成一个尖，再回到外角上方的侧边，形成平滑的小角。
+        // 与系统「信息」一致：发件人的小角落在右下、收件人的落在左下，
+        // 从底边向外交出一个小尖再回到侧边，形成平滑的小角。
+        let sign: CGFloat = isOutgoing ? 1 : -1
+        let outerX = isOutgoing ? body.maxX : body.minX
         var horn = Path()
-        let bottomAnchor = CGPoint(x: isOutgoing ? body.maxX - 13 : body.minX + 13, y: body.maxY - 1)
-        let tip = CGPoint(x: isOutgoing ? body.maxX + tail : body.minX - tail, y: body.maxY + tail)
-        let sideAnchor = CGPoint(x: isOutgoing ? body.maxX - 1 : body.minX + 1, y: body.maxY - 13)
-        let firstControl = CGPoint(x: isOutgoing ? body.maxX + tail * 0.12 : body.minX - tail * 0.12,
-                                   y: body.maxY + tail * 0.55)
-        let secondControl = CGPoint(x: isOutgoing ? body.maxX + tail * 0.92 : body.minX - tail * 0.92,
-                                    y: body.maxY - tail * 0.18)
-        horn.move(to: bottomAnchor)
-        horn.addQuadCurve(to: tip, control: firstControl)
-        horn.addQuadCurve(to: sideAnchor, control: secondControl)
+        horn.move(to: CGPoint(x: outerX - sign * 15, y: body.maxY))
+        horn.addQuadCurve(
+            to: CGPoint(x: outerX + sign * tail, y: body.maxY + tail),
+            control: CGPoint(x: outerX + sign * tail * 0.10, y: body.maxY + tail * 0.45)
+        )
+        horn.addQuadCurve(
+            to: CGPoint(x: outerX, y: body.maxY - 15),
+            control: CGPoint(x: outerX + sign * tail, y: body.maxY - tail * 0.30)
+        )
         horn.closeSubpath()
         path.addPath(horn)
         return path
@@ -2722,6 +2827,9 @@ struct ChatContactInfoPanel: View {
     @State private var blocked = false
     @State private var showingEditor = false
     @State private var showingNewContact = false
+    /// 会话背景选择：PhotosPicker 由用户主动选图，不需要相册权限。
+    @State private var backgroundItem: PhotosPickerItem?
+    @StateObject private var chatBackgrounds = ChatBackgroundStore.shared
 
     private var contact: ContactStore.Contact? { model.contacts.contact(for: handle) }
     private var displayName: String { contact?.name ?? handle }
@@ -2746,8 +2854,7 @@ struct ChatContactInfoPanel: View {
                     if tab == 0 {
                         detailsTab
                     } else {
-                        EmptyStateView(title: L10n.t("暂无共享背景"), systemImage: "photo")
-                            .frame(height: 180)
+                        backgroundTab
                     }
                 }
                 .padding(.horizontal, 20)
@@ -2838,6 +2945,56 @@ struct ChatContactInfoPanel: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 8)
+    }
+
+    /// 「背景」分段：iOS 26「信息」允许给单个会话设置背景照片，液态玻璃气泡会
+    /// 折射背景内容。选图走系统 PhotosPicker，由用户主动选择，不需要相册权限。
+    @ViewBuilder
+    private var backgroundTab: some View {
+        VStack(spacing: 14) {
+            if let image = chatBackgrounds.image(for: handle) {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(height: 220)
+                    .frame(maxWidth: .infinity)
+                    .clipped()
+                    .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+            } else {
+                EmptyStateView(title: L10n.t("暂无共享背景"), systemImage: "photo")
+                    .frame(height: 180)
+            }
+
+            InfoCard {
+                PhotosPicker(selection: $backgroundItem, matching: .images) {
+                    InfoCardActionLabel(
+                        title: chatBackgrounds.image(for: handle) == nil
+                            ? L10n.t("选取背景照片")
+                            : L10n.t("更换背景照片"),
+                        systemImage: "photo.on.rectangle.angled"
+                    )
+                }
+                .buttonStyle(.plain)
+                if chatBackgrounds.image(for: handle) != nil {
+                    InfoCardDivider()
+                    Button {
+                        chatBackgrounds.setImage(nil, for: handle)
+                    } label: {
+                        InfoCardActionLabel(title: L10n.t("移除背景"), isDestructive: true)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .onChange(of: backgroundItem) { item in
+            guard let item else { return }
+            Task { @MainActor in
+                if let data = try? await item.loadTransferable(type: Data.self) {
+                    chatBackgrounds.setImage(data, for: handle)
+                }
+                backgroundItem = nil
+            }
+        }
     }
 
     @ViewBuilder
