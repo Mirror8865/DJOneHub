@@ -130,7 +130,11 @@ struct RootView: View {
 
     private var errorBinding: Binding<Bool> {
         Binding(
-            get: { model.errorMessage?.isEmpty == false },
+            // 引导页（fullScreenCover）没关掉之前绝不弹这个顶层错误弹窗：
+            // SwiftUI 让「正在呈现 fullScreenCover 的视图」再去呈现 alert 时，
+            // 两个呈现会互相打架，协调器卡住后引导页里的按钮会全部点不动。
+            // 引导页期间的错误由 FirstConnectionView 在页内自己显示。
+            get: { firstConnectionComplete && model.errorMessage?.isEmpty == false },
             set: { if !$0 { model.errorMessage = nil } }
         )
     }

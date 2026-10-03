@@ -128,6 +128,8 @@ struct SettingsView: View {
     @State private var voice: VoiceRuntimeStatus?
     @State private var setup: ModuleSetupStatus?
     @State private var usbProfile: USBProfileStatus?
+    /// 连接模式只读一次的标记，避免把 AT+QCFG="usbcfg" 放进状态循环。
+    @State private var usbProfileLoaded = false
     @State private var actionMessage = ""
     @State private var atCommand = "AT+CSQ"
     @State private var atResponse = ""
@@ -352,25 +354,6 @@ struct SettingsView: View {
     /// 状态：系统设置式分组行（LabeledContent），每行一项，不再做两列卡片。
     @ViewBuilder
     private var statusSection: some View {
-        // App 自己修不了的链路状态（模块 DHCP 掉线 / 接口不见）：
-        // 直接告诉用户该怎么做，并提供一键重新检测。
-        if let hint = model.moduleLinkState.recoveryHint {
-            Section {
-                VStack(alignment: .leading, spacing: 6) {
-                    Label(L10n.t("链路需要修复"), systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(Color.orange)
-                        .font(.subheadline.weight(.semibold))
-                    Text(hint)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-                Button {
-                    model.recheckModuleLink()
-                } label: {
-                    Label(L10n.t("重新检测链路"), systemImage: "arrow.clockwise")
-                }
-            }
-        }
         // 模块状态板块顶部的模块实拍图（已去白底，随浅色/深色外观自适应）。
         Section {
             Image("ModuleHero")
@@ -387,12 +370,6 @@ struct SettingsView: View {
             LabeledContent(L10n.t("模块代理")) {
                 Text(model.isOnline ? L10n.t("在线") : L10n.t("离线"))
                     .foregroundStyle(model.isOnline ? Color.green : Color.red)
-            }
-            // USB ECM 物理链路：区分「网卡正常」、「有网卡但没 DHCP
-            // 租约（常见于模块 DHCP 挂掉、只能重启设备才恢复）」与「没有网卡」。
-            LabeledContent(L10n.t("模块链路")) {
-                Text(model.moduleLinkState.displayText)
-                    .foregroundStyle(model.moduleLinkState.isReady ? Color.secondary : Color.orange)
             }
             LabeledContent("App 版本", value: appVersionText)
             LabeledContent("Agent 版本", value: model.agentVersion ?? (model.isOnline ? "读取中" : "--"))
@@ -740,7 +717,6 @@ struct SettingsView: View {
         async let healthRequest = try? model.api.esimHealth()
         async let voiceRequest = try? model.api.voiceRuntimeStatus()
         async let setupRequest = try? model.api.moduleSetupStatus()
-        async let usbProfileRequest = try? model.api.usbProfile()
 
         modem = await modemRequest
         if let current = await trafficRequest {
@@ -758,7 +734,14 @@ struct SettingsView: View {
         esimHealth = await healthRequest
         voice = await voiceRequest
         setup = await setupRequest
-        usbProfile = await usbProfileRequest
+        // 连接模式只在每次进入设置时读一次。模块侧的 `GET /api/usb/profile` 要走
+        // `AT+QCFG="usbcfg"`，与通话 / 短信轮询共用同一条 AT 通道；早先把它放进
+        // 每 2 秒的状态循环，正是「设置页放一会儿模块就掉线、iPad 退回 169.254」
+        // 的元凶（与 v28 修掉的高频探测同一个根因），这里绝不能再跟着循环跑。
+        if !usbProfileLoaded {
+            usbProfileLoaded = true
+            usbProfile = try? await model.api.usbProfile()
+        }
     }
 
     private func updateRates(with current: NetworkTrafficSnapshot) {

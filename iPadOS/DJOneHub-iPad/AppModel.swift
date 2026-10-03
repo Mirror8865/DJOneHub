@@ -119,6 +119,9 @@ final class AppModel: ObservableObject {
     @Published var moduleLinkState: ModuleUSBLinkState = .unknown
     /// 首次接入引导页展示的系统权限状态；回到前台时刷新。
     @Published private(set) var permissionStates: [AppPermission: PermissionState] = [:]
+    /// 权限状态是否已经读过一次；引导页在读到之前不显示「申请」按钮，
+    /// 避免用户点了一个其实已经授权的项却看不到任何反应。
+    @Published private(set) var permissionStatesLoaded = false
     @Published var connectionMessage: String?
     @Published var isBusy = false
     @Published var isMuted = false
@@ -140,6 +143,11 @@ final class AppModel: ObservableObject {
     let smsNotifier = SMSNotifier()
     let liveActivity = LiveActivityController()
 
+    /// 语音桥登记状态：模块侧取消登记会回滚 USB 音频路由（audio_enable=0）。
+    /// 挂断时重复发送取消登记只会让 USB 音频功能反复启停，这里对 false 去重；
+    /// true 始终重发，避免模块重启后漏登记。
+    private var audioHostRegistered = false
+
     /// 保活唤醒期间借用的执行时间租约（见 BackgroundExecutionLease）。
     private let backgroundWakeLease = BackgroundExecutionLease()
     /// 系统可能在 SwiftUI 场景之外把 App 拉起（定位事件 / 后台任务），
@@ -152,7 +160,6 @@ final class AppModel: ObservableObject {
 
     private var pollingTask: Task<Void, Never>?
     private var callEventTask: Task<Void, Never>?
-    private var mobileProfileTask: Task<Void, Never>?
     private var moduleUpdateTask: Task<Void, Never>?
     private var moduleMetadataTask: Task<Void, Never>?
     private var nextModuleUpdateAttempt = Date.distantPast
@@ -164,12 +171,6 @@ final class AppModel: ObservableObject {
     private var nextMessagesRefresh = Date.distantPast
     private var nextAudioDiagnosticRefresh = Date.distantPast
     private var nextModuleMetadataRefresh = Date.distantPast
-    private var nextMobileProfileAttempt = Date.distantPast
-    private var mobileProfileSwitching = false
-    /// 每个 App 生命周期最多自动请求一次「切到 iPad 直连」。切换会重写模块
-    /// USB gadget 并重启模块，iPad 必须重新获取 DHCP 地址，重复请求只会
-    /// 反复重枚举 USB 并让 iPad 掉租约。
-    private var mobileProfileSwitchRequested = false
     private var audioWarmupCallID: String?
     private var lowPowerModeEnabled = true
     private lazy var embeddedAgentVersion: String = {
@@ -299,6 +300,7 @@ final class AppModel: ObservableObject {
         // iOS 没有公开的本地网络授权查询 API；模块一旦连上就说明系统已放行。
         states[.localNetwork] = (isOnline || moduleLinkState.isReady) ? .granted : .notDetermined
         if states != permissionStates { permissionStates = states }
+        permissionStatesLoaded = true
     }
 
     /// 再申请一次指定权限；已被永久拒绝时系统不会再弹窗，UI 会引导用户去系统设置。
@@ -345,13 +347,6 @@ final class AppModel: ObservableObject {
         browser.start(queue: DispatchQueue.global(qos: .utility))
         try? await Task.sleep(for: .seconds(1.5))
         browser.cancel()
-    }
-
-    /// 用户重新插拔模块后手动触发：重建 USB 链路解析并立刻重读链路状态。
-    /// 不会发起 HTTP，也不会改动模块配置。
-    func recheckModuleLink() {
-        api.resetLocalConnectionState()
-        refreshModuleLinkState()
     }
 
     /// 被系统在后台唤醒（显著位置变化 / 后台刷新任务）时恢复保活与轮询。
@@ -408,11 +403,10 @@ final class AppModel: ObservableObject {
                 try? await Task.sleep(for: .seconds(delay))
             }
         }
-        // Mac 完整模式的轻量 Agent 不占用 AT 端口，但探测它在模块侧要走
-        // AT+QCFG="usbcfg"，会与通话/SMS 轮询争抢同一条 AT 通道。因此不再
-        // 常驻高频探测，改由轮询失败路径低频兜底（见 poll 的失败分支）。
-        mobileProfileTask?.cancel()
-        mobileProfileTask = nil
+        // 这里以前会顺带探测模块是否还停在 Mac 组合，从而自动请求切回手机直连。
+        // 那次请求会重写模块 USB gadget（enable=0 → 改 functions → enable=1）并重启
+        // 模块，iPad 侧 en3 随即掉租约退回 169.254.x，而且只有拔插 / 重启设备才能恢复。
+        // 宁可让用户手动在「设置 › 模块设置 › 连接」里切一次，也不能让 App 自动改 gadget。
     }
 
     /// 模块在线时与其 1 秒 AT 轮询对齐；离线后退避，避免断开模块时持续唤醒手机和 USB 栈。
@@ -431,8 +425,6 @@ final class AppModel: ObservableObject {
         pollingTask = nil
         callEventTask?.cancel()
         callEventTask = nil
-        mobileProfileTask?.cancel()
-        mobileProfileTask = nil
         moduleUpdateTask?.cancel()
         moduleUpdateTask = nil
         moduleMetadataTask?.cancel()
@@ -440,7 +432,7 @@ final class AppModel: ObservableObject {
         audio.deactivate()
         backgroundStandby.setEnabled(false)
         Task { await liveActivity.stop() }
-        Task { try? await api.setAudioHostEnabled(false) }
+        Task { await self.registerAudioHost(false) }
     }
 
     /// 事件桥与 AppModel 同生命周期，前后台切换不重复创建长请求。
@@ -582,7 +574,7 @@ final class AppModel: ObservableObject {
                 await startCallAudioIfReady()
             } else if status.active == nil, previousCall != nil {
                 audio.deactivate()
-                try? await api.setAudioHostEnabled(false)
+                await registerAudioHost(false)
                 guard !Task.isCancelled, generation == pollingGeneration else { return }
                 backgroundStandby.resumeAfterCall()
                 isMuted = false
@@ -624,9 +616,6 @@ final class AppModel: ObservableObject {
                 refreshModuleLinkState()
                 // 后台轮询失败只更新离线状态；否则用户关闭弹窗后一秒又会被同一错误轰炸。
                 connectionMessage = moduleLinkState.pollFailureDescription
-                // 链路确实不可用时才低频兜底探测模块是否还停留在 Mac 组合；
-                // 一旦请求切换，上面的提示会被替换成「请拔插」。
-                Task { [weak self] in await self?.attemptAutomaticMobileProfile() }
             }
         }
 
@@ -670,38 +659,21 @@ final class AppModel: ObservableObject {
         )
     }
 
-    /// Mac 模式保留的控制服务只提供健康检查和 USB 模式切换。只有在链路已经
-    /// 连续多次不可用时才低频探测一次，并在确认对方是 Mac 组合时请求切换为
-    /// 手机直连；重枚举期间的连接失败属于预期，不污染离线提示。
+    /// 登记模块语音桥。
     ///
-    /// 这里刻意不做常驻轮询：模块侧的 `GET /api/usb/profile` 要占用 AT 通道，
-    /// 与每一次通话/SMS 轮询争抢；而一旦误判成 Mac 组合就会改写 USB gadget
-    /// （`enable=0` → 改 functions → `enable=1`），iPad 侧网卡随之掉租约并退回
-    /// 169.254.x，App 再也连不上模块（旧行为表现为「用一会儿就失联」）。
-    private func attemptAutomaticMobileProfile() async {
-        // 仅在连续失败、确实连不上模块时兜底；链路正常时一次都不探测。
-        guard appIsActive,
-              !mobileProfileSwitching,
-              !mobileProfileSwitchRequested,
-              consecutivePollFailures >= 3,
-              Date() >= nextMobileProfileAttempt else { return }
-        mobileProfileSwitching = true
-        // 探测本身也要走 AT 通道，失败后保持 20 秒冷却。
-        nextMobileProfileAttempt = Date().addingTimeInterval(20)
-        defer { mobileProfileSwitching = false }
-
-        do {
-            let profile = try await api.usbProfile()
-            guard profile.mode == "mac" else { return }
-            // 请求切换会重写模块 USB gadget 并重启模块，iPad 必须重新获取
-            // DHCP 地址——模块侧也要求切换后重新插拔 USB。所以每个 App 生命
-            // 周期只请求一次，并把「需要拔插」明确写进提示。
-            mobileProfileSwitchRequested = true
-            connectionMessage = "正在切换为 iPad 直连模式；切换后请拔下模块再插回。"
-            _ = try await api.setUSBProfile("mobile")
-        } catch {
-            // USB 重枚举和控制 Agent 冷启动期间无法访问是正常情况。
+    /// 只发「登记」，绝不再发「注销」：模块 Agent 自己在通话结束时
+    /// （检测到 `calls.Active == nil` 后 1.5 秒）就会回滚 UAC 路由。
+    /// 手机再补发一次注销，只会让模块把 `/sys/class/android_usb/f_audio/audio_enable`
+    /// 写成 0 两次；而这次写入会把 USB gadget 整体 deactivate，iPad 侧 en3 随之
+    /// 重新枚举、丢掉 DHCP 租约退回 169.254.x——正是「用一会儿就断连、非要重启
+    /// 设备才能恢复」的根因之一。所以注销只更新本地标记，不产生任何模块写入。
+    private func registerAudioHost(_ enabled: Bool) async {
+        guard enabled else {
+            audioHostRegistered = false
+            return
         }
+        audioHostRegistered = true
+        try? await api.setAudioHostEnabled(true)
     }
 
     func dial() async {
@@ -843,11 +815,12 @@ final class AppModel: ObservableObject {
             guard await audio.requestMicrophonePermission() else {
                 throw ModuleSetupError.notReady("请允许 DJOneHub 使用麦克风后重试")
             }
-            let profile = try await api.usbProfile()
-            if profile.mode == "mac" {
-                _ = try await api.setUSBProfile("mobile")
-                try await waitForModuleAgent()
-            }
+            // 这里以前会自动读一次 usb profile，并在「看起来是 Mac 组合」时 POST 切回手机直连。
+            // 模块侧的 `POST /api/usb/profile` 在手机直连 Agent 下会执行 activateMobileGadget()：
+            // 先写 gadget/enable=0，再重写 functions，最后 enable=1——整条 USB gadget 重新枚举，
+            // iPad 侧 en3 立刻掉 DHCP 租约退回 169.254.x，而且只有拔插 / 重启设备才能恢复。
+            // 连接模式只用于展示；真正需要切回手机直连时，必须由用户在
+            // 「设置 › 模块设置 › 连接」里显式点按，App 任何路径都不再自动改 gadget。
             setupStage = .ready
             UserDefaults.standard.set(true, forKey: "djonehub.first-connection-complete")
         } catch {
@@ -1210,10 +1183,10 @@ final class AppModel: ObservableObject {
         }
         // 模块轮询也会在 active 状态拉起语音桥，但主动发起一次请求可以消除
         // “手机先启动 PCM、模块下一轮轮询才发现”的竞速，减少首次握手等待。
-        try? await api.setAudioHostEnabled(true)
+        await registerAudioHost(true)
         // 请求可能与对端挂断并行完成；过期请求不得在下一通电话前重新拉起语音桥。
         if activeCall?.id != callID || activeCall?.state != "active" {
-            try? await api.setAudioHostEnabled(false)
+            await registerAudioHost(false)
         }
     }
 
@@ -1295,7 +1268,7 @@ extension AppModel: CallKitActionHandling {
         audioWarmupCallID = nil
         guard !callStillActive else { return }
         backgroundStandby.resumeAfterCall()
-        Task { try? await api.setAudioHostEnabled(false) }
+        Task { await self.registerAudioHost(false) }
     }
 
     func callKitProviderDidReset() async {
@@ -1307,7 +1280,7 @@ extension AppModel: CallKitActionHandling {
             // 模块路由保持预热，下一轮轮询只需重建手机侧音频引擎。
             return
         }
-        try? await api.setAudioHostEnabled(false)
+        await registerAudioHost(false)
         backgroundStandby.resumeAfterCall()
     }
 

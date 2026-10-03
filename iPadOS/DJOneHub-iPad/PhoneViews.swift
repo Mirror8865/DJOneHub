@@ -708,12 +708,15 @@ struct PhoneSplitListColumn<Content: View>: View {
 /// 左列宽度由用户拖动中间的分栏手柄调节，并写入同一个 `AppStorage` 键，
 /// 因此四个板块始终共用同一宽度。手柄静止时完全不可见（列表之间没有分割线）。
 ///
-/// 拖动过程中**不改动两列布局**：列表（UICollectionView 承载的 `List`）与
-/// `NavigationStack` 只要宽度每帧变化就会反复重排，两侧内容会抽搐抖动。
-/// 所以这里只在拖动时画一条落位预览色带 + 跟随手指的分割线，
-/// 松手时一次性提交宽度，整个拖动过程只重排一次。
-/// 分栏拖动手势的坐标空间名：手柄本身会跟着手指移动，
-/// 用局部坐标空间会被反复重算，必须挂在一个静止的命名空间上。
+/// 拖动期间两列**实时**跟随手指改宽度，做法遵循 SwiftUI 官方规范：
+/// - 瞬时位移放在 `@GestureState` 里（手势结束由 SwiftUI 自动归零，无需手写清理，
+///   也不会在拖动中反复写 `@State`）；只有松手提交持久宽度时才写 `@Binding`。
+/// - 宽度不取整：整点量化会造成 1pt 跳变，正是「抽搐」的来源。
+/// - 宽度变化这条链路上显式 `.animation(nil, value:)`，把隐式补间关掉，
+///   列表只会随宽度重排，不会被补间来回插值成闪烁。
+/// - 每一行的行高与宽度无关（行内文本 lineLimit + 固定头像尺寸），
+///   所以改宽度只会触发水平重排，不会引起行高变化。
+/// - 手柄本身会跟着手指移动，所以手势坐标必须挂在一个静止的命名空间上。
 private let splitDragCoordinateSpace = "djonehub.split.drag"
 
 struct PhoneSplitContainer<Left: View, Right: View>: View {
@@ -726,45 +729,43 @@ struct PhoneSplitContainer<Left: View, Right: View>: View {
     /// 手柄命中区宽度：比可见指示线宽，便于用手指或触控板抓住。
     private let handleWidth: CGFloat = 20
 
-    /// 拖动位移：只用于绘制悬浮预览层，不参与两列布局。
-    @State private var dragOffset: CGFloat = 0
-    @State private var isDragging = false
+    /// 拖动位移：手势期间实时参与左列布局，手势结束自动归零。
+    @GestureState private var dragOffset: CGFloat = 0
+    /// 是否正在拖动：同样交给手势状态驱动，手势被取消也能自动复位。
+    @GestureState private var isDragging = false
     @State private var isHoveringHandle = false
 
     var body: some View {
         GeometryReader { proxy in
             // 右列至少保留 360pt，窗口变窄时左列自动收紧上限。
             let limit = max(minWidth, min(maxWidth, proxy.size.width - 360))
-            let committed = min(max(CGFloat(leftWidth), minWidth), limit)
-            // 预览位置：只驱动悬浮层。
-            let live = isDragging
-                ? min(max(committed + dragOffset, minWidth), limit)
-                : committed
+            let width = min(max(CGFloat(leftWidth) + dragOffset, minWidth), limit)
             ZStack(alignment: .topLeading) {
-                // 两列宽度在整个拖动过程中保持不变，内容不会反复重排。
                 HStack(spacing: 0) {
                     left
-                        .frame(width: committed)
+                        .frame(width: width, alignment: .leading)
                         .frame(maxHeight: .infinity)
                     right
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                if isDragging, abs(live - committed) > 0.5 {
-                    // 落位预览：半透明色带指示松开后左列会覆盖到的范围。
-                    Rectangle()
-                        .fill(Color(uiColor: .systemBlue).opacity(0.14))
-                        .frame(width: abs(live - committed))
-                        .offset(x: min(committed, live))
-                        .frame(maxHeight: .infinity)
-                        .allowsHitTesting(false)
-                }
-
                 handle(limit: limit)
-                    .offset(x: live - handleWidth / 2)
+                    .offset(x: width - handleWidth / 2)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // 宽度与拖动状态都不做补间：两侧列表的宽度变化必须是逐帧直出的，
+            // 一旦被隐式动画插值，列表重排就会表现为抖动 / 闪烁。
+            .animation(nil, value: width)
+            .animation(nil, value: isDragging)
+            // 拖动期间按官方 transaction 做法把整棵子树的隐式动画全部关掉：
+            // 行内容里只要有一处隐式动画（状态圆点、选中高亮、材质过渡），
+            // 都会在逐帧改宽度时被反复插值成闪一下，这里统一禁掉。
+            .transaction { transaction in
+                if isDragging {
+                    transaction.animation = nil
+                    transaction.disablesAnimations = true
+                }
+            }
         }
         .coordinateSpace(name: splitDragCoordinateSpace)
     }
@@ -786,20 +787,15 @@ struct PhoneSplitContainer<Left: View, Right: View>: View {
         }
         .gesture(
             DragGesture(minimumDistance: 1, coordinateSpace: .named(splitDragCoordinateSpace))
-                .onChanged { value in
-                    if !isDragging { isDragging = true }
-                    dragOffset = value.translation.width
+                .updating($dragOffset) { value, state, _ in
+                    state = value.translation.width
+                }
+                .updating($isDragging) { _, state, _ in
+                    state = true
                 }
                 .onEnded { value in
                     let target = CGFloat(leftWidth) + value.translation.width
-                    let clamped = min(max(target, minWidth), limit)
-                    dragOffset = 0
-                    isDragging = false
-                    // 只在松手时提交一次宽度，并且关掉这次变化的补间，
-                    // 避免列表随宽度变化再做一次重排动画。
-                    var transaction = Transaction()
-                    transaction.disablesAnimations = true
-                    withTransaction(transaction) { leftWidth = Double(clamped) }
+                    leftWidth = Double(min(max(target, minWidth), limit))
                 }
         )
         .accessibilityLabel(L10n.t("调整分栏宽度"))

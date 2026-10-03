@@ -128,6 +128,7 @@ enum L10n {
         "来电显示联系人姓名与头像": "Show contact names and photos",
         "把下面几项一次授权完，来电、短信与保活才能正常工作。": "Grant these up front so calls, messages and keep-alive work.",
         "已允许": "Allowed", "去设置": "Open Settings", "申请": "Allow",
-        "全部申请": "Allow All"
+        "全部申请": "Allow All", "打开系统设置": "Open Settings",
+        "知道了": "Dismiss", "正在等待系统授权…": "Waiting for the system prompt…"
     ]
 }
