@@ -158,24 +158,40 @@ struct DJOneHubAPI: Sendable {
         try await postDecoded("api/at", ["command": command], timeout: timeout)
     }
 
-    /// 读取一个短信存储区的 PDU 列表（`AT+CMGF=0` + `AT+CMGL=4`）。
+    /// 一次请求读完模块 SM/ME 两个存储区的 PDU 原始列表。
     ///
-    /// 模块自己每 8 秒会把短信模式切回文本模式（`AT+CMGF=1`），两次请求之间
-    /// 被它抢先时会返回 ERROR，这里重新固定 PDU 模式后再读一次。
-    /// PDU 里带 UDH，长短信的段序号才能被 App 正确拼接。
-    func pduSMSListing(memory: String) async throws -> [SMSListingEntry] {
-        let select = "AT+CPMS=\"\(memory)\",\"\(memory)\",\"\(memory)\""
-        _ = try await executeAT("AT+CMGF=0")
-        _ = try? await executeAT(select)
-        do {
-            let listing = try await executeAT("AT+CMGL=4", timeout: 20)
-            return SMSDecoder.parseListing(listing.response, memory: memory)
-        } catch {
-            _ = try await executeAT("AT+CMGF=0")
-            _ = try? await executeAT(select)
-            let listing = try await executeAT("AT+CMGL=4", timeout: 20)
-            return SMSDecoder.parseListing(listing.response, memory: memory)
+    /// 「CMGF=0 → CPMS → CMGL=4」整段序列由模块在同一个 AT 临界区里跑完，
+    /// App 不再自己拼这几条 `/api/at` 请求：那样会被模块 8 秒一次的文本模式
+    /// 短信轮询插队，CMGL=4 返回 ERROR，PDU 通道时通时断，长短信就跟着
+    /// 一会儿拼好一会儿裂开。模块侧每次请求都会真的去基带读一轮，所以这里用 GET：
+    /// 传输层只对 GET/HEAD 允许「按接口类型」的兜底重试，USB ECM 刚重枚举、
+    /// 精确接口对象还没解析出来时，POST 会在一次失败后直接放弃，而后台唤醒
+    /// 恰恰最常撞上这种时刻。两个存储区各有一段 15 秒总预算，这里留够两倍余量。
+    func pduListing() async throws -> SMSListingResponse {
+        return try await get("api/sms/pdu", timeout: 40)
+    }
+
+    /// 按「存储区 + 槽位」删除模块短信。
+    ///
+    /// PDU 拼出来的完整短信没有交付 ID，走不了 `/api/sms/ack`；App 用它自己真正
+    /// 消费掉的槽位来确认。模块侧会同时把内存缓存里的同槽位记录摘掉，
+    /// 否则 8 秒文本模式轮询会把已经落盘的旧记录重新排回 `/api/sms`。
+    func deleteSMSRecords(_ slots: [SMSListingEntry]) async throws {
+        guard !slots.isEmpty else { return }
+        let body = SMSDeleteRequest(items: slots.map {
+            SMSDeleteRequest.Item(memory: $0.memory, index: $0.index)
+        })
+        try await post("api/sms/delete", body)
+    }
+
+    /// 删除模块短信的请求体：按「存储区 + 槽位」定位要清掉的记录。
+    private struct SMSDeleteRequest: Encodable {
+        struct Item: Encodable {
+            let memory: String
+            let index: Int
         }
+
+        let items: [Item]
     }
 
     // MARK: eSIM、模块初始化与语音运行时

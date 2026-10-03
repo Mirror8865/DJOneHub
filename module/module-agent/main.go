@@ -21,7 +21,9 @@ import (
 const (
 	// 0.3.21：新增本地来电事件桥，让 iPhone 在模块状态变化时立即唤起 CallKit。
 	// 0.3.22：Agent 日志加 512 KB 上限，避免 15 MB 的 /data 卷被日志写满。
-	agentVersion = "0.3.22"
+	// 0.3.23：短信 PDU 列表改由模块侧一次请求读完（整段 AT 序列独占 AT 口），
+	// App 不再自己拼 CMGF/CPMS/CMGL 三条请求，后台取数只需一个往返。
+	agentVersion = "0.3.24"
 	// 监听所有本机接口以容忍 ECM 地址晚于 init 服务出现；请求层仍只放行 USB 私网与环回。
 	listenAddress = "0.0.0.0:7575"
 	// DATA11 桥与原厂 DATA1 完全分离，禁止重新使用 ql_manager_server 占用的 /dev/smd7。
@@ -46,16 +48,16 @@ type agent struct {
 	// 8 秒轮询的 AT 读取与 ack 存在天然竞态：读取先开始、ack 在读取过程中把同一条
 	// 记录从队列里删掉，读取结束后这条记录又被当成新短信放回队列，手机已经落盘的
 	// 短信就会在 /api/sms 里反复出现。记下已确认的 ID，入队时直接跳过。
-	delivered         map[string]bool
-	smsAuto           bool
-	smsError          string
+	delivered map[string]bool
+	smsAuto   bool
+	smsError  string
 	// 上一次读取静态身份字段（固件串 / ICCID / IMSI / IMEI）的时间。
 	// 这些字段整机运行期间几乎不变，却在每次轮询里占掉大半 AT 指令。
-	modemIdentityAt   time.Time
-	gps               gpsTracker
-	muted             bool
-	isRecording       bool
-	force4GOff        bool
+	modemIdentityAt time.Time
+	gps             gpsTracker
+	muted           bool
+	isRecording     bool
+	force4GOff      bool
 	// 已应用的内核转发策略；避免后台轮询重复写入 procfs。
 	cellularPolicyApplied bool
 	lastApplied4GOff      bool
@@ -208,6 +210,8 @@ func (a *agent) routes(logger *log.Logger) http.Handler {
 	mux.HandleFunc("/api/sms/status", a.smsStatus)
 	mux.HandleFunc("/api/sms/send", a.smsSend)
 	mux.HandleFunc("/api/sms/refresh", a.smsRefresh)
+	mux.HandleFunc("/api/sms/pdu", a.smsPDUListings)
+	mux.HandleFunc("/api/sms/delete", a.smsDelete)
 	mux.HandleFunc("/api/sms/ack", a.smsAck)
 	mux.HandleFunc("/api/sms/settings", a.smsSettings)
 	mux.HandleFunc("/api/sms/clear-module", a.smsClear)

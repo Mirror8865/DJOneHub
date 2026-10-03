@@ -47,9 +47,21 @@ struct RootView: View {
     @State private var pendingSMSRecipient: String?
     /// 系统通话界面正在承载这通电话时，App 不抢回前台显示自己的通话页。
     @State private var inAppCallUISuppressed = false
+    /// 会话壁纸：分栏与单栏都由根视图这一层统一铺满整窗，
+    /// 这样才能连状态栏、顶部导航栏、底部导航栏一起沉浸
+    /// （见 `ChatWallpaperRootLayer`）。
+    @StateObject private var chatBackgrounds = ChatBackgroundStore.shared
 
     var body: some View {
         ZStack {
+            // 会话壁纸铺满整窗（含状态栏 / 顶部导航栏 / 底部导航栏）。
+            // 放在 TabView 之下：分栏时左列会压一层系统材质把它磨砂掉、
+            // 右列透明，于是左右共用同一张图；没选中的会话不铺。
+            // 只在「信息」板块生效：切到其他板块时不能残留会话背景。
+            if selectedTab == .messages, let wallpaper = chatBackgrounds.activeWallpaper {
+                ChatWallpaperRootLayer(image: wallpaper)
+            }
+
             // 沉浸式：内容一直铺到屏幕边缘，顶栏不画不透明底板，
             // 由系统滚动边缘效果在顶端做渐变模糊。
             TabView(selection: selectedTabBinding) {

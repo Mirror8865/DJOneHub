@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -543,5 +544,81 @@ func TestVoiceClientConnectTimeoutAllowsSlowFirstAudioStartup(t *testing.T) {
 	// iOS 首次授权会暂停 App，等待窗口不能退回到容易误杀新设备启动流程的短值。
 	if voiceClientConnectTimeout < 15*time.Second {
 		t.Fatalf("网络 PCM 客户端等待时间=%s，至少需要 15s", voiceClientConnectTimeout)
+	}
+}
+
+func TestParseSMSSlot(t *testing.T) {
+	tests := []struct {
+		slot   string
+		memory string
+		index  int
+		ok     bool
+	}{
+		{"ME-3", "ME", 3, true},
+		{"SM-12", "SM", 12, true},
+		{"XX-1", "", 0, false},
+		{"ME-", "", 0, false},
+		{"-3", "", 0, false},
+		{"ME", "", 0, false},
+		{"ME-ab", "", 0, false},
+	}
+	for _, test := range tests {
+		memory, index, ok := parseSMSSlot(test.slot)
+		if ok != test.ok || memory != test.memory || index != test.index {
+			t.Errorf("parseSMSSlot(%q)=(%q,%d,%v)，期望 (%q,%d,%v)",
+				test.slot, memory, index, ok, test.memory, test.index, test.ok)
+		}
+	}
+}
+
+func TestDropCachedSMSRemovesOnlyDeletedSlotsAndRemembersDelivery(t *testing.T) {
+	a := &agent{messages: []storedSMS{
+		{Index: 3, Memory: "ME", Message: smsMessage{DeliveryID: "ME-3-aa"}},
+		{Index: 4, Memory: "ME", Message: smsMessage{DeliveryID: "ME-4-bb"}},
+		{Index: 1, Memory: "SM", Message: smsMessage{DeliveryID: "SM-1-cc"}},
+	}}
+	a.dropCachedSMS(map[string]bool{"ME-3": true})
+	if len(a.messages) != 2 {
+		t.Fatalf("删除后缓存条数=%d，期望 2：%#v", len(a.messages), a.messages)
+	}
+	for _, item := range a.messages {
+		if item.Memory == "ME" && item.Index == 3 {
+			t.Fatal("被删除的槽位仍在模块缓存里")
+		}
+	}
+	// 记住交付 ID 是为了让 8 秒文本模式轮询不会把同一条旧记录重新排回 /api/sms。
+	if !a.delivered["ME-3-aa"] {
+		t.Fatalf("被删除槽位的交付 ID 没有记入已交付集合：%#v", a.delivered)
+	}
+}
+
+func TestSMSDeleteAcceptsEmptySelectionWithoutTouchingAT(t *testing.T) {
+	a := &agent{started: time.Now()}
+	request := httptest.NewRequest("POST", "/api/sms/delete", strings.NewReader(`{"items":[]}`))
+	request.RemoteAddr = "192.168.225.2:54321"
+	recorder := httptest.NewRecorder()
+	a.routes(testLogger()).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("空删除请求状态码=%d，响应=%s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"deleted":0`) {
+		t.Fatalf("空删除请求响应=%s", recorder.Body.String())
+	}
+}
+
+func TestNewSMSRoutesOnlyAnswerTheirOwnMethod(t *testing.T) {
+	a := &agent{started: time.Now()}
+	cases := []struct{ method, path string }{
+		{"GET", "/api/sms/delete"},
+		{"POST", "/api/sms/pdu"},
+	}
+	for _, test := range cases {
+		request := httptest.NewRequest(test.method, test.path, nil)
+		request.RemoteAddr = "192.168.225.2:54321"
+		recorder := httptest.NewRecorder()
+		a.routes(testLogger()).ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("%s %s 状态码=%d，期望 405", test.method, test.path, recorder.Code)
+		}
 	}
 }

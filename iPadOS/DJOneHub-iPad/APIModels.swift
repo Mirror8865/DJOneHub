@@ -119,6 +119,21 @@ struct SMSListingEntry: Sendable {
     let pdu: [UInt8]
 }
 
+/// 模块侧一次 PDU 读取的返回：每个存储区一段 `AT+CMGL=4` 原始响应。
+///
+/// 「切 PDU 模式 → 选存储区 → 列短信」整段由模块在同一个 AT 临界区里跑完，
+/// App 只发一个请求，中途不会被模块 8 秒一次的文本模式轮询插队。
+struct SMSListingResponse: Decodable, Sendable {
+    struct Memory: Decodable, Sendable {
+        let memory: String
+        /// 该存储区的原始 `+CMGL` 列表；为 nil 时 `error` 给出原因。
+        let listing: String?
+        let error: String?
+    }
+
+    let memories: [Memory]
+}
+
 /// `SMSDecoder.assemble` 的产出：可以放进消息列表的完整短信，
 /// 以及已经被完整消费、可以从模块存储里删掉的原始记录。
 ///

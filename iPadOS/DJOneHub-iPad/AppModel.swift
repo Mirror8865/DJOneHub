@@ -173,9 +173,10 @@ final class AppModel: ObservableObject {
     private var pollingGeneration = 0
     private var hasStarted = false
     private var consecutivePollFailures = 0
-    /// Last time the cached USB interface objects were invalidated; see resumeForBackgroundWake.
-    private var lastLocalConnectionReset = Date.distantPast
     private var nextMessagesRefresh = Date.distantPast
+    /// 最近一次短信刷新是否失败。只用于设置页的保活状态文案：
+    /// 「扫了但没有新短信」与「链路/模块取数失败」是两回事，必须能一眼分开。
+    private var lastMessageRefreshFailed = false
     /// 短信刷新任务：PDU 读取要跑好几条 AT 指令，不能占着 1 秒一次的通话轮询。
     private var messagesRefreshTask: Task<Void, Never>?
     /// 短信读取串行闸门：PDU 读取要在同一个 AT 口上连发多条指令，
@@ -465,18 +466,17 @@ final class AppModel: ObservableObject {
         } else {
             let hadFailures = consecutivePollFailures > 0
             consecutivePollFailures = 0
-            // Invalidate the cached USB interface objects only when the link actually
-            // failed, or when they have not been rebuilt for a while. A reset drops the
-            // already resolved interface, so every later request degrades to the
-            // interface-type fallback until NWPathMonitor delivers a fresh path.
-            // Background wakes arrive every 15 seconds, and invalidating on each one kept
-            // the module requests pinned to that fallback path: the background fetch got
-            // nothing back, so no notification was ever posted.
-            let resetNow = Date()
-            if hadFailures || resetNow.timeIntervalSince(lastLocalConnectionReset) > 90 {
+            // 只在**确实取数失败过**的时候丢掉缓存的 USB 网卡对象。后台里
+            // NWPathMonitor 不一定来得及送出新的路径，一旦把已经解析好的接口丢掉，
+            // 后续请求会一直落在「按接口类型」的兜底路径上，后台取数全部落空——
+            // 表现就是「进程活着、定位心跳在走，但通知一直不弹」。
+            // 定时无条件重建（旧行为）正是把后台保活拖垮的那一半。
+            if hadFailures {
                 api.resetLocalConnectionState()
-                lastLocalConnectionReset = resetNow
             }
+            // 链路没就绪时顺手把恢复流程拉起来（续租 DHCP + 重新解析网卡），
+            // 否则要等用户回到前台才会重新拿到 192.168.225.x。
+            refreshModuleLinkState()
             restartCallEventBridge()
             restartPolling()
         }
@@ -492,32 +492,34 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// One background wake: a single cheap SMS list GET plus a call status GET, then
-    /// post whatever reminders are still missing.
+    /// 一次后台唤醒：一个短信请求 + 一个通话状态请求，然后把还欠着的提醒发出去。
     ///
-    /// Deliberately not the PDU/AT assembly path. That one has to run three or four AT
-    /// commands in a row on a single AT port while the module itself flips the SMS mode
-    /// back to text every 8 seconds, so in the background it fails often and falls back
-    /// to the text-mode cache, which has no UDH and returns one long SMS as several
-    /// records. A reminder only needs the fact that a new SMS exists, and one GET is the
-    /// cheapest, most reliable way to learn it. It touches no AT port and never writes
-    /// the lossy text-mode records into local history.
+    /// 短信走模块侧一次读完的 PDU 列表（`/api/sms/refresh`）：整段 AT 序列在模块的
+    /// 同一个临界区里跑完，App 只花一个往返，后台那几十秒窗口里最容易成事；
+    /// 拼好的完整短信走的还是前台同一套通知逻辑。旧版把这几条指令拆成好几次
+    /// `/api/at`，被模块 8 秒文本模式轮询插队后经常整段失败，提醒就一直拖到
+    /// 用户打开 App 才补上——「进程活着、心跳在走，但锁屏不弹通知」正是这么来的。
     func performBackgroundNotificationSweep() async {
         guard hasStarted else { return }
-        // The reminder path that was verified working in the field: run the real SMS
-        // refresh. It asks the module to pull new messages out of the modem
-        // (api.refreshSMS), assembles long SMS through the PDU channel and posts the
-        // reminders through the same handler the foreground uses. The later "light"
-        // wake only read the module list and never triggered that fetch, so a
-        // background wake saw nothing new and every reminder waited until the app was
-        // opened again.
-        // `refreshMessages` returns how many reminders it actually posted, so the
-        // settings status line can tell "the wake ran and found nothing" apart from
-        // "the wake ran and delivered".
+        // `refreshMessages` 返回它真正投递了几条提醒；失败原因记在
+        // lastMessageRefreshFailed，设置页据此把「扫了但没有新短信」与
+        // 「链路/模块取数失败」分开显示。
         var posted = await refreshMessages(silently: true)
-        var suffix = ""
-        // A missed call only ever shows up as a history record (missed == true,
-        // active == nil), so it never travels through the activeCall path.
+        var suffix = lastMessageRefreshFailed ? " \u{00B7} \u{53D6}\u{6570}\u{5931}\u{8D25}" : ""
+        // 第二通道：PDU 一条新短信都没取到时，再读一次模块的文本模式缓存。
+        // 两条通道读的是同一个基带存储，但解码路径不同；只要任何一条看到了
+        // 新短信，锁屏提醒就不能漏——后台唤醒只有几十秒窗口，漏一次就要等
+        // 用户打开 App 才补上，那正是「锁屏收不到通知」的最终表现。
+        // 只有后台补发走这里：前台每 4~6 秒刷一次，多花一个请求不值得。
+        if posted == 0 {
+            if let cached = await postNotificationsFromModuleCache() {
+                posted = cached
+            } else {
+                suffix += " \u{00B7} \u{7F13}\u{5B58}\u{53D6}\u{6570}\u{5931}\u{8D25}"
+            }
+        }
+        // 未接来电只出现在通话历史里（missed == true、active == nil），
+        // 不会走 activeCall 那条路，所以这里补一次通话历史。
         if let status = try? await api.callStatus() {
             let history = await mergeCallHistory(status.history ?? [])
             if callHistory != history { callHistory = history }
@@ -525,44 +527,21 @@ final class AppModel: ObservableObject {
         } else {
             suffix += " \u{00B7} \u{6765}\u{7535}\u{53D6}\u{6570}\u{5931}\u{8D25}"
         }
-        // Second chance: the module list can still hold a message the refresh above did
-        // not deliver (a transient AT or link failure while backgrounded). Post it
-        // directly; the shared seenIncomingSMSIDs set keeps this from double announcing.
-        var fetched: [SMSMessage]?
-        var fetchFailed = false
-        for attempt in 0..<2 {
-            do {
-                fetched = try await api.messages()
-                break
-            } catch {
-                fetchFailed = true
-                if attempt == 0 { try? await Task.sleep(for: .seconds(1.5)) }
-            }
-        }
-        if let remote = fetched {
-            let incoming = joiningFragments(remote.filter { !$0.isOutgoing })
-            let smsNotificationsEnabled =
-                UserDefaults.standard.object(forKey: smsNotificationKey) as? Bool ?? true
-            let fresh = incoming.filter { !seenIncomingSMSIDs.contains($0.id) }
-            let grouped = coalescedForNotification(fresh)
-            if smsNotificationsEnabled {
-                for message in grouped where !isViewingConversation(message.sender) {
-                    smsNotifier.post(
-                        message: message,
-                        displayName: contacts.displayName(for: message.sender)
-                    )
-                    posted += 1
-                }
-            }
-            rememberNotifiedSMS(incoming)
-            rememberNotifiedSMS(grouped)
-        } else if fetchFailed {
-            suffix += " \u{00B7} \u{53D6}\u{6570}\u{5931}\u{8D25}"
-        }
         let summary = posted > 0
             ? "\u{65B0}\u{77ED}\u{4FE1} \(posted)" + suffix
             : "\u{5DF2}\u{626B}\u{63CF}\u{00B7}\u{65E0}\u{65B0}\u{77ED}\u{4FE1}" + suffix
         recordBackgroundSweep(summary)
+    }
+
+    /// 后台补发的第二通道：模块文本模式列表（`/api/sms`）。
+    ///
+    /// PDU 通道没取到新短信时再确认一次。返回投递的提醒条数；读取失败返回 nil，
+    /// 设置页据此把「两条通道都读了、确实没有新短信」与「缓存通道取数失败」分开。
+    private func postNotificationsFromModuleCache() async -> Int? {
+        guard let remoteMessages = try? await api.messages() else { return nil }
+        let mergedMessages = mergeDisplayOnly(remoteMessages)
+        if messages != mergedMessages { messages = mergedMessages }
+        return handleIncomingSMSNotifications(mergedMessages)
     }
 
     /// Store what the last background sweep managed to do. The settings status line shows
@@ -1240,13 +1219,14 @@ final class AppModel: ObservableObject {
 
     /// 刷新短信列表。
     ///
-    /// 主通道是 `/api/at` 的 PDU 读取：只有 PDU 里的 UDH 才带长短信的参考号与
-    /// 段序号，能拼出顺序正确、不再分裂的完整短信。模块的 `/api/sms` 走文本模式，
-    /// UDH 已被基带丢掉，只作为 AT 忙或模块未就绪时的兜底。
-    ///
-    /// - Parameter forceModuleScan: 走兜底通道时是否让模块立刻全量读取一次。
+    /// 主通道是模块侧一次读完的 PDU 列表（`/api/sms/refresh`）：只有 PDU 里的 UDH
+    /// 才带长短信的参考号与段序号，能拼出顺序正确、不再分裂的完整短信；整段
+    /// AT 序列由模块在同一个 AT 临界区里跑完，App 不再自己拼好几条 `/api/at` 请求
+    /// ——那样会被 8 秒文本模式轮询插队，PDU 通道时通时断，长短信跟着一会儿拼好
+    /// 一会儿裂开。模块的 `/api/sms` 走文本模式、UDH 已被基带丢掉，只作为链路或
+    /// 模块未就绪时的兜底。
     @discardableResult
-    func refreshMessages(silently: Bool = false, forceModuleScan: Bool = true) async -> Int {
+    func refreshMessages(silently: Bool = false) async -> Int {
         // 同一个 AT 口不能并发跑两轮 PDU 读取：分段会互相插队，收到一半的长短信
         // 会被当成新消息投递，正是「消息反复裂开 / 通知多条」的放大器。
         // AppModel 是 @MainActor，这个布尔闸门天然无竞争；重叠调用直接返回，
@@ -1263,46 +1243,53 @@ final class AppModel: ObservableObject {
             fetched = await fetchIncomingMessagesViaPDU()
         }
         if let fetched = fetched {
+            lastMessageRefreshFailed = false
             purgeLegacyModuleFragmentsIfNeeded()
             let mergedMessages = await mergeIncomingMessages(fetched.messages)
             if messages != mergedMessages { messages = mergedMessages }
             if !silently { errorMessage = nil }
             let posted = handleIncomingSMSNotifications(mergedMessages)
-            await acknowledgeDeliveredRecords(moduleIDs: fetched.moduleIDs, consumed: fetched.consumed)
+            await acknowledgeDeliveredRecords(consumed: fetched.consumed)
             return posted
         }
         do {
-            if forceModuleScan { try await api.refreshSMS() }
             let remoteMessages = try await api.messages()
             let mergedMessages = mergeDisplayOnly(remoteMessages)
             if messages != mergedMessages { messages = mergedMessages }
             if !silently { errorMessage = nil }
+            lastMessageRefreshFailed = false
             return handleIncomingSMSNotifications(mergedMessages)
         } catch {
+            lastMessageRefreshFailed = true
             if !silently { errorMessage = error.localizedDescription }
             return 0
         }
     }
 
-    /// 通过 `/api/at` 的 PDU 模式读取 SM/ME 两个存储区，并按 UDH 拼回完整短信。
+    /// 让模块一次读完 SM/ME 两个存储区的 PDU 列表，再按 UDH 拼回完整短信。
     ///
-    /// 返回 nil 表示 PDU 通道当前不可用（AT 被占、模块没就绪），调用方退回模块缓存列表。
-    /// `moduleIDs` 是本次读取**之前**模块已缓存的交付 ID：只确认这些，
-    /// 读取期间新到的短信留到下一轮，绝不会被误删。
-    private func fetchIncomingMessagesViaPDU() async -> (messages: [SMSMessage], consumed: [SMSListingEntry], moduleIDs: [String])? {
-        let moduleIDs = ((try? await api.messages()) ?? []).compactMap(\.deliveryID)
-        var entries: [SMSListingEntry] = []
+    /// 返回 nil 表示 PDU 通道当前不可用（模块没就绪 / 链路断了），调用方退回文本模式缓存。
+    /// 读取动作在模块侧的一个 AT 临界区里完成，App 只发一个请求：后台唤醒只有几十秒
+    /// 窗口，往返越少、越不容易被系统的挂起和 AT 口竞争打断。
+    private func fetchIncomingMessagesViaPDU() async -> (messages: [SMSMessage], consumed: [SMSListingEntry])? {
+        let payload: SMSListingResponse
         do {
-            for memory in ["SM", "ME"] {
-                entries += try await api.pduSMSListing(memory: memory)
-            }
+            payload = try await api.pduListing()
         } catch {
             return nil
         }
-        // 只把已经收齐的短信交出去，同时只确认这些短信对应的模块记录：
+        var entries: [SMSListingEntry] = []
+        for memory in payload.memories {
+            guard let listing = memory.listing, memory.error == nil else { continue }
+            entries += SMSDecoder.parseListing(listing, memory: memory.memory)
+        }
+        // 只有两个存储区都没读成功才算通道不可用。「读到了但里面确实没有短信」必须
+        // 正常返回空结果，否则每一轮都会白白退回文本模式缓存，长短信在那里是碎的。
+        guard payload.memories.contains(where: { $0.listing != nil }) else { return nil }
+        // 只把已经收齐的短信交出去，同时只确认这些短信对应的模块槽位：
         // 还没收齐的长短信分段必须留在模块存储里，否则永远拼不完整。
         let assembly = SMSDecoder.assemble(entries)
-        return (assembly.messages, assembly.consumed, moduleIDs)
+        return (assembly.messages, assembly.consumed)
     }
 
     /// Merge the PDU-assembled complete SMS into local history; anything the user
@@ -1343,31 +1330,17 @@ final class AppModel: ObservableObject {
     }
 
     /// 本机已落盘后让模块清掉对应记录，SIM/ME 存储区不会被历史短信塞满。
-    private func acknowledgeDeliveredRecords(moduleIDs: [String], consumed: [SMSListingEntry]) async {
-        // Only the slots this round really assembled into a delivered message may be
-        // deleted. The module delivery id is shaped `<memory>-<slot>-<digest>`, so match
-        // on the slot: while a long SMS is still arriving, the slots it already occupies
-        // belong to no delivered message yet, and removing them takes away the leading
-        // segments the remaining parts need in order to be joined at all. That deletion
-        // is what turned one long SMS into two partial bubbles with scrambled order.
-        let consumedSlots = Set(consumed.map { "\($0.memory)-\($0.index)" })
-        let acknowledged = moduleIDs.filter { id in
-            let parts = id.split(separator: "-")
-            guard parts.count >= 2 else { return false }
-            return consumedSlots.contains("\(parts[0])-\(parts[1])")
-        }
-        if !acknowledged.isEmpty {
-            do {
-                try await api.acknowledgeMessages(ids: acknowledged)
-                return
-            } catch {
-                // 模块确认失败（记录可能已被清掉）时继续走本地兜底删除。
-            }
-        }
+    ///
+    /// 只删这一轮真正拼成完整短信的那些槽位：分段还没收齐的长短信，它已经占住的
+    /// 槽位不属于任何已交付消息，删掉就等于把先到的段扔掉，剩下几段永远拼不起来
+    /// ——那正是「一条长短信裂成两个半截气泡」的来源。PDU 拼出来的完整短信没有
+    /// 交付 ID，所以这里直接按「存储区 + 槽位」删，不再走 /api/sms/ack。
+    private func acknowledgeDeliveredRecords(consumed: [SMSListingEntry]) async {
         guard !consumed.isEmpty else { return }
-        for (memory, items) in Dictionary(grouping: consumed, by: \.memory) {
-            _ = try? await api.executeAT("AT+CPMS=\"\(memory)\",\"\(memory)\",\"\(memory)\"")
-            for item in items { _ = try? await api.executeAT("AT+CMGD=\(item.index)") }
+        do {
+            try await api.deleteSMSRecords(consumed)
+        } catch {
+            // 删除失败只影响模块存储占用，不影响本机历史；下一轮还会再确认一次。
         }
     }
 

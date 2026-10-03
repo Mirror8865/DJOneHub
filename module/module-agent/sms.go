@@ -107,6 +107,10 @@ func (a *agent) readAllSMS() ([]storedSMS, error) {
 		}
 		result = append(result, parseTextModeSMS(response, memory)...)
 	}
+	// 字符集是基带的全局状态：读完后必须切回 GSM。
+	// 留在 UCS2 上会让后续的文本类 AT 响应（例如运营商名 AT+COPS?）
+	// 以 UCS2 十六进制返回，界面就会显示成乱码。
+	_, _ = a.at.command(`AT+CSCS="GSM"`, 3*time.Second)
 	if len(result) == 0 && len(failures) == 2 {
 		return nil, fmt.Errorf("读取短信失败: %s", strings.Join(failures, "; "))
 	}
@@ -231,6 +235,76 @@ func parseSMSTimestamp(value string) (time.Time, bool) {
 	return time.Date(2000+numbers[0], time.Month(numbers[1]), numbers[2], numbers[3], numbers[4], numbers[5], 0, zone), true
 }
 
+// smsMemoryListing 一个存储区的 PDU 原始列表；Listing 为空时 Error 给出原因。
+type smsMemoryListing struct {
+	Memory  string `json:"memory"`
+	Listing string `json:"listing,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+// readPDUListing 在一个 AT 临界区里读完一个存储区的 PDU 列表。
+//
+// 只有 PDU 通道还留着 UDH：长短信的参考号 / 总段数 / 段序号全靠它，而文本模式
+// （CMGF=1 + CMGL="ALL"）基带已经把 UDH 丢掉，一条长短信会碎成多条记录。
+// 「切模式 + 选存储区 + 列短信」必须整段独占 AT 口，见 atPort.commandBatch：
+// 这三步以前是三条 /api/at 请求，8 秒文本模式轮询会在中间把模式切回去，
+// CMGL=4 于是返回 ERROR，PDU 通道时通时断，长短信就跟着一会儿拼好一会儿裂开。
+func (a *agent) readPDUListing(memory string) (string, error) {
+	commands := []string{
+		"AT+CMGF=0",
+		fmt.Sprintf(`AT+CPMS="%s","%s","%s"`, memory, memory, memory),
+		"AT+CMGL=4",
+	}
+	// 15 秒是整段序列（CMGF + CPMS + CMGL）的总预算，正常情况两秒内就返回；
+	// 卡住时也不至于把 App 的请求拖过超时。
+	responses, err := a.at.commandBatch(commands, 15*time.Second)
+	if err != nil {
+		return "", err
+	}
+	if len(responses) < len(commands) {
+		return "", fmt.Errorf("读取 %s 存储区短信失败", memory)
+	}
+	return responses[len(commands)-1], nil
+}
+
+// collectPDUListings 汇总 SM / ME 两个存储区的 PDU 列表；单个存储区失败不影响另一个。
+func (a *agent) collectPDUListings() ([]smsMemoryListing, error) {
+	memories := []string{"SM", "ME"}
+	listings := make([]smsMemoryListing, 0, len(memories))
+	failures := make([]string, 0, len(memories))
+	for _, memory := range memories {
+		listing, err := a.readPDUListing(memory)
+		if err != nil {
+			listings = append(listings, smsMemoryListing{Memory: memory, Error: err.Error()})
+			failures = append(failures, memory+": "+err.Error())
+			continue
+		}
+		listings = append(listings, smsMemoryListing{Memory: memory, Listing: listing})
+	}
+	if len(failures) == len(memories) {
+		return nil, fmt.Errorf("读取短信 PDU 列表失败: %s", strings.Join(failures, "; "))
+	}
+	return listings, nil
+}
+
+// smsPDUListings 一次请求给出两个存储区的 PDU 原始列表，由 App 侧按 UDH 拼接长短信。
+//
+// 整段读取在模块侧完成，App 不再自己拼 AT 序列，后台被系统唤醒时取数只花一个请求。
+func (a *agent) smsPDUListings(response http.ResponseWriter, request *http.Request) {
+	if !requireMethod(response, request, http.MethodGet) {
+		return
+	}
+	listings, err := a.collectPDUListings()
+	if err != nil {
+		writeError(response, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(response, http.StatusOK, map[string]any{
+		"at":       time.Now().UTC().Format(time.RFC3339),
+		"memories": listings,
+	})
+}
+
 func (a *agent) smsList(response http.ResponseWriter, request *http.Request) {
 	if !requireMethod(response, request, http.MethodGet) {
 		return
@@ -305,15 +379,18 @@ func (a *agent) smsRefresh(response http.ResponseWriter, request *http.Request) 
 	if !requireMethod(response, request, http.MethodPost) {
 		return
 	}
-	a.refreshSMS()
-	a.mu.RLock()
-	lastError, count := a.smsError, len(a.messages)
-	a.mu.RUnlock()
-	if lastError != "" {
-		writeError(response, http.StatusBadGateway, lastError)
+	// 后台保活只有几十秒执行窗口：一次请求同时做「逼模块把新短信读出来」和
+	// 「把能拼接的 PDU 交给 App」两件事，比原先「POST 刷新文本模式缓存 + GET 列表」
+	// 少一半往返。文本模式缓存里没有 UDH，长短信在那里永远是碎的。
+	listings, err := a.collectPDUListings()
+	if err != nil {
+		writeError(response, http.StatusBadGateway, err.Error())
 		return
 	}
-	writeJSON(response, http.StatusAccepted, map[string]any{"accepted": true, "count": count})
+	writeJSON(response, http.StatusOK, map[string]any{
+		"at":       time.Now().UTC().Format(time.RFC3339),
+		"memories": listings,
+	})
 }
 
 // smsAck 在手机确认本地 JSON 已原子写入后，才删除对应的 SIM/ME 短信和内存交付项。
@@ -378,15 +455,115 @@ func (a *agent) smsAck(response http.ResponseWriter, request *http.Request) {
 	writeJSON(response, http.StatusOK, map[string]int{"acknowledged": len(succeeded)})
 }
 
-func (a *agent) deleteStoredSMS(item storedSMS) error {
-	if item.Memory != "SM" && item.Memory != "ME" {
-		return fmt.Errorf("未知短信存储区 %q", item.Memory)
+// smsDelete 按「存储区 + 槽位」删除模块短信。
+//
+// PDU 拼接出来的完整短信没有交付 ID，App 无法走 /api/sms/ack；它知道自己消费掉的
+// 是哪些槽位，这里就直接按槽位删。同时把模块内存缓存里对应的记录一并摘掉，
+// 否则 8 秒文本模式轮询会把已经落盘的旧记录重新排回 /api/sms。
+func (a *agent) smsDelete(response http.ResponseWriter, request *http.Request) {
+	if !requireMethod(response, request, http.MethodPost) {
+		return
 	}
-	if _, err := a.at.command(fmt.Sprintf(`AT+CPMS="%s","%s","%s"`, item.Memory, item.Memory, item.Memory), 5*time.Second); err != nil {
-		return err
+	var body struct {
+		Items []struct {
+			Memory string `json:"memory"`
+			Index  int    `json:"index"`
+		} `json:"items"`
 	}
-	_, err := a.at.command(fmt.Sprintf("AT+CMGD=%d", item.Index), 5*time.Second)
+	if !decodeJSON(response, request, &body) {
+		return
+	}
+	requested := make(map[string]bool, len(body.Items))
+	for _, item := range body.Items {
+		if item.Memory != "SM" && item.Memory != "ME" {
+			writeError(response, http.StatusBadRequest, fmt.Sprintf("未知短信存储区 %q", item.Memory))
+			return
+		}
+		requested[fmt.Sprintf("%s-%d", item.Memory, item.Index)] = true
+	}
+	if len(requested) == 0 {
+		writeJSON(response, http.StatusOK, map[string]int{"deleted": 0})
+		return
+	}
+
+	var failures []string
+	for slot := range requested {
+		memory, index, ok := parseSMSSlot(slot)
+		if !ok {
+			failures = append(failures, slot+": 槽位号无效")
+			continue
+		}
+		if err := a.deleteSlot(memory, index); err != nil {
+			failures = append(failures, slot+": "+err.Error())
+		}
+	}
+
+	a.dropCachedSMS(requested)
+
+	deleted := len(requested) - len(failures)
+	if len(failures) > 0 {
+		writeError(response, http.StatusBadGateway,
+			fmt.Sprintf("删除模块短信失败（成功 %d 条）: %s", deleted, strings.Join(failures, "; ")))
+		return
+	}
+	writeJSON(response, http.StatusOK, map[string]int{"deleted": deleted})
+}
+
+// parseSMSSlot 把 `存储区-槽位号` 形式的槽位标识拆成两部分。
+func parseSMSSlot(slot string) (memory string, index int, ok bool) {
+	separator := strings.LastIndex(slot, "-")
+	if separator <= 0 {
+		return "", 0, false
+	}
+	index, err := strconv.Atoi(slot[separator+1:])
+	if err != nil {
+		return "", 0, false
+	}
+	memory = slot[:separator]
+	if memory != "SM" && memory != "ME" {
+		return "", 0, false
+	}
+	return memory, index, true
+}
+
+// dropCachedSMS 把已删除的槽位从模块内存列表里摘掉，并记住它们的交付 ID。
+// 不这么做的话，8 秒文本模式轮询会把同一条已经落盘的旧记录重新排回 /api/sms。
+func (a *agent) dropCachedSMS(slots map[string]bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	remaining := a.messages[:0]
+	for _, item := range a.messages {
+		if slots[fmt.Sprintf("%s-%d", item.Memory, item.Index)] {
+			if item.Message.DeliveryID != "" {
+				if a.delivered == nil {
+					a.delivered = make(map[string]bool)
+				}
+				a.delivered[item.Message.DeliveryID] = true
+			}
+			continue
+		}
+		remaining = append(remaining, item)
+	}
+	a.messages = remaining
+	if len(a.delivered) > maxDeliveredSMSIDs {
+		a.delivered = make(map[string]bool)
+	}
+}
+
+// deleteSlot 删除一条存储记录，并在同一个 AT 临界区里先选定存储区。
+func (a *agent) deleteSlot(memory string, index int) error {
+	if memory != "SM" && memory != "ME" {
+		return fmt.Errorf("未知短信存储区 %q", memory)
+	}
+	_, err := a.at.commandBatch([]string{
+		fmt.Sprintf(`AT+CPMS="%s","%s","%s"`, memory, memory, memory),
+		fmt.Sprintf("AT+CMGD=%d", index),
+	}, 12*time.Second)
 	return err
+}
+
+func (a *agent) deleteStoredSMS(item storedSMS) error {
+	return a.deleteSlot(item.Memory, item.Index)
 }
 
 func (a *agent) smsSettings(response http.ResponseWriter, request *http.Request) {

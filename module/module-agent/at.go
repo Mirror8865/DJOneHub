@@ -52,6 +52,41 @@ func (p *atPort) close() error {
 func (p *atPort) command(command string, timeout time.Duration) (string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.commandLocked(command, timeout)
+}
+
+// commandBatch 在同一个临界区里按顺序执行多条 AT 指令。
+//
+// 短信模式（AT+CMGF）与当前存储区（AT+CPMS）都是基带的全局状态：一条依赖前一条
+// 结果的指令序列，如果中途被别的调用插进来，后面几条就会在错误的模式下执行。
+// App 侧原来把「CMGF=0 → CPMS → CMGL=4」拆成三条 /api/at 请求，8 秒短信轮询会在
+// 中间把模式切回文本模式，PDU 的 CMGL=4 于是返回 ERROR——PDU 通道时通时断，
+// 长短信一会儿拼好一会儿裂开。整段序列必须独占 AT 口。
+//
+// timeout 是**整段序列**的总预算：单条指令只分到剩余时间，卡住的指令不会
+// 把整段拖到 HTTP 层超时。返回已经成功执行完的响应；中途失败时错误里带上
+// 失败的那条指令。
+func (p *atPort) commandBatch(commands []string, timeout time.Duration) ([]string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	deadline := time.Now().Add(timeout)
+	responses := make([]string, 0, len(commands))
+	for _, command := range commands {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return responses, fmt.Errorf("执行 %q 超时：整段 AT 序列已超出总时限 %s", command, timeout)
+		}
+		response, err := p.commandLocked(command, remaining)
+		if err != nil {
+			return responses, fmt.Errorf("执行 %q 失败: %w", command, err)
+		}
+		responses = append(responses, response)
+	}
+	return responses, nil
+}
+
+// commandLocked 与 command 行为一致，但要求调用方已经持有 p.mu。
+func (p *atPort) commandLocked(command string, timeout time.Duration) (string, error) {
 	if err := p.open(); err != nil {
 		return "", err
 	}
