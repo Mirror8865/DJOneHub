@@ -2412,7 +2412,7 @@ struct ChatPane: View {
                     // 官方 Liquid Glass 规范：同一屏里的多个玻璃视图要放进同一个
                     // GlassEffectContainer，系统才会一次渲染整组玻璃、并允许相邻气泡融合；
                     // 逐个裸套 glassEffect 会各自渲一层，观感与性能都不符合规范。
-                    GlassEffectContainer(spacing: 6) {
+                    BubbleGlassContainer {
                         LazyVStack(spacing: 4) {
                             header
                                 .padding(.bottom, 10)
@@ -2785,6 +2785,21 @@ private struct MessageBubbleShape: Shape {
         horn.closeSubpath()
         path.addPath(horn)
         return path
+    }
+}
+
+/// 气泡组容器：iOS 26 用官方 `GlassEffectContainer`，让整组玻璃一次渲染，
+/// 相邻气泡可以互相融合；旧的系统没有这个容器，直接原样返回（气泡回退成实心底）。
+/// 本 App 最低支持 iOS 16.1，所以必须做可用性分支，不能直接写 GlassEffectContainer。
+private struct BubbleGlassContainer<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        if #available(iOS 26.0, *) {
+            GlassEffectContainer(spacing: 6) { content }
+        } else {
+            content
+        }
     }
 }
 
