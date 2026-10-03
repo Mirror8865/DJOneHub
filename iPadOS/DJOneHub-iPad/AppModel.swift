@@ -283,6 +283,11 @@ final class AppModel: ObservableObject {
         captureSMSSnapshot()
         // 用户可能在系统设置里改过权限，回到前台重读一次。
         Task { await refreshPermissionStates() }
+        // 系统「联系人 / 电话」里换过的头像要立刻同步进 App（详情页背景铺的就是它）：
+        // 每次回到前台重读一次通讯录；未授权时直接跳过，不弹任何错误。
+        if contacts.isAuthorized {
+            Task { await contacts.requestAccessAndLoad() }
+        }
         // 休眠期间 USB ECM 可能重枚举。先取消旧请求并清空接口缓存，再创建全新的轮询与事件连接。
         api.resetLocalConnectionState()
         restartCallEventBridge()

@@ -271,6 +271,8 @@ struct SettingsView: View {
                     .scrollContentBackground(.hidden)
                     .tint(Color(uiColor: .systemBlue))
                     .scrollDismissesKeyboard(.interactively)
+                    // 左侧分区点选必须"点下即亮"：整棵列表子树关掉补间。
+                    .transaction { transaction in transaction.disablesAnimations = true }
                 }
                 // 左栏比右栏深一档（systemGray5）：浅色 #E5E5EA、深色 #2C2C2E，
                 // 与另外三个板块的左列完全同一套底色。
@@ -293,6 +295,9 @@ struct SettingsView: View {
                 .scrollContentBackground(.hidden)
                 .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // 右侧分区随左栏切换：`Form` 默认会把内容增删渲染成一段出现动画，
+                // 这里整棵子树关掉补间，改成点选即时切换。
+                .transaction { transaction in transaction.disablesAnimations = true }
             }
             // 点选即时生效：左侧高亮与右侧分区内容都直接切换，不做过渡动画。
             .animation(nil, value: selectedSection)
