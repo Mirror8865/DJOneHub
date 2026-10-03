@@ -742,20 +742,38 @@ struct SettingsView: View {
     // MARK: - 状态刷新
 
     private func runStatusLoop() async {
+        var tick = 0
         while !Task.isCancelled,
               SettingsRefreshPolicy.shouldRefresh(appIsActive: scenePhase == .active) {
-            await refreshAll()
+            await refreshFast()
+            // 信号 / 运营商 / eSIM / 语音 / 策略这些界面上几秒才看一次，
+            // 原来全跟着 2 秒节拍跑，等于让模块一直开着 AT 与 sysfs；
+            // 这里把它们降到 6 秒一拍，界面观感几乎无差别。
+            if tick % 3 == 0 { await refreshSlow() }
+            tick &+= 1
             try? await Task.sleep(for: .seconds(2))
         }
     }
 
-    private func refreshAll() async {
-        // 轮询开始时记录版本；请求返回时若用户已修改策略，则该回包已过期。
-        let policyRevisionAtRequest = cellularPolicyRevision
+    /// 2 秒一拍：只有「本机链路 + 流量速率」这类零成本刷新；
+    /// 传感器详情弹层打开时附带功率读取，让人盯着的数字仍然实时变化。
+    private func refreshFast() async {
         // 每次刷新都顺手重读本机链路状态，不依赖下一次轮询。
         model.refreshModuleLinkState()
+        if let current = try? await model.api.networkTraffic() {
+            updateRates(with: current)
+            traffic = current
+        }
+        if showingPowerDetails, let power = try? await model.api.systemPower() {
+            systemPower = power
+        }
+    }
+
+    /// 6 秒一拍：模块侧其余接口，仍然在同一拍里并发发出，不会一个接一个串行拖慢。
+    private func refreshSlow() async {
+        // 轮询开始时记录版本；请求返回时若用户已修改策略，则该回包已过期。
+        let policyRevisionAtRequest = cellularPolicyRevision
         async let modemRequest = try? model.api.modemStatus()
-        async let trafficRequest = try? model.api.networkTraffic()
         async let powerRequest = try? model.api.systemPower()
         async let policyRequest = try? model.api.cellularPolicy()
         async let gpsRequest = try? model.api.gpsStatus()
@@ -765,10 +783,6 @@ struct SettingsView: View {
         async let setupRequest = try? model.api.moduleSetupStatus()
 
         modem = await modemRequest
-        if let current = await trafficRequest {
-            updateRates(with: current)
-            traffic = current
-        }
         systemPower = await powerRequest
         if let policy = await policyRequest,
            policyRevisionAtRequest == cellularPolicyRevision,
@@ -788,6 +802,12 @@ struct SettingsView: View {
             usbProfileLoaded = true
             usbProfile = try? await model.api.usbProfile()
         }
+    }
+
+    /// 用户刚做完一个动作（点刷新、改 eSIM、切策略）时整块重读一次，不干等 6 秒慢拍。
+    private func refreshAll() async {
+        await refreshFast()
+        await refreshSlow()
     }
 
     private func updateRates(with current: NetworkTrafficSnapshot) {

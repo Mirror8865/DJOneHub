@@ -739,8 +739,20 @@ final class AppModel: ObservableObject {
             == PhoneTab.settings.rawValue
     }
 
+    /// 周期性模块元数据（信号 / 版本 / sysfs 功率）是否有可能被看到。
+    /// iPad 上实时活动是空操作，用户又没停在设置页时，这一整套请求不会改变任何界面。
+    private var periodicMetadataIsObservable: Bool {
+        if settingsTabIsVisible { return true }
+        guard UIDevice.current.userInterfaceIdiom == .phone else { return false }
+        return UserDefaults.standard.object(forKey: liveActivityKey) as? Bool ?? true
+    }
+
     /// 蜂窝状态和版本不必跟随每秒通话轮询；独立刷新避免慢 AT 状态接口拖住来电检测。
     private func scheduleModuleMetadataRefresh(generation: Int) {
+        // 没人能看到这些数据时干脆不排期：不然每 15 / 60 秒都会唤醒一次模块 CPU
+        // 去跑 AT 与整棵 sysfs 读取，换来的只是几个没人显示的 @Published 赋值。
+        // 不写 nextModuleMetadataRefresh，用户切到设置页后下一拍立刻就会补上。
+        guard periodicMetadataIsObservable else { return }
         guard moduleMetadataTask == nil, Date() >= nextModuleMetadataRefresh else { return }
         // 这一路要读蜂窝状态、版本和整块 sysfs 功率/温度（模块侧最重的周期性 IO）。
         // 它只在设置页被看到，放慢到 15/60 秒对界面没有可感知影响，
