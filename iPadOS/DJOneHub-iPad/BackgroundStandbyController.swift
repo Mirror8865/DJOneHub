@@ -257,7 +257,16 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
                 backgroundBeat = ""
             }
             let modernChannel = liveUpdatesActive ? " · 官方定位流已连接" : " · 官方定位流重连中"
-            return "保活运行中（\(beat)\(backgroundBeat)\(modernChannel) · 状态栏无指示）"
+            let wakeCount = UserDefaults.standard.integer(forKey: "djonehub.standby.wake-count")
+            let wakeAge: String
+            if let lastWake = UserDefaults.standard.object(
+                forKey: "djonehub.standby.last-wake"
+            ) as? Date {
+                wakeAge = "\(max(0, Int(Date().timeIntervalSince(lastWake) / 60))) 分钟前"
+            } else {
+                wakeAge = "尚未"
+            }
+            return "保活运行中（\(beat)\(backgroundBeat)\(modernChannel) · 后台唤醒 \(wakeCount) 次（\(wakeAge)） · 状态栏无指示）"
         case .authorizedWhenInUse:
             // 只拿到「使用期间」时系统会优先回收进程，保活随时可能失效，
             // 所以这里明确提示去升级授权。
@@ -699,6 +708,13 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
         // 窗口越长，来电 / 短信从「模块已收到」到「锁屏弹提醒」的延迟就越大。
         guard Date().timeIntervalSince(lastBackgroundWake) > 15 else { return }
         lastBackgroundWake = Date()
+        // 后台唤醒次数与最近一次时间落盘：设置页把它显示出来，
+        // 一眼就能区分「进程没被唤醒」（保活断了）与「唤醒了但取不到数据」（模块链路断了）。
+        UserDefaults.standard.set(lastBackgroundWake, forKey: "djonehub.standby.last-wake")
+        UserDefaults.standard.set(
+            UserDefaults.standard.integer(forKey: "djonehub.standby.wake-count") + 1,
+            forKey: "djonehub.standby.wake-count"
+        )
         Task { @MainActor in
             await AppModel.shared?.resumeForBackgroundWake()
         }

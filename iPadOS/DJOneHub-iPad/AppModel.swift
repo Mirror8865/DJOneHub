@@ -513,8 +513,11 @@ final class AppModel: ObservableObject {
         // 重新开始轮询（含从后台回到前台）时立刻补一次短信同步与一次模块全量扫描，
         // 不让用户回到 App 还要等上一轮的间隔走完才看到新短信。
         nextMessagesRefresh = .distantPast
-        messagesRefreshTask?.cancel()
-        messagesRefreshTask = nil
+        // 这里**不能**取消正在跑的短信刷新。后台唤醒会频繁重建轮询，
+        // 取消一次半途的 PDU 读取会让它退回模块的文本模式缓存（UDH 被基带丢掉），
+        // 一条长短信立刻被拆成多条、内容顺序也乱——那正是长短信反复裂开的放大器。
+        // `refreshMessages` 自己有 in-flight 闸门：上一轮没跑完时新的一轮直接返回，
+        // 不需要外部取消，也绝不该打断一次「模块正在逐条吐出分段」的读取。
         pollingTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.poll(generation: generation)
@@ -1156,7 +1159,15 @@ final class AppModel: ObservableObject {
         guard !messagesRefreshInFlight else { return }
         messagesRefreshInFlight = true
         defer { messagesRefreshInFlight = false }
-        if let fetched = await fetchIncomingMessagesViaPDU() {
+        var fetched = await fetchIncomingMessagesViaPDU()
+        if fetched == nil {
+            // 单次失败多半只是 AT 口正忙（通话轮询、模块刚切模式）。
+            // PDU 是唯一带 UDH 的通道，值得立刻重试一次再考虑兜底，
+            // 否则一次忙就会退回会把长短信拆开的文本模式缓存。
+            try? await Task.sleep(for: .milliseconds(250))
+            fetched = await fetchIncomingMessagesViaPDU()
+        }
+        if let fetched = fetched {
             purgeLegacyModuleFragmentsIfNeeded()
             let mergedMessages = await mergeIncomingMessages(fetched.messages)
             if messages != mergedMessages { messages = mergedMessages }

@@ -190,21 +190,27 @@ enum SMSDecoder {
     /// 现在段数不齐的分组先压住不交付（它的分段也不会被删），收齐后再一次给出。
     static func assemble(_ entries: [SMSListingEntry], now: Date = Date()) -> SMSAssembly {
         // 记住每条记录在入参里的下标，用来回传「可以删除」的模块记录。
-        var groups: [String: [(offset: Int, delivery: SMSDecodedDelivery)]] = [:]
-        var singles: [(offset: Int, delivery: SMSDecodedDelivery)] = []
+        var groups: [String: [(offset: Int, index: Int, delivery: SMSDecodedDelivery)]] = [:]
+        var singles: [(offset: Int, index: Int, delivery: SMSDecodedDelivery)] = []
         for (offset, entry) in entries.enumerated() {
             guard let delivery = decode(entry.pdu) else { continue }
             if let reference = delivery.reference, let total = delivery.total, delivery.sequence != nil {
-                groups["\(delivery.sender)|\(reference)|\(total)", default: []].append((offset, delivery))
+                groups["\(delivery.sender)|\(reference)|\(total)", default: []]
+                    .append((offset, entry.index, delivery))
             } else {
-                singles.append((offset, delivery))
+                singles.append((offset, entry.index, delivery))
             }
         }
 
         var deliveries: [SMSDecodedDelivery] = []
         var consumedOffsets: [Int] = []
         for parts in groups.values {
-            let ordered = parts.sorted { ($0.delivery.sequence ?? 0) < ($1.delivery.sequence ?? 0) }
+            let ordered = parts.sorted { lhs, rhs in
+                let left = lhs.delivery.sequence ?? 0
+                let right = rhs.delivery.sequence ?? 0
+                if left != right { return left < right }
+                return lhs.index < rhs.index
+            }
             guard let last = ordered.last else { continue }
             let total = last.delivery.total ?? ordered.count
             let present = Set(ordered.compactMap(\.delivery.sequence))
@@ -224,9 +230,12 @@ enum SMSDecoder {
             consumedOffsets += ordered.map(\.offset)
         }
 
-        let rejoined = rejoinUnsegmented(singles.map(\.delivery), now: now)
+        let rejoined = rejoinUnsegmented(
+            singles.map { (delivery: $0.delivery, index: $0.index) },
+            now: now
+        )
         deliveries += rejoined.deliveries
-        consumedOffsets += rejoined.consumedOffsets.map { singles[$0].offset }
+        consumedOffsets += rejoined.consumedPositions.map { singles[$0].offset }
 
         let messages = deliveries
             .sorted { $0.timestamp < $1.timestamp }
@@ -347,20 +356,36 @@ enum SMSDecoder {
     /// 重聚结果：可交付的记录，以及**已经完整消费、可以从模块删除**的入参下标。
     struct UnsegmentedRejoin {
         let deliveries: [SMSDecodedDelivery]
-        let consumedOffsets: [Int]
+        /// 已完整消费的入参**下标**（调用方据此把模块记录删掉）。
+        let consumedPositions: [Int]
     }
 
-    static func rejoinUnsegmented(_ singles: [SMSDecodedDelivery], now: Date = Date()) -> UnsegmentedRejoin {
+    /// - Parameter index: 该记录在模块存储区里的槽位号，用来给段序兜底。
+    ///   段序只能靠「到达顺序」推：模块发送长短信时不写 UDH，各段的 SCTS
+    ///   往往完全相同，只按时间戳排序时 Swift 的 `sorted` 并不稳定，段序会
+    ///   随每次刷新变化——那正是「同一条长短信时而一条、时而多条，内容顺序
+    ///   还被打乱」的根因。槽位号随到达顺序递增，是可靠的决胜键。
+    static func rejoinUnsegmented(
+        _ singles: [(delivery: SMSDecodedDelivery, index: Int)],
+        now: Date = Date()
+    ) -> UnsegmentedRejoin {
         // 带上下标分组，才能把「已完整消费」的位置回传给调用方去删模块副本。
-        var grouped: [String: [(offset: Int, delivery: SMSDecodedDelivery)]] = [:]
-        for (offset, delivery) in singles.enumerated() {
-            grouped[delivery.sender, default: []].append((offset, delivery))
+        var grouped: [String: [(position: Int, delivery: SMSDecodedDelivery, index: Int)]] = [:]
+        for (position, item) in singles.enumerated() {
+            grouped[item.delivery.sender, default: []]
+                .append((position, item.delivery, item.index))
         }
 
         var result: [SMSDecodedDelivery] = []
         var consumed: [Int] = []
         for list in grouped.values {
-            let ordered = list.sorted { $0.delivery.timestamp < $1.delivery.timestamp }
+            let ordered = list.sorted { lhs, rhs in
+                if lhs.delivery.timestamp != rhs.delivery.timestamp {
+                    return lhs.delivery.timestamp < rhs.delivery.timestamp
+                }
+                if lhs.index != rhs.index { return lhs.index < rhs.index }
+                return lhs.position < rhs.position
+            }
             var cursor = 0
             while cursor < ordered.count {
                 var run = [ordered[cursor]]
@@ -385,7 +410,7 @@ enum SMSDecoder {
                             sequence: nil
                         )
                     )
-                    consumed += run.map(\.offset)
+                    consumed += run.map(\.position)
                     continue
                 }
 
@@ -397,10 +422,10 @@ enum SMSDecoder {
                     continue
                 }
                 result.append(last.delivery)
-                consumed.append(last.offset)
+                consumed.append(last.position)
             }
         }
-        return UnsegmentedRejoin(deliveries: result, consumedOffsets: consumed)
+        return UnsegmentedRejoin(deliveries: result, consumedPositions: consumed)
     }
 
     /// 解出地址字段；TON=5 是字母数字（GSM 7 位打包）发件人，其余按 BCD 数字处理。
