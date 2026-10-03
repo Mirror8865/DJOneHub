@@ -252,7 +252,7 @@ struct SettingsView: View {
                                     Button {
                                         // 选中左侧分区是即时状态：右侧内容直接切换、不做出现动画，
                                         // 与系统「设置」App 的左侧点选行为一致。
-                                        selectedSection = section
+                                        withoutAnimations { selectedSection = section }
                                     } label: {
                                         SettingsSidebarRow(
                                             section: section,
@@ -294,6 +294,8 @@ struct SettingsView: View {
                 .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            // 点选即时生效：左侧高亮与右侧分区内容都直接切换，不做过渡动画。
+            .animation(nil, value: selectedSection)
             .navigationTitle(L10n.t("设置"))
             .navigationBarTitleDisplayMode(.inline)
             .immersiveBars()
@@ -457,7 +459,7 @@ struct SettingsView: View {
                 .onChange(of: backgroundStandbyEnabled) { enabled in
                     model.setBackgroundStandbyEnabled(enabled)
                 }
-            Toggle(L10n.t("定位持续保活"), isOn: $standbyLocationEnabled)
+            Toggle(L10n.t("定位保活（状态栏无指示）"), isOn: $standbyLocationEnabled)
                 .tint(Color(uiColor: .systemGreen))
                 .onChange(of: standbyLocationEnabled) { enabled in
                     model.setStandbyLocationEnabled(enabled)
@@ -473,7 +475,7 @@ struct SettingsView: View {
         } header: {
             Text(L10n.t("后台与保活"))
         } footer: {
-            Text("不使用静音音频后台播放。开启后并授权“始终允许”定位，App 就能在后台与锁屏时继续收发通知，并登记显著位置变化监控与后台刷新任务；进程被系统回收时，系统会用这两条通道把它重新拉起并补发遗漏的来电与短信通知。“定位持续保活”关闭后不再跑持续定位（状态栏不再常驻定位指示），仅保留系统唤醒通道，提醒可能延迟到下一次系统唤醒。若你在应用切换器里手动上滑杀掉 App，iOS 会暂停这些调度，需要重新打开 App 才能恢复。")
+            Text("不使用静音音频后台播放。开启后并授权“始终允许”定位，App 就能在后台与锁屏时继续收发通知，并登记显著位置变化监控与后台刷新任务；进程被系统回收时，系统会用这几条通道把它重新拉起并补发遗漏的来电与短信通知。状态栏不会再出现常驻的“定位服务”指示：App 不创建系统后台定位会话，也不显示后台定位指示条。“定位持续保活”关闭后不再跑持续定位，只保留系统唤醒通道，提醒可能延迟到下一次系统唤醒。若你在应用切换器里手动上滑杀掉 App，iOS 会暂停这些调度，需要重新打开 App 才能恢复。")
         }
         Section {
             Toggle("短信通知", isOn: $smsNotificationsEnabled)

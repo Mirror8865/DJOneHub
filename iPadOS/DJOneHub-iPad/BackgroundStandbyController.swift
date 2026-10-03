@@ -140,6 +140,11 @@ final class DJOneHubNotificationDelegate: NSObject, UIApplicationDelegate, UNUse
 ///
 /// 定位精度降到公里级、只当作「进程存活心跳」使用：不读取坐标、不上传、不落盘，
 /// 借的是系统对定位类 App 的后台调度能力，而不是位置本身。
+///
+/// 状态栏指示：全程把 `showsBackgroundLocationIndicator` 设为 `false`，并且**不**创建
+/// `CLBackgroundActivitySession`。那个会话会让系统在状态栏常驻「定位服务」指示，
+/// 而且这个指示由系统强制展示、App 无法关闭（v38 之前正是它在点亮图标）。
+/// 后台复活改由显著位置变化 / 访问事件 / 地理围栏 / 后台刷新任务四条系统通道承担。
 @MainActor
 final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
     private let manager = CLLocationManager()
@@ -156,14 +161,10 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
     private var monitoredRegion: CLCircularRegion?
     /// 后台唤醒去重时间戳：定位回调很密集，避免每一次回调都重建轮询。
     private var lastBackgroundWake = Date.distantPast
-    /// iOS 17+ 的后台活动会话。持续定位必须由一个「后台活动」承载：会话名下的
-    /// 定位回调在切后台、锁屏、甚至进程被系统回收后再拉起时都会继续投递，
-    /// 这是官方给「必须长期在后台运行」的 App 提供的标准通道。
-    /// 用 `Any?` 保存是因为它要求 iOS 17，而本 App 最低支持 16.1。
-    private var backgroundActivitySession: Any?
-    /// 「定位持续保活」开关。开启时用持续定位把进程留在运行态（最可靠，但系统会在
-    /// 状态栏常驻定位指示）；关闭后不再跑持续定位，只留显著位置变化 / 访问 / 地理围栏 /
-    /// 后台任务这四条系统唤醒通道（状态栏干净，代价是提醒可能延迟到下一次系统唤醒）。
+    /// 「定位持续保活」开关。开启时用持续定位把进程留在运行态（最可靠）；
+    /// 关闭后不再跑持续定位，只留显著位置变化 / 访问 / 地理围栏 /
+    /// 后台任务这四条系统唤醒通道（更省电，代价是提醒可能延迟到下一次系统唤醒）。
+    /// 两种模式下状态栏都不会出现常驻定位指示。
     private var locationHeartbeatEnabled = true
 
     /// 是否授予了「始终允许」；只有它才能让定位更新在后台持续投递。
@@ -185,8 +186,8 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
         case .authorizedAlways:
             return heartbeatActive ? "保活运行中（后台与锁屏有效）" : "正在启动"
         case .authorizedWhenInUse:
-            // 配合后台活动会话仍能收到后台定位回调，但没有「始终允许」时
-            // 系统会优先回收进程，所以这里明确提示去升级授权。
+            // 只拿到「使用期间」时系统会优先回收进程，保活随时可能失效，
+            // 所以这里明确提示去升级授权。
             return heartbeatActive
                 ? "保活运行中；建议在“设置 › 隐私与安全性 › 定位”里改为“始终允许”"
                 : "需要在“设置 › 隐私与安全性 › 定位”里改为“始终允许”"
@@ -219,11 +220,9 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
     func setLocationHeartbeatEnabled(_ enabled: Bool) {
         locationHeartbeatEnabled = enabled
         if enabled {
-            startBackgroundActivitySession()
             startIfAuthorized()
         } else {
             stopHeartbeat()
-            stopBackgroundActivitySession()
         }
     }
 
@@ -232,10 +231,6 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
         if enabled {
             // 权限弹窗必须在前台出现，用户才能看到并授权；随后由进入后台触发心跳。
             requestAuthorizationIfNeeded()
-            // 后台活动会话必须在 App 仍在前台时创建，系统才会把它登记成
-            // 「允许在后台持续运行」的定位会话。关闭定位保活时整条定位链路都不启动，
-            // 状态栏也就不会出现常驻指示。
-            if locationHeartbeatEnabled { startBackgroundActivitySession() }
             // 三条「被回收后仍能拉起进程」的通道全部登记：显著位置变化、访问事件、地理围栏。
             startSignificantChangeMonitoring()
             startVisitMonitoring()
@@ -245,7 +240,6 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
             restartTask?.cancel()
             restartTask = nil
             stopHeartbeat()
-            stopBackgroundActivitySession()
             stopSignificantChangeMonitoring()
             stopVisitMonitoring()
             stopRegionMonitoring()
@@ -331,27 +325,11 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
     /// 只拿到「使用期间」时再补一次「始终允许」申请。
     ///
     /// 系统只允许在前台弹这层升级面板，所以每次回到前台都补申请一次；
-    /// 升到「始终允许」后，后台定位不再依赖蓝色指示条会话，进程最不容易被回收。
+    /// 升到「始终允许」后，后台唤醒通道与持续定位都能生效，进程最不容易被回收。
     func requestAlwaysUpgradeIfNeeded() {
         guard enabled else { return }
         if manager.authorizationStatus == .authorizedWhenInUse {
             manager.requestAlwaysAuthorization()
-        }
-    }
-
-    /// 建立后台活动会话（官方 iOS 17+ API，必须在前台创建）。
-    private func startBackgroundActivitySession() {
-        guard backgroundActivitySession == nil else { return }
-        if #available(iOS 17.0, *) {
-            backgroundActivitySession = CLBackgroundActivitySession()
-        }
-    }
-
-    private func stopBackgroundActivitySession() {
-        guard let session = backgroundActivitySession else { return }
-        backgroundActivitySession = nil
-        if #available(iOS 17.0, *), let typed = session as? CLBackgroundActivitySession {
-            typed.invalidate()
         }
     }
 

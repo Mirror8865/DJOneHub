@@ -625,6 +625,18 @@ func mergedSelectionIsLast(_ index: Int, ids: [String], checked: Set<String>) ->
     index == ids.count - 1 || !checked.contains(ids[index + 1])
 }
 
+/// 侧栏点选是**即时**状态：选中高亮与右侧内容都直接切换，不做任何过渡动画。
+///
+/// 系统「电话 / 联系人 / 信息 / 设置」的侧栏点选本身都没有过渡；
+/// SwiftUI 的 `Button` / `List` 会带一段自己的默认动画，把「立刻变蓝」
+/// 渲染成一段渐变。这里用显式 transaction 把整棵子树的补间关掉。
+@inline(__always)
+func withoutAnimations(_ body: () -> Void) {
+    var transaction = Transaction()
+    transaction.disablesAnimations = true
+    withTransaction(transaction, body)
+}
+
 /// 搜索框底：iOS 26 两端纯圆的交互式液态玻璃胶囊；旧系统回退系统填充色胶囊。
 struct GlassSearchFieldBackground: ViewModifier {
     func body(content: Content) -> some View {
@@ -690,25 +702,89 @@ struct GlassAvatar: View {
 
 /// 分栏版式左列：系统灰底（列表区），与系统 App 的双栏左列一致。
 struct PhoneSplitListColumn<Content: View>: View {
-    var isTranslucent: Bool = false
+    /// 会话自定义壁纸：设了就用它做左列底板（先模糊，再叠系统材质）。
+    var wallpaper: UIImage? = nil
+    var wallpaperCanvas: CGSize = .zero
+    var wallpaperOriginX: CGFloat = 0
     @ViewBuilder var content: Content
 
     var body: some View {
         VStack(spacing: 0) { content }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background {
-                if isTranslucent {
-                    // 会话自定义背景：左列叠系统材质做满模糊，
-                    // 透出外层铺满整窗的背景图（与系统「信息」一致）。
-                    Rectangle()
-                        .fill(.ultraThinMaterial)
-                        .ignoresSafeArea()
-                } else {
-                    // 左列比右列更深一档（systemGray5：浅色 #E5E5EA / 深色 #2C2C2E），
-                    // 与右列的系统白 / 纯黑形成系统设置 App 那种层次。
-                    Color(uiColor: .systemGray5).ignoresSafeArea()
+                ZStack {
+                    if let wallpaper {
+                        PhoneWallpaperBackdrop(
+                            image: wallpaper,
+                            canvas: wallpaperCanvas,
+                            originX: wallpaperOriginX,
+                            blurRadius: 24
+                        )
+                    }
+                    if wallpaper != nil {
+                        // 左侧列表的液态玻璃底板：系统材质叠在模糊壁纸上，
+                        // 列表滚动时内容从材质里透出来（与系统「信息」侧栏一致）。
+                        Rectangle()
+                            .fill(.ultraThinMaterial)
+                            .ignoresSafeArea()
+                    } else {
+                        // 左列比右列更深一档（systemGray5：浅色 #E5E5EA / 深色 #2C2C2E），
+                        // 与右列的系统白 / 纯黑形成系统设置 App 那种层次。
+                        Color(uiColor: .systemGray5).ignoresSafeArea()
+                    }
                 }
             }
+    }
+}
+
+/// 四个板块共用的分栏尺寸。
+///
+/// 抽成常量是为了让「会话壁纸」也能用同一套规则算出左列宽度：
+/// 壁纸必须知道右列在窗口里的起点，才能让左右两列显示同一张图的连续裁切。
+enum PhoneSplitLayout {
+    static let minWidth: CGFloat = 280
+    static let maxWidth: CGFloat = 560
+
+    /// 左列上限：右列至少保留 360pt。
+    static func limit(containerWidth: CGFloat) -> CGFloat {
+        max(minWidth, min(maxWidth, containerWidth - 360))
+    }
+
+    /// 按持久宽度算出实际左列宽度（与 `PhoneSplitContainer` 内部完全一致）。
+    static func leftWidth(stored: Double, containerWidth: CGFloat) -> CGFloat {
+        min(max(CGFloat(stored), minWidth), limit(containerWidth: containerWidth))
+    }
+}
+
+/// 会话自定义壁纸（iOS 26「信息」的会话背景）。
+///
+/// 壁纸按「整窗画布 + 本列起点偏移」绘制：左右两列用同一个 `canvas`
+/// 和各自的 `originX`，得到的就是同一张图上相邻的两块裁切，所以中间没有接缝。
+/// 壁纸必须画在每一列自己的内容里（而不是分栏容器底下），
+/// 因为两列的 `NavigationStack` 会盖不透明底色，画在外面根本看不到。
+struct PhoneWallpaperBackdrop: View {
+    let image: UIImage
+    /// 整窗尺寸（全屏沉浸的画布）。
+    let canvas: CGSize
+    /// 本列在窗口中的 x 起点：左列为 0，右列为左列宽度。
+    let originX: CGFloat
+    /// 左列需要先模糊，避开细节、形成液态玻璃底板。
+    var blurRadius: CGFloat = 0
+
+    var body: some View {
+        GeometryReader { proxy in
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFill()
+                .frame(width: canvas.width, height: canvas.height)
+                .offset(x: -originX)
+                .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
+                .blur(radius: blurRadius)
+                .clipped()
+        }
+        .ignoresSafeArea(edges: .vertical)
+        .clipped()
+        .overlay(Color.black.opacity(0.16))
     }
 }
 
@@ -733,8 +809,6 @@ struct PhoneSplitContainer<Left: View, Right: View>: View {
     @ViewBuilder var left: Left
     @ViewBuilder var right: Right
 
-    private let minWidth: CGFloat = 280
-    private let maxWidth: CGFloat = 560
     /// 手柄命中区宽度：比可见指示线宽，便于用手指或触控板抓住。
     private let handleWidth: CGFloat = 20
 
@@ -747,8 +821,8 @@ struct PhoneSplitContainer<Left: View, Right: View>: View {
     var body: some View {
         GeometryReader { proxy in
             // 右列至少保留 360pt，窗口变窄时左列自动收紧上限。
-            let limit = max(minWidth, min(maxWidth, proxy.size.width - 360))
-            let width = min(max(CGFloat(leftWidth) + dragOffset, minWidth), limit)
+            let limit = PhoneSplitLayout.limit(containerWidth: proxy.size.width)
+            let width = min(max(CGFloat(leftWidth) + dragOffset, PhoneSplitLayout.minWidth), limit)
             ZStack(alignment: .topLeading) {
                 HStack(spacing: 0) {
                     left
@@ -804,7 +878,7 @@ struct PhoneSplitContainer<Left: View, Right: View>: View {
                 }
                 .onEnded { value in
                     let target = CGFloat(leftWidth) + value.translation.width
-                    leftWidth = Double(min(max(target, minWidth), limit))
+                    leftWidth = Double(min(max(target, PhoneSplitLayout.minWidth), limit))
                 }
         )
         .accessibilityLabel(L10n.t("调整分栏宽度"))
@@ -988,6 +1062,8 @@ struct CallsView: View {
                 }
             }
         }
+        // 点选即时生效：选中高亮与右侧内容都直接切换，不做过渡动画。
+        .animation(nil, value: selection)
     }
 
     // MARK: iPhone 单栏（点按进入详情）
@@ -1018,7 +1094,7 @@ struct CallsView: View {
                     if isEditing {
                         toggleCheck(call.id)
                     } else {
-                        selection = call.id
+                        withoutAnimations { selection = call.id }
                     }
                 } label: {
                     RecentsRow(
@@ -1127,10 +1203,12 @@ struct CallsView: View {
 
     private func toggleCheck(_ id: String) {
         // 勾选同理：状态直接切换，蓝色复选框立刻出现，不做补间。
-        if checkedIDs.contains(id) {
-            checkedIDs.remove(id)
-        } else {
-            checkedIDs.insert(id)
+        withoutAnimations {
+            if checkedIDs.contains(id) {
+                checkedIDs.remove(id)
+            } else {
+                checkedIDs.insert(id)
+            }
         }
     }
 
@@ -1593,6 +1671,8 @@ struct ContactsView: View {
                 }
             }
         }
+        // 点选即时生效：选中高亮与右侧内容都直接切换，不做过渡动画。
+        .animation(nil, value: selection)
     }
 
     private var compactBody: some View {
@@ -1644,7 +1724,7 @@ struct ContactsView: View {
                             .listRowInsets(rowInsets)
                         } else {
                             Button {
-                                selection = contact.id
+                                withoutAnimations { selection = contact.id }
                             } label: {
                                 ContactRow(contact: contact, isSelected: selection == contact.id)
                             }
@@ -1680,10 +1760,12 @@ struct ContactsView: View {
 
     private func toggleCheck(_ id: String) {
         // 勾选同理：状态直接切换，蓝色复选框立刻出现，不做补间。
-        if checkedIDs.contains(id) {
-            checkedIDs.remove(id)
-        } else {
-            checkedIDs.insert(id)
+        withoutAnimations {
+            if checkedIDs.contains(id) {
+                checkedIDs.remove(id)
+            } else {
+                checkedIDs.insert(id)
+            }
         }
     }
 
@@ -1714,6 +1796,30 @@ struct ContactsView: View {
         let latin = trimmed.applyingTransform(.toLatin, reverse: false) ?? trimmed
         guard let first = latin.first, first.isLetter else { return "#" }
         return String(first).uppercased()
+    }
+}
+
+/// 海报整屏背景：设了海报就用它铺满整屏（含状态栏区域），
+/// 并压一层极淡的暗化，保证白色的姓名与液态玻璃控件在任何照片上都有足够对比度；
+/// 没设海报就回退到调用方给的渐变底。联系人详情与短信人详情共用同一套版式。
+struct PosterBackdrop<Fallback: View>: View {
+    let poster: UIImage?
+    @ViewBuilder var fallback: Fallback
+
+    var body: some View {
+        if let poster {
+            GeometryReader { proxy in
+                Image(uiImage: poster)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+                    .clipped()
+            }
+            .ignoresSafeArea()
+            .overlay(Color.black.opacity(0.20).ignoresSafeArea())
+        } else {
+            fallback
+        }
     }
 }
 
@@ -1773,6 +1879,12 @@ struct ContactDetailPane: View {
     var showsEditButton: Bool = true
 
     @State private var showingEditor = false
+    /// 联系人海报（App 自有存储）：设了就用它当整屏背景；没设回退到渐变底。
+    @StateObject private var posters = ContactPosterStore.shared
+    @State private var showingPoster = false
+
+    private var posterKey: String { contact.id }
+    private var poster: UIImage? { posters.image(for: posterKey) }
 
     private var primaryPhone: String? { contact.phones.first }
     private var primaryEmail: String? { contact.emails.first }
@@ -1780,8 +1892,7 @@ struct ContactDetailPane: View {
 
     var body: some View {
         ZStack {
-            ContactPalette.gradient(for: contact.id)
-                .ignoresSafeArea()
+            posterBackground
 
             ScrollView {
                 VStack(spacing: 18) {
@@ -1822,6 +1933,17 @@ struct ContactDetailPane: View {
             // 用 `presentationSizing(.form)` 会让它在首次布局拿到 0 尺寸而整页空白。
             .frame(minWidth: 340, minHeight: 520)
             .presentationDragIndicator(.visible)
+        }
+        // 海报编辑：系统 Form + 系统 PhotosPicker，选完立即成为本页整屏背景。
+        .sheet(isPresented: $showingPoster) {
+            ContactPosterSheet(title: contact.name, key: posterKey)
+        }
+    }
+
+    /// 海报背景：设了海报就整屏铺满（含状态栏区域），没设回退到渐变底。
+    private var posterBackground: some View {
+        PosterBackdrop(poster: poster) {
+            ContactPalette.gradient(for: contact.id).ignoresSafeArea()
         }
     }
 
@@ -1902,6 +2024,20 @@ struct ContactDetailPane: View {
 
     private var infoCards: some View {
         VStack(spacing: 14) {
+            // 「联系人照片与海报」：系统联系人卡片里的同名入口，
+            // 但海报落在 App 自己的存储里，选完当前这一页立刻生效。
+            InfoCard {
+                InfoCardRow(
+                    title: L10n.t("联系人照片与海报"),
+                    value: poster == nil ? L10n.t("未设置") : L10n.t("已设置"),
+                    systemImage: nil,
+                    showsChevron: true,
+                    leadingAvatar: poster?.jpegData(compressionQuality: 0.8) ?? contact.photoData
+                ) {
+                    showingPoster = true
+                }
+            }
+
             InfoCard {
                 InfoCardRow(
                     title: L10n.t("共享的姓名和照片"),
@@ -2075,7 +2211,7 @@ struct MessagesView: View {
     private var isRegular: Bool { horizontalSizeClass == .regular }
 
     /// 当前选中会话的自定义背景图；没设就为 nil，回到系统默认底色。
-    private var conversationBackdrop: Image? {
+    private var conversationBackdrop: UIImage? {
         guard let handle = selection, let image = chatBackgrounds.image(for: handle) else { return nil }
         return Image(uiImage: image)
     }
@@ -2112,13 +2248,13 @@ struct MessagesView: View {
         .task { await model.contacts.loadIfNeeded() }
         .onChange(of: pendingRecipient) { value in
             guard let value, !value.isEmpty else { return }
-            selection = value
+            withoutAnimations { selection = value }
             composeRecipient = value
             pendingRecipient = nil
         }
         .sheet(isPresented: $showingCompose) {
             NewMessageSheet(initialRecipient: composeRecipient) { recipient in
-                selection = recipient
+                withoutAnimations { selection = recipient }
             }
             .presentationSizingIfAvailable()
         }
@@ -2127,56 +2263,67 @@ struct MessagesView: View {
     // MARK: iPad 双列
 
     private var regularBody: some View {
-        let hasBackdrop = conversationBackdrop != nil
-        return ZStack {
-            // 会话自定义背景：整窗铺满（含左列与状态栏区域），
-            // 与系统「信息」App 的会话背景一致；没设背景时两列保持系统底色。
-            if let backdrop = conversationBackdrop {
-                GeometryReader { proxy in
-                    backdrop
-                        .resizable()
-                        .scaledToFill()
-                        .frame(width: proxy.size.width, height: proxy.size.height)
-                        .clipped()
-                        .overlay(Color.black.opacity(0.16))
+        GeometryReader { window in
+            // `PhoneSplitLayout` 与 `PhoneSplitContainer` 用同一套规则算左列宽度，
+            // 这样右列的壁纸起点才能与左列对齐（同一张图的连续裁切）。
+            let backdrop = conversationBackdrop
+            let leftWidth = PhoneSplitLayout.leftWidth(
+                stored: splitLeftWidth,
+                containerWidth: window.size.width
+            )
+            ZStack {
+                // 兜底：整窗再铺一层。两列的 NavigationStack 会盖住中间部分，
+                // 但状态栏 / 标签栏那两条带子只有它能盖到。
+                if let backdrop {
+                    PhoneWallpaperBackdrop(image: backdrop, canvas: window.size, originX: 0)
                 }
-                .ignoresSafeArea()
-            }
 
-            PhoneSplitContainer(leftWidth: $splitLeftWidth) {
-                NavigationStack {
-                    PhoneSplitListColumn(isTranslucent: hasBackdrop) {
-                        PhoneSearchField(placeholder: L10n.t("搜索"), text: $search)
-                            .padding(.horizontal, 16)
-                            .padding(.top, 4)
-                            .padding(.bottom, 8)
-                        List {
-                            conversationRows(linkRows: false)
-                        }
-                        .listStyle(.plain)
-                        .scrollContentBackground(.hidden)
-                        .scrollDismissesKeyboard(.interactively)
-                    }
-                    .navigationTitle(isEditing ? L10n.t("已选择 \(checkedIDs.count) 项") : L10n.t("信息"))
-                    .navigationBarTitleDisplayMode(.inline)
-                    // 左列顶栏只有分类 / 编辑；右列顶栏是新信息 / 视频，与系统「信息」App 一致。
-                    .toolbar { listToolbar(showsCompose: false) }
-                    .immersiveBars()
-                }
-            } right: {
-                PhoneSplitDetailColumn(isTranslucent: hasBackdrop) {
-                    if let handle = selection {
-                        NavigationStack {
-                            ChatPane(handle: handle, usesSharedBackdrop: hasBackdrop) {
-                                composeRecipient = ""
-                                showingCompose = true
+                PhoneSplitContainer(leftWidth: $splitLeftWidth) {
+                    NavigationStack {
+                        PhoneSplitListColumn(
+                            wallpaper: backdrop,
+                            wallpaperCanvas: window.size,
+                            wallpaperOriginX: 0
+                        ) {
+                            PhoneSearchField(placeholder: L10n.t("搜索"), text: $search)
+                                .padding(.horizontal, 16)
+                                .padding(.top, 4)
+                                .padding(.bottom, 8)
+                            List {
+                                conversationRows(linkRows: false)
                             }
+                            .listStyle(.plain)
+                            .scrollContentBackground(.hidden)
+                            .scrollDismissesKeyboard(.interactively)
                         }
-                    } else {
-                        EmptyStateView(title: L10n.t("选择信息开始聊天"), systemImage: "message")
+                        .navigationTitle(isEditing ? L10n.t("已选择 \(checkedIDs.count) 项") : L10n.t("信息"))
+                        .navigationBarTitleDisplayMode(.inline)
+                        // 左列顶栏只有分类 / 编辑；右列顶栏是新信息 / 视频，与系统「信息」App 一致。
+                        .toolbar { listToolbar(showsCompose: false) }
+                        .immersiveBars()
+                    }
+                } right: {
+                    PhoneSplitDetailColumn(isTranslucent: backdrop != nil) {
+                        if let handle = selection {
+                            NavigationStack {
+                                ChatPane(
+                                    handle: handle,
+                                    wallpaper: backdrop,
+                                    wallpaperCanvas: window.size,
+                                    wallpaperOriginX: leftWidth
+                                ) {
+                                    composeRecipient = ""
+                                    showingCompose = true
+                                }
+                            }
+                        } else {
+                            EmptyStateView(title: L10n.t("选择信息开始聊天"), systemImage: "message")
+                        }
                     }
                 }
             }
+            // 选中态即时切换：详情区不做任何渐变 / 过渡动画。
+            .animation(nil, value: selection)
         }
     }
 
@@ -2274,7 +2421,7 @@ struct MessagesView: View {
                     .listRowInsets(rowInsets)
                 } else {
                     Button {
-                        selection = conversation.id
+                        withoutAnimations { selection = conversation.id }
                     } label: {
                         ConversationRow(conversation: conversation, isSelected: selection == conversation.id)
                     }
@@ -2319,10 +2466,12 @@ struct MessagesView: View {
 
     private func toggleCheck(_ id: String) {
         // 勾选同理：状态直接切换，蓝色复选框立刻出现，不做补间。
-        if checkedIDs.contains(id) {
-            checkedIDs.remove(id)
-        } else {
-            checkedIDs.insert(id)
+        withoutAnimations {
+            if checkedIDs.contains(id) {
+                checkedIDs.remove(id)
+            } else {
+                checkedIDs.insert(id)
+            }
         }
     }
 
@@ -2431,9 +2580,11 @@ private struct ConversationRow: View {
 struct ChatPane: View {
     @EnvironmentObject private var model: AppModel
     let handle: String
-    /// 分栏版式下背景由外层整窗铺满（左列也要透出同一张图），
-    /// 这里就不再重复绘制背景，避免叠两层导致两侧明暗不一致。
-    var usesSharedBackdrop: Bool = false
+    /// 分栏版式由父视图传入整窗壁纸与画布，保证与左列是同一张图的连续裁切；
+    /// 单栏（iPhone）不传，由 `ChatPane` 自己按整屏绘制。
+    var wallpaper: UIImage? = nil
+    var wallpaperCanvas: CGSize = .zero
+    var wallpaperOriginX: CGFloat = 0
     let onCompose: () -> Void
 
     @State private var draft = ""
@@ -2444,9 +2595,17 @@ struct ChatPane: View {
 
     /// 显式 init：保证尾随闭包始终绑定 `onCompose`，
     /// 不受后面那些带默认值的 `@State` 存储属性影响。
-    init(handle: String, usesSharedBackdrop: Bool = false, onCompose: @escaping () -> Void) {
+    init(
+        handle: String,
+        wallpaper: UIImage? = nil,
+        wallpaperCanvas: CGSize = .zero,
+        wallpaperOriginX: CGFloat = 0,
+        onCompose: @escaping () -> Void
+    ) {
         self.handle = handle
-        self.usesSharedBackdrop = usesSharedBackdrop
+        self.wallpaper = wallpaper
+        self.wallpaperCanvas = wallpaperCanvas
+        self.wallpaperOriginX = wallpaperOriginX
         self.onCompose = onCompose
     }
 
@@ -2540,9 +2699,13 @@ struct ChatPane: View {
     /// 在任何照片上都有足够对比度）；没设就保持系统背景色，与系统「信息」默认会话一致。
     @ViewBuilder
     private var conversationBackground: some View {
-        if usesSharedBackdrop {
-            // 分栏版式：背景已由外层整窗铺满（含左列），这里保持透明。
-            Color.clear
+        if let wallpaper, wallpaperCanvas != .zero {
+            // 分栏版式：与左列共用同一张图的连续裁切（请看 `PhoneWallpaperBackdrop`）。
+            PhoneWallpaperBackdrop(
+                image: wallpaper,
+                canvas: wallpaperCanvas,
+                originX: wallpaperOriginX
+            )
         } else if let image = chatBackgrounds.image(for: handle) {
             GeometryReader { proxy in
                 Image(uiImage: image)
@@ -2743,6 +2906,138 @@ final class ChatBackgroundStore: ObservableObject {
     }
 }
 
+/// 联系人海报（App 自有的「联系人照片与海报」）。
+///
+/// 系统通讯录的**联系人海报**由「电话 / 联系人」App 自己写入、也只在系统界面里渲染：
+/// `CNContact` 没有任何公开 API 能读到或写入海报，第三方 App 即使调起
+/// `CNContactViewController` 也只能改到联系人照片，系统海报不会同步到 App 里，
+/// 于是出现「系统联系人有海报、DJOneHub 里还是渐变底」的现象。
+///
+/// 因此这里用 App 自己的存储落一份海报：图像由用户通过系统 `PhotosPicker` 主动选择
+/// （不需要相册权限，也不需要 Apple 开发者账号），落在 Application Support 下，
+/// 联系人详情与短信人详情第一时间读它当**整屏背景**，
+/// 上层再叠系统的液态玻璃控件，版式与系统联系人的海报页一致。
+final class ContactPosterStore: ObservableObject {
+    static let shared = ContactPosterStore()
+    /// 每次写入都自增；详情页观察到变化后立即重绘背景。
+    @Published private(set) var revision = 0
+    private var cache: [String: UIImage] = [:]
+
+    private lazy var directory: URL = {
+        let base = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("DJOneHub/Posters", isDirectory: true)
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        return base
+    }()
+
+    func image(for key: String) -> UIImage? {
+        guard !key.isEmpty else { return nil }
+        if let cached = cache[key] { return cached }
+        guard let data = try? Data(contentsOf: fileURL(for: key)),
+              let image = UIImage(data: data) else { return nil }
+        cache[key] = image
+        return image
+    }
+
+    func setImage(_ data: Data?, for key: String) {
+        guard !key.isEmpty else { return }
+        let target = fileURL(for: key)
+        if let data, let image = UIImage(data: data) {
+            // 海报是整屏背景，长边按 2048pt 生成缩略图，避免几张原图就吃掉几十 MB 内存。
+            let scaled = image.preparingThumbnail(of: CGSize(width: 2048, height: 2048)) ?? image
+            cache[key] = scaled
+            try? scaled.jpegData(compressionQuality: 0.9)?.write(to: target, options: .atomic)
+        } else {
+            cache[key] = nil
+            try? FileManager.default.removeItem(at: target)
+        }
+        revision &+= 1
+    }
+
+    private func fileURL(for key: String) -> URL {
+        let name = String(key.map { $0.isLetter || $0.isNumber ? $0 : "_" })
+        return directory.appendingPathComponent(name + ".jpg")
+    }
+}
+
+/// 联系人海报编辑页：系统 `Form` + 系统 `PhotosPicker`，
+/// 版式与系统「设置」里的编辑页一致，不做自绘控件。
+struct ContactPosterSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let title: String
+    let key: String
+
+    @StateObject private var posters = ContactPosterStore.shared
+    @State private var item: PhotosPickerItem?
+
+    private var image: UIImage? { posters.image(for: key) }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    if let image {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(height: 260)
+                            .frame(maxWidth: .infinity)
+                            .clipped()
+                            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                            .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 8, trailing: 0))
+                            .listRowBackground(Color.clear)
+                    } else {
+                        Text(L10n.t("尚未设置海报"))
+                            .foregroundStyle(.secondary)
+                    }
+                } header: {
+                    Text(L10n.t("预览"))
+                }
+
+                Section {
+                    PhotosPicker(selection: $item, matching: .images) {
+                        Label(
+                            image == nil ? L10n.t("选取海报照片") : L10n.t("更换海报照片"),
+                            systemImage: "photo.on.rectangle.angled"
+                        )
+                    }
+                    if image != nil {
+                        Button(role: .destructive) {
+                            posters.setImage(nil, for: key)
+                        } label: {
+                            Label(L10n.t("移除海报"), systemImage: "trash")
+                        }
+                    }
+                } header: {
+                    Text(title)
+                } footer: {
+                    Text(L10n.t("海报用作 DJOneHub 内联系人与短信详情的整屏背景。系统通讯录的海报由系统自己管理，第三方 App 无法写入。"))
+                }
+            }
+            .formStyle(.grouped)
+            .navigationTitle(L10n.t("联系人照片与海报"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(L10n.t("完成")) { dismiss() }
+                        .fontWeight(.semibold)
+                        .tint(Color.primary)
+                }
+            }
+            .onChange(of: item) { newValue in
+                guard let newValue else { return }
+                Task { @MainActor in
+                    if let data = try? await newValue.loadTransferable(type: Data.self) {
+                        posters.setImage(data, for: key)
+                    }
+                    item = nil
+                }
+            }
+        }
+    }
+}
+
 /// 信息卡里的纯标签行：用于 PhotosPicker 这类必须由系统控件触发的入口，
 /// 排版与 InfoCardRow 完全一致，保证「背景」分段的卡片风格统一。
 private struct InfoCardActionLabel: View {
@@ -2889,15 +3184,22 @@ struct ChatContactInfoPanel: View {
     /// 会话背景选择：PhotosPicker 由用户主动选图，不需要相册权限。
     @State private var backgroundItem: PhotosPickerItem?
     @StateObject private var chatBackgrounds = ChatBackgroundStore.shared
+    /// 联系人海报（App 自有存储）：与联系人详情共用同一个 key，两边立即同步。
+    @StateObject private var posters = ContactPosterStore.shared
+    @State private var showingPoster = false
 
     private var contact: ContactStore.Contact? { model.contacts.contact(for: handle) }
+    /// 有系统联系人时用联系人 id，没有时退回会话标识（号码 / 邮箱）。
+    private var posterKey: String { contact?.id ?? handle }
+    private var poster: UIImage? { posters.image(for: posterKey) }
     private var displayName: String { contact?.name ?? handle }
     private var photoData: Data? { contact?.photoData }
 
     var body: some View {
         ZStack {
-            ContactPalette.gradient(for: handle)
-                .ignoresSafeArea()
+            PosterBackdrop(poster: poster) {
+                ContactPalette.gradient(for: handle).ignoresSafeArea()
+            }
 
             ScrollView {
                 VStack(spacing: 16) {
@@ -2963,6 +3265,11 @@ struct ChatContactInfoPanel: View {
             }
             .ignoresSafeArea()
         }
+        // 海报编辑：与联系人详情同一套系统 Form + PhotosPicker，
+        // 选完立即成为本页（以及联系人详情）的整屏背景。
+        .sheet(isPresented: $showingPoster) {
+            ContactPosterSheet(title: displayName, key: posterKey)
+        }
     }
 
     private var header: some View {
@@ -3018,6 +3325,20 @@ struct ChatContactInfoPanel: View {
     @ViewBuilder
     private var backgroundTab: some View {
         VStack(spacing: 14) {
+            // 联系人海报：这一栏是「人」的背景，下面那条是「这次会话」的背景，
+            // 与系统联系人的「海报 / 背景」分段一一对应。
+            InfoCard {
+                InfoCardRow(
+                    title: L10n.t("联系人照片与海报"),
+                    value: poster == nil ? L10n.t("未设置") : L10n.t("已设置"),
+                    systemImage: nil,
+                    showsChevron: true,
+                    leadingAvatar: poster?.jpegData(compressionQuality: 0.8) ?? photoData
+                ) {
+                    showingPoster = true
+                }
+            }
+
             if let image = chatBackgrounds.image(for: handle) {
                 Image(uiImage: image)
                     .resizable()
