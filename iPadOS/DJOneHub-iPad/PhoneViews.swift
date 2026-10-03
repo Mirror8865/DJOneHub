@@ -560,29 +560,22 @@ struct PhoneEditToggle: View {
 
 /// 编辑态左侧的圆形复选框：选中为系统蓝实心对勾，未选中为灰色空心圈。
 /// 行本身已经是蓝底时（onHighlight）自动换成白色，避免蓝底上看不见蓝色对勾。
+///
+/// 不在这里用 `contentTransition(.symbolEffect(.replace))`：`List` 回收单元格时
+/// 符号替换过渡会留下画了一半的圆环（看起来像复选框上方被遮住、显示不全），
+/// 改成固定尺寸 + 弹簧缩放的普通动画，任何情况下都能画完整。
 struct PhoneSelectionCircle: View {
     let isSelected: Bool
     var onHighlight: Bool = false
 
     var body: some View {
-        symbol
-            .animation(.spring(response: 0.28, dampingFraction: 0.72), value: isSelected)
-    }
-
-    /// 圆环 → 蓝色对勾用系统符号替换过渡（iOS 17+ 用 symbolEffect），勾选不再生硬。
-    @ViewBuilder
-    private var symbol: some View {
-        if #available(iOS 17.0, *) {
-            icon.contentTransition(.symbolEffect(.replace))
-        } else {
-            icon.contentTransition(.opacity)
-        }
-    }
-
-    private var icon: some View {
         Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
             .font(.system(size: 22, weight: .regular))
+            .symbolRenderingMode(.monochrome)
             .foregroundStyle(selectionColor)
+            .frame(width: 26, height: 26)
+            .scaleEffect(isSelected ? 1.06 : 1.0)
+            .animation(.spring(response: 0.30, dampingFraction: 0.68), value: isSelected)
             .accessibilityHidden(true)
     }
 
@@ -713,9 +706,14 @@ struct PhoneSplitListColumn<Content: View>: View {
 /// 四个板块（通话 / 联系人 / 信息 / 设置）共用的双栏容器。
 ///
 /// 左列宽度由用户拖动中间的分栏手柄调节，并写入同一个 `AppStorage` 键，
-/// 因此四个板块始终共用同一宽度。手柄静止时完全不可见（列表之间没有分割线），
-/// 分栏拖动手势的坐标空间名。手柄本身会跟着手指移动，若用默认的
-/// 局部坐标空间，位移会随视图移动被反复重算，两侧内容就会抽搐抖动。
+/// 因此四个板块始终共用同一宽度。手柄静止时完全不可见（列表之间没有分割线）。
+///
+/// 拖动过程中**不改动两列布局**：列表（UICollectionView 承载的 `List`）与
+/// `NavigationStack` 只要宽度每帧变化就会反复重排，两侧内容会抽搐抖动。
+/// 所以这里只在拖动时画一条落位预览色带 + 跟随手指的分割线，
+/// 松手时一次性提交宽度，整个拖动过程只重排一次。
+/// 分栏拖动手势的坐标空间名：手柄本身会跟着手指移动，
+/// 用局部坐标空间会被反复重算，必须挂在一个静止的命名空间上。
 private let splitDragCoordinateSpace = "djonehub.split.drag"
 
 struct PhoneSplitContainer<Left: View, Right: View>: View {
@@ -726,35 +724,47 @@ struct PhoneSplitContainer<Left: View, Right: View>: View {
     private let minWidth: CGFloat = 280
     private let maxWidth: CGFloat = 560
     /// 手柄命中区宽度：比可见指示线宽，便于用手指或触控板抓住。
-    private let handleWidth: CGFloat = 16
+    private let handleWidth: CGFloat = 20
 
-    @GestureState private var dragOffset: CGFloat = 0
+    /// 拖动位移：只用于绘制悬浮预览层，不参与两列布局。
+    @State private var dragOffset: CGFloat = 0
+    @State private var isDragging = false
     @State private var isHoveringHandle = false
 
     var body: some View {
         GeometryReader { proxy in
             // 右列至少保留 360pt，窗口变窄时左列自动收紧上限。
             let limit = max(minWidth, min(maxWidth, proxy.size.width - 360))
-            // 拖动过程中把宽度对齐到整点：文字与列表不会因为亚像素变化反复重排。
-            let width = min(max(CGFloat(leftWidth) + dragOffset, minWidth), limit).rounded()
+            let committed = min(max(CGFloat(leftWidth), minWidth), limit)
+            // 预览位置：只驱动悬浮层。
+            let live = isDragging
+                ? min(max(committed + dragOffset, minWidth), limit)
+                : committed
             ZStack(alignment: .topLeading) {
+                // 两列宽度在整个拖动过程中保持不变，内容不会反复重排。
                 HStack(spacing: 0) {
                     left
-                        .frame(width: width)
+                        .frame(width: committed)
                         .frame(maxHeight: .infinity)
                     right
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                if isDragging, abs(live - committed) > 0.5 {
+                    // 落位预览：半透明色带指示松开后左列会覆盖到的范围。
+                    Rectangle()
+                        .fill(Color(uiColor: .systemBlue).opacity(0.14))
+                        .frame(width: abs(live - committed))
+                        .offset(x: min(committed, live))
+                        .frame(maxHeight: .infinity)
+                        .allowsHitTesting(false)
+                }
+
                 handle(limit: limit)
-                    .offset(x: width - handleWidth / 2)
+                    .offset(x: live - handleWidth / 2)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            // 拖动分栏时不允许系统给列表尺寸变化补间：List 内容高度随宽度
-            // 变化时的隐式动画正是两侧内容「抽搐抖动」的来源。
-            .transaction { transaction in
-                if dragOffset != 0 { transaction.animation = nil }
-            }
         }
         .coordinateSpace(name: splitDragCoordinateSpace)
     }
@@ -766,7 +776,7 @@ struct PhoneSplitContainer<Left: View, Right: View>: View {
             Capsule(style: .continuous)
                 .fill(Color(uiColor: .separator))
                 .frame(width: 2)
-                .opacity(isHoveringHandle || dragOffset != 0 ? 1 : 0)
+                .opacity(isHoveringHandle || isDragging ? 1 : 0)
         }
         .frame(width: handleWidth)
         .frame(maxHeight: .infinity)
@@ -776,12 +786,20 @@ struct PhoneSplitContainer<Left: View, Right: View>: View {
         }
         .gesture(
             DragGesture(minimumDistance: 1, coordinateSpace: .named(splitDragCoordinateSpace))
-                .updating($dragOffset) { value, state, _ in
-                    state = value.translation.width
+                .onChanged { value in
+                    if !isDragging { isDragging = true }
+                    dragOffset = value.translation.width
                 }
                 .onEnded { value in
                     let target = CGFloat(leftWidth) + value.translation.width
-                    leftWidth = Double(min(max(target, minWidth), limit))
+                    let clamped = min(max(target, minWidth), limit)
+                    dragOffset = 0
+                    isDragging = false
+                    // 只在松手时提交一次宽度，并且关掉这次变化的补间，
+                    // 避免列表随宽度变化再做一次重排动画。
+                    var transaction = Transaction()
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) { leftWidth = Double(clamped) }
                 }
         )
         .accessibilityLabel(L10n.t("调整分栏宽度"))
@@ -2361,6 +2379,7 @@ struct ChatPane: View {
 
     @State private var draft = ""
     @State private var showingContactInfo = false
+    @State private var showingMoreActions = false
 
     private var messages: [SMSMessage] {
         // 一条长短信在模块侧是多条独立记录（发送按 70 个 UCS2 单元切段，
@@ -2474,32 +2493,34 @@ struct ChatPane: View {
     private var composer: some View {
         // + 号与发送 / 语音按钮都在同一条液态玻璃胶囊内部：+ 贴左侧垂直居中，
         // 输入框在中间，发送 / 语音在右侧，整条胶囊固定在窗口底部不上移。
-        HStack(alignment: .center, spacing: 4) {
-            Menu {
-                Button {
-                    Task { await model.refreshMessages() }
-                } label: {
-                    Label(L10n.t("刷新"), systemImage: "arrow.clockwise")
-                }
-                Button(role: .destructive) {
-                    model.clearLocalMessages()
-                } label: {
-                    Label(L10n.t("清空全部短信"), systemImage: "trash")
-                }
+        HStack(alignment: .center, spacing: 6) {
+            // 用普通 Button + 确认对话框，而不是 Menu：iOS 26 会给 Menu 标签自动套
+            // 一层玻璃底板，看起来像浮在输入框外面，和系统「信息」App 不一致。
+            Button {
+                showingMoreActions = true
             } label: {
                 Image(systemName: "plus")
-                    .font(.system(size: 20, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 34, height: 34)
+                    .font(.system(size: 19, weight: .medium))
+                    .foregroundStyle(Color.secondary)
+                    .frame(width: 30, height: 30)
                     .contentShape(Circle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel(L10n.t("更多"))
+            .confirmationDialog(
+                L10n.t("更多"),
+                isPresented: $showingMoreActions,
+                titleVisibility: .hidden
+            ) {
+                Button(L10n.t("刷新")) { Task { await model.refreshMessages() } }
+                Button(L10n.t("清空全部短信"), role: .destructive) { model.clearLocalMessages() }
+                Button(L10n.t("取消"), role: .cancel) {}
+            }
 
             TextField(L10n.t("iMessage 信息"), text: $draft, axis: .vertical)
                 .lineLimit(1...6)
                 .textFieldStyle(.plain)
-                .padding(.leading, 6)
+                .padding(.leading, 2)
                 .padding(.vertical, 10)
 
             if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {

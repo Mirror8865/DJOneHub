@@ -120,13 +120,14 @@ enum L10n {
         // v29 首次接入引导页的系统权限列表
         "系统权限": "System Permissions", "麦克风": "Microphone",
         "始终允许定位": "Always Allow Location", "通知": "Notifications",
-        "本地网络": "Local Network", "通讯录": "Contacts",
+        "本地网络与设备": "Local Network & Devices", "通讯录": "Contacts",
         "通话语音需要麦克风": "Calls need microphone access",
         "保活与后台唤醒需要「始终允许」": "Keep-alive needs “Always” location",
         "接收来电与短信提醒": "Call and message alerts",
-        "访问模块与本机所在网络上的设备": "Reach the module and devices on your network",
+        "连接模块需要「访问设备」权限": "Connecting the module needs device access",
         "来电显示联系人姓名与头像": "Show contact names and photos",
         "把下面几项一次授权完，来电、短信与保活才能正常工作。": "Grant these up front so calls, messages and keep-alive work.",
-        "已允许": "Allowed", "去设置": "Open Settings", "申请": "Allow"
+        "已允许": "Allowed", "去设置": "Open Settings", "申请": "Allow",
+        "全部申请": "Allow All"
     ]
 }

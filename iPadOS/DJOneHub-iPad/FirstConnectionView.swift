@@ -24,6 +24,9 @@ struct FirstConnectionView: View {
                             .foregroundStyle(model.setupStage == .ready ? .green : .secondary)
                     }
 
+                    // 权限申请流程放在最前面：首次安装打开 App 先看到并处理权限列表。
+                    permissionSection
+
                     VStack(spacing: 0) {
                         setupRow("模块连接", icon: "cable.connector", active: [.connecting, .updating].contains(model.setupStage), complete: model.isOnline)
                         Divider()
@@ -83,14 +86,13 @@ struct FirstConnectionView: View {
                             Button("完成") { dismiss() }
                                 .buttonStyle(.bordered)
                         } else if !runStarted {
-                            Text("已完成 Mac 首次刷写后，插入模块再点按检测；系统权限只需首次允许。")
+                            Text("系统权限已在上方列出；已完成 Mac 首次刷写后，插入模块再点按检测。")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .multilineTextAlignment(.center)
                         }
                     }
                 }
-                permissionSection
                 .padding(horizontalSizeClass == .compact ? 18 : 24)
             }
             .navigationTitle("首次接入")
@@ -100,7 +102,10 @@ struct FirstConnectionView: View {
                 }
             }
             .task {
-                // 引导页是用户第一个看到的界面，先把全部系统权限状态读出来。
+                // 引导页是用户第一个看到的界面：先把全部系统权限状态读出来，
+                // 再把还没问过的权限逐个申请一遍（权限流程在最前面）。
+                await model.refreshPermissionStates()
+                await model.requestAllMissingPermissions()
                 await model.refreshPermissionStates()
                 guard !runStarted else { return }
                 runStarted = true
@@ -119,8 +124,18 @@ struct FirstConnectionView: View {
     /// （iOS 不允许 App 自己改权限）。
     private var permissionSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label(L10n.t("系统权限"), systemImage: "checkmark.shield")
-                .font(.headline)
+            HStack(spacing: 8) {
+                Label(L10n.t("系统权限"), systemImage: "checkmark.shield")
+                    .font(.headline)
+                Spacer(minLength: 8)
+                // 有权限还没拿到时，可以在这里一键重新走一遍申请流程。
+                Button(L10n.t("全部申请")) {
+                    Task { await model.requestAllMissingPermissions() }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(!AppPermission.allCases.contains { model.permissionState(for: $0) == .notDetermined })
+            }
             Text(L10n.t("把下面几项一次授权完，来电、短信与保活才能正常工作。"))
                 .font(.footnote)
                 .foregroundStyle(.secondary)

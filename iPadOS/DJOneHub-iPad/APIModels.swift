@@ -76,30 +76,59 @@ struct SMSMessage: Codable, Equatable, Sendable, Identifiable {
 extension SMSMessage {
     /// 合法的分段长度：
     /// - UCS2：单段 70、带 UDH 联合 67（本模块自己就按 70 个 UCS2 单元切）；
-    /// - GSM-7：单段 160、带 UDH 联合 153。
-    /// 实际边界会因四字节补位（emoji 等代理对）少 1～4 个单元，
-    /// 所以宽容到 66～70 / 152～160。只有上一段落在这些长度上才合并，
-    /// 避免把两条真正独立的短信误合成一条。
-    static let fragmentBoundaries: Set<Int> = [70, 69, 68, 67, 66, 160, 159, 158, 153, 152]
-    /// 同一条长短信的各段几乎同时到达；超过这个间隔就不再当作同一条。
-    static let fragmentJoinWindow: TimeInterval = 30
+    /// - GSM-7：单段 160、带 UDH 联合 153；
+    /// - 部分固件按 UTF-8 每个数据单元 140 字节切，中文一段只有 46 个字符。
+    /// 实际边界会因四字节补位（emoji 等代理对）少 1～4 个单元，所以前后各放宽一档。
+    static let fragmentBoundaries: Set<Int> = [
+        46, 45, 44, 47,
+        67, 66, 68, 69, 70, 71,
+        134, 140,
+        152, 153, 154, 158, 159, 160, 161
+    ]
+    /// 上一段正好落在已知分段边界上时，容忍较长的入库间隔
+    /// （模块收到多段短信后会分几次写入 ME 存储）。
+    static let fragmentBoundaryJoinWindow: TimeInterval = 300
+    /// 分段长度不在已知边界上（固件切分方案不同）时用更短的窗口，避免误合两条独立短信。
+    static let fragmentHeuristicJoinWindow: TimeInterval = 30
+    /// 上一段至少有这么长，才认为它是「被切断的一段」。
+    static let fragmentMinimumLength = 40
+    /// 一段短信不会超过 160 个单元；更长的上一段说明它本身已经是完整短信。
+    static let fragmentMaximumLength = 200
 
-    /// 把同发件人、同方向、时间相邻且上一段正好在分段边界上的
-    /// 连续记录合回一条：模块侧一条长短信会被拆成多条独立短信
-    /// （发送按 70 个 UCS2 单元切段，收到的多段短信在 ME 存储里也各占一条），
-    /// 不合并就会把一条长短信显示成一串气泡。
+    /// 把同发件人、同方向、时间相邻、且上一段看起来是「被切断的一段」的连续记录合回一条。
     ///
-    /// 合并后沿用最后一段的 id / 时间 / 交付标识，因此列表选中、
-    /// 滚动定位与本机删除仍然指向真实记录。
+    /// 模块侧一条长短信会被拆成多条独立短信（发送按 70 个 UCS2 单元切段，
+    /// 收到的多段短信在 ME 存储里也各占一条），不合并就会把一条长短信显示成一串气泡。
+    /// 合并后沿用最后一段的 id / 时间 / 交付标识，因此列表选中、滚动定位与本机删除
+    /// 仍然指向真实记录。
     static func mergedFragments(_ messages: [SMSMessage]) -> [SMSMessage] {
-        let ordered = messages.sorted { $0.timestamp < $1.timestamp }
+        guard messages.count > 1 else { return messages }
+        // App 内部的短信列表始终是「最新在前」的倒序。同一条长短信的各段
+        // 时间戳可能完全相同（模块一次写入），倒序排列会把分段顺序整个反过来，
+        // 上一段变成后半段，边界判断自然就合不回去——这正是长短信被拆成
+        // 一串气泡的原因。所以先按输入方向把顺序摆正，再按时间升序排列。
+        let ordered: [SMSMessage]
+        if isNewestFirst(messages) {
+            ordered = Array(messages.reversed())
+        } else {
+            // 输入不是倒序时做一次稳定排序，时间戳相同的保持原有先后顺序。
+            ordered = messages.enumerated()
+                .sorted { lhs, rhs in
+                    if lhs.element.timestamp == rhs.element.timestamp {
+                        return lhs.offset < rhs.offset
+                    }
+                    return lhs.element.timestamp < rhs.element.timestamp
+                }
+                .map(\.element)
+        }
+
         var merged: [SMSMessage] = []
         for message in ordered {
             guard let last = merged.last,
                   last.sender == message.sender,
                   last.isOutgoing == message.isOutgoing,
-                  message.timestamp.timeIntervalSince(last.timestamp) <= fragmentJoinWindow,
-                  fragmentBoundaries.contains(last.content.utf16.count) else {
+                  isFragmentTail(last.content),
+                  message.timestamp.timeIntervalSince(last.timestamp) <= joinWindow(for: last.content) else {
                 merged.append(message)
                 continue
             }
@@ -113,6 +142,31 @@ extension SMSMessage {
             )
         }
         return merged
+    }
+
+    /// 输入是否已经是「最新在前」的倒序排列。
+    private static func isNewestFirst(_ messages: [SMSMessage]) -> Bool {
+        var sawStrictlyNewer = false
+        for index in 1..<messages.count {
+            let previous = messages[index - 1].timestamp
+            let current = messages[index].timestamp
+            if current > previous { return false }
+            if current < previous { sawStrictlyNewer = true }
+        }
+        return sawStrictlyNewer
+    }
+
+    /// 上一段是否像「一条长短信被切断的前半段」。
+    private static func isFragmentTail(_ content: String) -> Bool {
+        let length = content.utf16.count
+        if fragmentBoundaries.contains(length) { return true }
+        return length >= fragmentMinimumLength && length <= fragmentMaximumLength
+    }
+
+    private static func joinWindow(for content: String) -> TimeInterval {
+        fragmentBoundaries.contains(content.utf16.count)
+            ? fragmentBoundaryJoinWindow
+            : fragmentHeuristicJoinWindow
     }
 }
 

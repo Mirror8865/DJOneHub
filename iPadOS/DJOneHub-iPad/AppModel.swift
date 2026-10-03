@@ -69,7 +69,7 @@ enum AppPermission: String, CaseIterable, Identifiable {
         case .microphone: return L10n.t("麦克风")
         case .locationAlways: return L10n.t("始终允许定位")
         case .notifications: return L10n.t("通知")
-        case .localNetwork: return L10n.t("本地网络")
+        case .localNetwork: return L10n.t("本地网络与设备")
         case .contacts: return L10n.t("通讯录")
         }
     }
@@ -83,7 +83,7 @@ enum AppPermission: String, CaseIterable, Identifiable {
         case .notifications:
             return L10n.t("接收来电与短信提醒")
         case .localNetwork:
-            return L10n.t("访问模块与本机所在网络上的设备")
+            return L10n.t("连接模块需要「访问设备」权限")
         case .contacts:
             return L10n.t("来电显示联系人姓名与头像")
         }
@@ -322,6 +322,16 @@ final class AppModel: ObservableObject {
         }
         await refreshPermissionStates()
         return permissionState(for: permission) == .granted
+    }
+
+    /// 首次安装打开 App 就把权限流程走完：按引导页列表的顺序逐个申请，
+    /// 已授权的跳过；被永久拒绝的系统不会再弹窗，引导页会引导去系统设置。
+    /// 权限面板由系统串行弹出，逐个之间留一点间隔，避免上一个还没收起来。
+    func requestAllMissingPermissions() async {
+        for permission in AppPermission.allCases where permissionState(for: permission) == .notDetermined {
+            _ = await requestPermission(permission)
+            try? await Task.sleep(for: .milliseconds(400))
+        }
     }
 
     /// 本地网络没有授权查询 API：起一次 Bonjour 浏览让系统弹一次授权，
