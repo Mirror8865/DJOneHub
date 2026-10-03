@@ -74,112 +74,409 @@ struct SMSMessage: Codable, Equatable, Sendable, Identifiable {
 }
 
 extension SMSMessage {
-    /// 合法的分段长度：
-    /// - UCS2：单段 70、带 UDH 联合 67（本模块自己就按 70 个 UCS2 单元切）；
-    /// - GSM-7：单段 160、带 UDH 联合 153；
-    /// - 部分固件按 UTF-8 每个数据单元 140 字节切，中文一段只有 46 个字符。
-    /// 实际边界会因四字节补位（emoji 等代理对）少 1～4 个单元，所以前后各放宽一档。
-    static let fragmentBoundaries: Set<Int> = [
-        46, 45, 44, 47,
-        67, 66, 68, 69, 70, 71,
-        134, 140,
-        152, 153, 154, 158, 159, 160, 161
-    ]
-    /// 上一段正好落在已知分段边界上时，容忍较长的入库间隔
-    /// （模块收到多段短信后会分几次写入 ME 存储）。
-    static let fragmentBoundaryJoinWindow: TimeInterval = 300
-    /// 分段长度不在已知边界上（固件切分方案不同）时用更短的窗口，避免误合两条独立短信。
-    static let fragmentHeuristicJoinWindow: TimeInterval = 30
-    /// 上一段至少有这么长，才认为它是「被切断的一段」。
-    static let fragmentMinimumLength = 40
-    /// 一段短信不会超过 160 个单元；更长的上一段说明它本身已经是完整短信。
-    static let fragmentMaximumLength = 200
-
-    /// 模块 `delivery_id` 形如 `ME-12-<digest>`：前缀是「存储介质-槽位」。
-    /// 一条长短信被模块拆成多条记录时，各段占用**连续槽位**，槽位号就是分段的
-    /// 真实先后——比时间戳可靠得多（各段时间戳常常完全相同）。
-    var storageSlot: (memory: String, index: Int)? {
-        guard let deliveryID else { return nil }
-        let parts = deliveryID.split(separator: "-")
-        guard parts.count >= 2, let index = Int(parts[1]) else { return nil }
-        return (String(parts[0]), index)
-    }
-
-    /// 把同发件人、同方向、时间相邻、且上一段看起来是「被切断的一段」的连续记录合回一条。
+    /// 把同一会话的记录排成「旧 → 新」。
     ///
-    /// 模块侧一条长短信会被拆成多条独立短信（发送按 70 个 UCS2 单元切段，
-    /// 收到的多段短信在 ME 存储里也各占一条），不合并就会把一条长短信显示成一串气泡。
-    /// 合并后沿用最后一段的 id / 时间 / 交付标识，因此列表选中、滚动定位与本机删除
-    /// 仍然指向真实记录。
-    ///
-    /// **顺序必须是确定的全序**：同一条长短信各段的时间戳往往一模一样，之前靠
-    /// 「输入方向」猜、再配合字典顺序与不稳定的 `sorted`，每次刷新都可能给出不同的
-    /// 相对顺序——于是同一条短信会在「一个气泡」和「好几个气泡」之间来回跳，
-    /// 聊天窗口的先后也会反。现在统一按（时间升序，模块存储槽位升序，内容）排
-    /// 一次确定的顺序，输出恒为「旧 → 新」，与聊天窗口自上而下的渲染顺序一致。
-    static func mergedFragments(_ messages: [SMSMessage]) -> [SMSMessage] {
-        guard messages.count > 1 else { return messages }
-        let ordered = messages.sorted { lhs, rhs in
+    /// 长短信的拼接已经在 `SMSDecoder` 里按 3GPP TS 23.040 的 UDH 完成，
+    /// 这里不再做任何「按长度猜分段」的合并：旧实现按内容长度和模块存储槽
+    /// 猜测分段边界，每次刷新的分组和顺序都可能不同，正是「一条长短信时而
+    /// 一个气泡、时而多个气泡」以及顺序错乱的根因。
+    static func chronological(_ messages: [SMSMessage]) -> [SMSMessage] {
+        messages.sorted { lhs, rhs in
             if lhs.timestamp != rhs.timestamp { return lhs.timestamp < rhs.timestamp }
-            let leftSlot = lhs.storageSlot
-            let rightSlot = rhs.storageSlot
-            if let leftSlot, let rightSlot {
-                if leftSlot.memory != rightSlot.memory { return leftSlot.memory < rightSlot.memory }
-                if leftSlot.index != rightSlot.index { return leftSlot.index < rightSlot.index }
-            } else if (leftSlot == nil) != (rightSlot == nil) {
-                // 有槽位的排在没槽位的前面；旧版模块没有槽位，保持稳定即可。
-                return rightSlot == nil
-            }
-            return lhs.content < rhs.content
+            return lhs.id < rhs.id
         }
+    }
+}
 
-        var merged: [SMSMessage] = []
-        for message in ordered {
-            guard let last = merged.last,
-                  last.sender == message.sender,
-                  last.isOutgoing == message.isOutgoing,
-                  isFragmentTail(last.content),
-                  isSameFragmentRun(last, message),
-                  message.timestamp.timeIntervalSince(last.timestamp) <= joinWindow(for: last.content) else {
-                merged.append(message)
+/// 模块短信存储区里的一条记录：`+CMGL` 表头 + 紧随其后的十六进制 PDU。
+struct SMSListingEntry: Sendable {
+    let memory: String
+    let index: Int
+    let status: Int
+    let pdu: [UInt8]
+}
+
+/// 一条 SMS-DELIVER 的解码结果；带 UDH 时给出拼接用的参考号、总段数与段序号。
+struct SMSDecodedDelivery: Sendable {
+    let sender: String
+    let text: String
+    let timestamp: Date
+    let reference: Int?
+    let total: Int?
+    let sequence: Int?
+}
+
+/// 解析 PDU 模式的 `AT+CMGL=4` 列表，并把长短信按 UDH 拼回完整内容。
+///
+/// 模块自带的 `/api/sms` 走文本模式（`AT+CMGF=1` + `AT+CMGL="ALL"`）：基带按
+/// 存储记录逐条返回，UDH 被丢掉，于是一条长短信会变成多条独立记录，顺序等于
+/// 基带存储位置（删除后槽位还会复用），既不是到达顺序也没有段序号可用。
+/// 所以在 App 侧改用 PDU 读取：UDH 里的参考号/总段数/段序号让拼接完全确定。
+enum SMSDecoder {
+    /// 自家模块发送长短信时按 70 个 UTF-16 单元切段且不写 UDH，
+    /// 接收侧只能靠这个固定长度把分段重聚回一条。
+    static let unsegmentedFragmentUnits = 70
+    /// 无 UDH 分段重聚的时间窗：模块发送的多段几乎同时到达。
+    static let unsegmentedJoinWindow: TimeInterval = 60
+
+    /// 解析一个存储区的 `AT+CMGL=4` 响应。
+    static func parseListing(_ response: String, memory: String) -> [SMSListingEntry] {
+        let lines = response
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        var entries: [SMSListingEntry] = []
+        var position = 0
+        while position < lines.count {
+            let header = lines[position]
+            guard header.hasPrefix("+CMGL:") else {
+                position += 1
                 continue
             }
-            merged[merged.count - 1] = SMSMessage(
-                sender: message.sender,
-                content: last.content + message.content,
-                code: last.code ?? message.code,
-                timestamp: message.timestamp,
-                deliveryID: message.deliveryID,
-                direction: message.direction
+            let fields = header
+                .dropFirst("+CMGL:".count)
+                .split(separator: ",", omittingEmptySubsequences: false)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+            guard fields.count >= 2, let index = Int(fields[0]), let status = Int(fields[1]) else {
+                position += 1
+                continue
+            }
+            var pduLine = position + 1
+            while pduLine < lines.count, lines[pduLine].isEmpty { pduLine += 1 }
+            guard pduLine < lines.count, let pdu = hexBytes(lines[pduLine]) else {
+                position = pduLine + 1
+                continue
+            }
+            entries.append(SMSListingEntry(memory: memory, index: index, status: status, pdu: pdu))
+            position = pduLine + 1
+        }
+        return entries
+    }
+
+    /// 把一段十六进制字符串转成字节，非法输入返回 nil。
+    static func hexBytes(_ value: String) -> [UInt8]? {
+        let digits = value.filter { !$0.isWhitespace }
+        guard !digits.isEmpty, digits.count % 2 == 0 else { return nil }
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(digits.count / 2)
+        var index = digits.startIndex
+        while index < digits.endIndex {
+            let next = digits.index(index, offsetBy: 2)
+            guard let byte = UInt8(digits[index..<next], radix: 16) else { return nil }
+            bytes.append(byte)
+            index = next
+        }
+        return bytes
+    }
+
+    /// 把本次读到的所有存储记录拼成完整短信（只产出收到的消息）。
+    static func assemble(_ entries: [SMSListingEntry]) -> [SMSMessage] {
+        var groups: [String: [SMSDecodedDelivery]] = [:]
+        var singles: [SMSDecodedDelivery] = []
+        for entry in entries {
+            guard let delivery = decode(entry.pdu) else { continue }
+            if let reference = delivery.reference, let total = delivery.total, delivery.sequence != nil {
+                groups["\(delivery.sender)|\(reference)|\(total)", default: []].append(delivery)
+            } else {
+                singles.append(delivery)
+            }
+        }
+
+        var deliveries: [SMSDecodedDelivery] = []
+        for parts in groups.values {
+            let ordered = parts.sorted { ($0.sequence ?? 0) < ($1.sequence ?? 0) }
+            guard let last = ordered.last else { continue }
+            deliveries.append(
+                SMSDecodedDelivery(
+                    sender: last.sender,
+                    text: ordered.map(\.text).joined(),
+                    timestamp: last.timestamp,
+                    reference: last.reference,
+                    total: last.total,
+                    sequence: last.sequence
+                )
             )
         }
-        return merged
+        deliveries += rejoinUnsegmented(singles)
+
+        return deliveries
+            .sorted { $0.timestamp < $1.timestamp }
+            .map { delivery in
+                SMSMessage(
+                    sender: delivery.sender,
+                    content: delivery.text,
+                    code: verificationCode(in: delivery.text),
+                    timestamp: delivery.timestamp,
+                    deliveryID: nil,
+                    direction: .incoming
+                )
+            }
     }
 
-    /// 两段是否属于同一条被拆开的长短信。
+    /// 解码一条 SMS-DELIVER PDU；其它类型（状态报告等）返回 nil。
+    static func decode(_ bytes: [UInt8]) -> SMSDecodedDelivery? {
+        var offset = 0
+        guard offset < bytes.count else { return nil }
+        // TP-SMSC：第一个字节是地址长度（含 TON 字节），先整体跳过。
+        let smscLength = Int(bytes[offset])
+        offset += 1
+        guard offset + smscLength <= bytes.count else { return nil }
+        offset += smscLength
+
+        guard offset < bytes.count else { return nil }
+        let firstOctet = bytes[offset]
+        offset += 1
+        // 只处理 SMS-DELIVER（MTI=00）。
+        guard firstOctet & 0x03 == 0 else { return nil }
+        let hasUserDataHeader = firstOctet & 0x40 != 0
+
+        guard offset < bytes.count else { return nil }
+        let addressLength = Int(bytes[offset])
+        offset += 1
+        let addressOctets = (addressLength + 1) / 2
+        guard offset + 1 + addressOctets + 2 + 7 + 1 <= bytes.count else { return nil }
+        // TON ?????? bit6-4?bit7 ?????0x91 ????????
+        let typeOfNumber = (bytes[offset] >> 4) & 0x07
+        offset += 1
+        let addressBytes = Array(bytes[offset..<(offset + addressOctets)])
+        offset += addressOctets
+        let sender = decodeAddress(typeOfNumber: typeOfNumber, semiOctets: addressBytes, length: addressLength)
+
+        offset += 1 // TP-PID
+        let dataCodingScheme = bytes[offset]
+        offset += 1
+
+        guard let timestamp = decodeTimestamp(Array(bytes[offset..<(offset + 7)])) else { return nil }
+        offset += 7
+
+        guard offset < bytes.count else { return nil }
+        let userDataLength = Int(bytes[offset])
+        offset += 1
+        let userData = Array(bytes[offset...])
+
+        var reference: Int?
+        var total: Int?
+        var sequence: Int?
+        var headerOctets = 0
+        if hasUserDataHeader, !userData.isEmpty {
+            let headerLength = Int(userData[0])
+            headerOctets = min(1 + headerLength, userData.count)
+            var cursor = 1
+            while cursor + 1 < headerOctets {
+                let identifier = userData[cursor]
+                let infoLength = Int(userData[cursor + 1])
+                cursor += 2
+                guard cursor + infoLength <= headerOctets else { break }
+                let payload = Array(userData[cursor..<(cursor + infoLength)])
+                if identifier == 0x00, payload.count >= 3 {
+                    reference = Int(payload[0])
+                    total = Int(payload[1])
+                    sequence = Int(payload[2])
+                } else if identifier == 0x08, payload.count >= 4 {
+                    reference = Int(payload[0]) << 8 | Int(payload[1])
+                    total = Int(payload[2])
+                    sequence = Int(payload[3])
+                }
+                cursor += infoLength
+            }
+        }
+
+        let payload = Array(userData.dropFirst(headerOctets))
+        let coding = (dataCodingScheme >> 2) & 0x03
+        let text: String
+        if coding == 0x02 {
+            text = decodeUTF16(payload)
+        } else if coding == 0x01 {
+            text = String(data: Data(payload), encoding: .utf8) ?? ""
+        } else {
+            // 7 位编码按 septet 计数，UDH 占掉的字节要换算成 septet 再扣掉，
+            // 文本位流从 UDH 之后的字节边界开始。
+            let headerSeptets = hasUserDataHeader ? Int(ceil(Double(headerOctets) * 8 / 7)) : 0
+            text = decodeGSM7(userData, septets: max(0, userDataLength - headerSeptets), startBit: headerOctets * 8)
+        }
+
+        return SMSDecodedDelivery(
+            sender: sender,
+            text: text,
+            timestamp: timestamp,
+            reference: reference,
+            total: total,
+            sequence: sequence
+        )
+    }
+
+    /// 把没有 UDH 的「70 个 UTF-16 单元」分段重聚回一条。
     ///
-    /// 模块 `delivery_id` 带存储槽位时优先用槽位判断：一条长短信的各段占用
-    /// **连续槽位**，而同一发件人先后发来的两条独立短信不会；这能挡掉「两条
-    /// 各 50 字的独立短信被长度启发式误合成一条」。旧版模块没有槽位、
-    /// 或两段时间戳完全相同（模块一次写入）时，退回原来的长度 / 时间窗口判断。
-    private static func isSameFragmentRun(_ last: SMSMessage, _ next: SMSMessage) -> Bool {
-        guard let lastSlot = last.storageSlot, let nextSlot = next.storageSlot else { return true }
-        if last.timestamp == next.timestamp { return true }
-        return lastSlot.memory == nextSlot.memory && nextSlot.index == lastSlot.index + 1
+    /// 自家模块发送长短信时按 70 个 UCS2 单元切段、且没有写 UDH，接收侧
+    /// 拿到的是互相独立的短信。第 1..n-1 段长度必然正好 70，因此用这个固定
+    /// 长度加一个短时间窗把它们接回去；真实手机发的长短信一定带 UDH，
+    /// 走的是上面的确定性拼接，不会误判。
+    static func rejoinUnsegmented(_ singles: [SMSDecodedDelivery]) -> [SMSDecodedDelivery] {
+        var grouped: [String: [SMSDecodedDelivery]] = [:]
+        for delivery in singles { grouped[delivery.sender, default: []].append(delivery) }
+
+        var result: [SMSDecodedDelivery] = []
+        for list in grouped.values {
+            let ordered = list.sorted { $0.timestamp < $1.timestamp }
+            var cursor = 0
+            while cursor < ordered.count {
+                var run = [ordered[cursor]]
+                while let tail = run.last,
+                      tail.text.utf16.count == unsegmentedFragmentUnits,
+                      cursor + 1 < ordered.count,
+                      ordered[cursor + 1].timestamp.timeIntervalSince(tail.timestamp) <= unsegmentedJoinWindow {
+                    cursor += 1
+                    run.append(ordered[cursor])
+                }
+                if run.count > 1, let last = run.last {
+                    result.append(
+                        SMSDecodedDelivery(
+                            sender: last.sender,
+                            text: run.map(\.text).joined(),
+                            timestamp: last.timestamp,
+                            reference: nil,
+                            total: nil,
+                            sequence: nil
+                        )
+                    )
+                } else if let first = run.first {
+                    result.append(first)
+                }
+                cursor += 1
+            }
+        }
+        return result
     }
 
-    /// 上一段是否像「一条长短信被切断的前半段」。
-    private static func isFragmentTail(_ content: String) -> Bool {
-        let length = content.utf16.count
-        if fragmentBoundaries.contains(length) { return true }
-        return length >= fragmentMinimumLength && length <= fragmentMaximumLength
+    /// 解出地址字段；TON=5 是字母数字（GSM 7 位打包）发件人，其余按 BCD 数字处理。
+    static func decodeAddress(typeOfNumber: UInt8, semiOctets: [UInt8], length: Int) -> String {
+        if typeOfNumber == 0x05 {
+            return decodeGSM7(semiOctets, septets: length * 4 / 7, startBit: 0)
+        }
+        var digits = ""
+        let nibbles = semiOctets.flatMap { [$0 & 0x0F, $0 >> 4] }
+        for index in 0..<length {
+            guard index < nibbles.count else { break }
+            switch nibbles[index] {
+            case 0...9: digits.append(String(nibbles[index]))
+            case 0x0A: digits.append("*")
+            case 0x0B: digits.append("#")
+            case 0x0C: digits.append("a")
+            case 0x0D: digits.append("b")
+            case 0x0E: digits.append("c")
+            default: break
+            }
+        }
+        return typeOfNumber == 0x01 || typeOfNumber == 0x03 ? "+" + digits : digits
     }
 
-    private static func joinWindow(for content: String) -> TimeInterval {
-        fragmentBoundaries.contains(content.utf16.count)
-            ? fragmentBoundaryJoinWindow
-            : fragmentHeuristicJoinWindow
+    /// 解析 7 字节的 TP-SCTS（BCD 半字节交换，时区以 15 分钟为单位并带符号位）。
+    static func decodeTimestamp(_ bytes: [UInt8]) -> Date? {
+        guard bytes.count >= 7 else { return nil }
+        // ??????????????????????0x49 -> 94??
+        // ? Android gsmBcdByteToInt ??????????????????
+        func bcd(_ value: UInt8) -> Int { Int(value & 0x0F) * 10 + Int(value >> 4) }
+        let year = bcd(bytes[0])
+        let month = bcd(bytes[1])
+        let day = bcd(bytes[2])
+        let hour = bcd(bytes[3])
+        let minute = bcd(bytes[4])
+        let second = bcd(bytes[5])
+        guard (1...12).contains(month), (1...31).contains(day), hour < 24, minute < 60, second < 60 else {
+            return nil
+        }
+        let zone = bytes[6]
+        let negative = zone & 0x08 != 0
+        let quarters = Int(zone & 0x07) * 10 + Int((zone >> 4) & 0x07)
+        var components = DateComponents()
+        components.year = 2000 + year
+        components.month = month
+        components.day = day
+        components.hour = hour
+        components.minute = minute
+        components.second = second
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: (negative ? -quarters : quarters) * 900) ?? .current
+        return calendar.date(from: components)
     }
+
+    static func decodeUTF16(_ bytes: [UInt8]) -> String {
+        guard !bytes.isEmpty else { return "" }
+        var units: [UInt16] = []
+        units.reserveCapacity(bytes.count / 2)
+        var index = 0
+        while index + 1 < bytes.count {
+            units.append(UInt16(bytes[index]) << 8 | UInt16(bytes[index + 1]))
+            index += 2
+        }
+        return String(decoding: units, as: UTF16.self)
+    }
+
+    /// 解 GSM 03.38 的 7 位默认字母表；`startBit` 用于跳过 UDH 占用的位。
+    static func decodeGSM7(_ bytes: [UInt8], septets: Int, startBit: Int) -> String {
+        guard septets > 0 else { return "" }
+        var scalars = String.UnicodeScalarView()
+        var septet = 0
+        var escaped = false
+        while septet < septets {
+            let bitIndex = startBit + septet * 7
+            let byteIndex = bitIndex / 8
+            let shift = bitIndex % 8
+            guard byteIndex < bytes.count else { break }
+            var value = Int(bytes[byteIndex]) >> shift
+            if shift > 1, byteIndex + 1 < bytes.count {
+                value |= Int(bytes[byteIndex + 1]) << (8 - shift)
+            }
+            value &= 0x7F
+            septet += 1
+
+            if escaped {
+                escaped = false
+                if let scalar = gsm7Extension[value] { scalars.append(scalar) }
+                continue
+            }
+            if value == 0x1B {
+                escaped = true
+                continue
+            }
+            if let scalar = gsm7Basic[value] { scalars.append(scalar) }
+        }
+        return String(scalars)
+    }
+
+    /// 与模块 `parseTextModeSMS` 相同的验证码识别，保证两种通道行为一致。
+    static func verificationCode(in text: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: "(?:^|[^0-9])([0-9]{4,8})(?:[^0-9]|$)") else { return nil }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = regex.firstMatch(in: text, range: range), match.numberOfRanges == 2,
+              let captured = Range(match.range(at: 1), in: text) else {
+            return nil
+        }
+        return String(text[captured])
+    }
+
+    /// GSM 03.38 默认字母表 0x00-0x7F。
+    private static let gsm7Basic: [UnicodeScalar?] = {
+        let table = "@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞ\u{1B}ÆæßÉ !\"#¤%&'()*+,-./0123456789:;<=>?¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà"
+        var scalars = table.unicodeScalars.map { Optional($0) }
+        while scalars.count < 128 { scalars.append(nil) }
+        return Array(scalars.prefix(128))
+    }()
+
+    /// GSM 03.38 扩展表（0x1B 转义之后）。
+    private static let gsm7Extension: [Int: UnicodeScalar] = [
+        0x0A: "\u{0C}".unicodeScalars.first!,
+        0x14: "^".unicodeScalars.first!,
+        0x28: "{".unicodeScalars.first!,
+        0x29: "}".unicodeScalars.first!,
+        0x2F: "\\".unicodeScalars.first!,
+        0x3C: "[".unicodeScalars.first!,
+        0x3D: "~".unicodeScalars.first!,
+        0x3E: "]".unicodeScalars.first!,
+        0x40: "|".unicodeScalars.first!,
+        0x65: "€".unicodeScalars.first!
+    ]
 }
 
 struct SMSStatus: Codable, Sendable {

@@ -169,8 +169,8 @@ final class AppModel: ObservableObject {
     private var hasStarted = false
     private var consecutivePollFailures = 0
     private var nextMessagesRefresh = Date.distantPast
-    /// 下一次允许让模块执行 AT+CMGL 全量扫描的时间（见 poll 里的短信节流说明）。
-    private var nextModuleSMSScan = Date.distantPast
+    /// 短信刷新任务：PDU 读取要跑好几条 AT 指令，不能占着 1 秒一次的通话轮询。
+    private var messagesRefreshTask: Task<Void, Never>?
     private var nextAudioDiagnosticRefresh = Date.distantPast
     private var nextModuleMetadataRefresh = Date.distantPast
     private var audioWarmupCallID: String?
@@ -187,6 +187,8 @@ final class AppModel: ObservableObject {
     private let lowPowerModeKey = "djonehub.low-power-mode-enabled"
     private let liveActivityKey = "djonehub.live-activity-enabled"
     private let smsNotificationKey = "djonehub.sms-notifications-enabled"
+    /// 旧版本把模块文本模式的每条分段记录都写进本机历史；PDU 拼接上线后只清理一次。
+    private let legacyFragmentPurgeKey = "djonehub.sms-pdu-purge-v1"
     private let maxCallHistoryCount = 500
     private let maxMessageCount = 2_000
     /// 已见过的呼入短信 ID 集合；后台刷新时只对集合外的新短信发通知，避免重复提醒。
@@ -401,7 +403,8 @@ final class AppModel: ObservableObject {
         // 重新开始轮询（含从后台回到前台）时立刻补一次短信同步与一次模块全量扫描，
         // 不让用户回到 App 还要等上一轮的间隔走完才看到新短信。
         nextMessagesRefresh = .distantPast
-        nextModuleSMSScan = .distantPast
+        messagesRefreshTask?.cancel()
+        messagesRefreshTask = nil
         pollingTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.poll(generation: generation)
@@ -429,6 +432,8 @@ final class AppModel: ObservableObject {
         pollingGeneration &+= 1
         pollingTask?.cancel()
         pollingTask = nil
+        messagesRefreshTask?.cancel()
+        messagesRefreshTask = nil
         callEventTask?.cancel()
         callEventTask = nil
         moduleUpdateTask?.cancel()
@@ -626,18 +631,18 @@ final class AppModel: ObservableObject {
         }
 
         if Date() >= nextMessagesRefresh {
-            // 新短信要尽快到手机：前台每 3 秒读一次模块**已经缓存**的列表
-            // （纯 JSON，不走 AT），后台放宽到 12 秒——原先前台要等 30 秒。
-            // 真正让模块去执行 `AT+CMGL` 全量读取的动作单独节流：它和 1 秒一次的
-            // 通话轮询共用同一条 AT 通道，问得太勤会把来电检测拖慢；
-            // 模块自己每 8 秒也会扫一次，所以 10 秒的节奏不会漏消息。
+            // 短信改走 PDU 读取（AT+CMGF=0 + AT+CMGL=4），一次要跑好几条 AT 指令，
+            // 比原来只读模块缓存 JSON 慢，所以前台 3 秒、后台 8 秒一次。
+            // 读取放在独立任务里异步跑：同一个 AT 端口还承担 1 秒一次的通话轮询，
+            // 同步等待会把来电检测拖慢，甚至错过 CallKit 上报窗口。
             let active = appIsActive
-            nextMessagesRefresh = Date().addingTimeInterval(active ? 3 : 12)
-            let shouldScanModule = Date() >= nextModuleSMSScan
-            if shouldScanModule {
-                nextModuleSMSScan = Date().addingTimeInterval(active ? 10 : 12)
+            nextMessagesRefresh = Date().addingTimeInterval(active ? 3 : 8)
+            if messagesRefreshTask == nil {
+                messagesRefreshTask = Task { [weak self] in
+                    await self?.refreshMessages(silently: true)
+                    self?.messagesRefreshTask = nil
+                }
             }
-            await refreshMessages(silently: true, forceModuleScan: shouldScanModule)
         }
     }
 
@@ -972,9 +977,23 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// - Parameter forceModuleScan: 是否让模块立刻执行一次 `AT+CMGL` 全量读取。
-    ///   轮询里只在节流窗口到期时为 `true`；手动刷新、发完短信走默认值 `true`。
+    /// 刷新短信列表。
+    ///
+    /// 主通道是 `/api/at` 的 PDU 读取：只有 PDU 里的 UDH 才带长短信的参考号与
+    /// 段序号，能拼出顺序正确、不再分裂的完整短信。模块的 `/api/sms` 走文本模式，
+    /// UDH 已被基带丢掉，只作为 AT 忙或模块未就绪时的兜底。
+    ///
+    /// - Parameter forceModuleScan: 走兜底通道时是否让模块立刻全量读取一次。
     func refreshMessages(silently: Bool = false, forceModuleScan: Bool = true) async {
+        if let fetched = await fetchIncomingMessagesViaPDU() {
+            purgeLegacyModuleFragmentsIfNeeded()
+            let mergedMessages = await mergeIncomingMessages(fetched.messages)
+            if messages != mergedMessages { messages = mergedMessages }
+            if !silently { errorMessage = nil }
+            handleIncomingSMSNotifications(mergedMessages)
+            await acknowledgeDeliveredRecords(moduleIDs: fetched.moduleIDs, consumed: fetched.consumed)
+            return
+        }
         do {
             if forceModuleScan { try await api.refreshSMS() }
             let remoteMessages = try await api.messages()
@@ -987,6 +1006,66 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 通过 `/api/at` 的 PDU 模式读取 SM/ME 两个存储区，并按 UDH 拼回完整短信。
+    ///
+    /// 返回 nil 表示 PDU 通道当前不可用（AT 被占、模块没就绪），调用方退回模块缓存列表。
+    /// `moduleIDs` 是本次读取**之前**模块已缓存的交付 ID：只确认这些，
+    /// 读取期间新到的短信留到下一轮，绝不会被误删。
+    private func fetchIncomingMessagesViaPDU() async -> (messages: [SMSMessage], consumed: [SMSListingEntry], moduleIDs: [String])? {
+        let moduleIDs = ((try? await api.messages()) ?? []).compactMap(\.deliveryID)
+        var entries: [SMSListingEntry] = []
+        do {
+            for memory in ["SM", "ME"] {
+                entries += try await api.pduSMSListing(memory: memory)
+            }
+        } catch {
+            return nil
+        }
+        return (SMSDecoder.assemble(entries), entries, moduleIDs)
+    }
+
+    /// 把 PDU 解出的完整短信并入本机历史；用户删过的（墓碑集合）不再复活。
+    private func mergeIncomingMessages(_ remote: [SMSMessage]) async -> [SMSMessage] {
+        let pendingMessages = remote.filter { !deletedMessageIDs.contains($0.id) }
+        var byID: [String: SMSMessage] = [:]
+        for message in messages { byID[message.id] = message }
+        for message in pendingMessages { byID[message.id] = message }
+        let merged = normalizedMessages(Array(byID.values))
+        if !pendingMessages.isEmpty { _ = historyStore.saveMessages(merged) }
+        return merged
+    }
+
+    /// 本机已落盘后让模块清掉对应记录，SIM/ME 存储区不会被历史短信塞满。
+    private func acknowledgeDeliveredRecords(moduleIDs: [String], consumed: [SMSListingEntry]) async {
+        if !moduleIDs.isEmpty {
+            do {
+                try await api.acknowledgeMessages(ids: moduleIDs)
+                return
+            } catch {
+                // 模块确认失败（记录可能已被清掉）时继续走本地兜底删除。
+            }
+        }
+        guard !consumed.isEmpty else { return }
+        for (memory, items) in Dictionary(grouping: consumed, by: \.memory) {
+            _ = try? await api.executeAT("AT+CPMS=\"\(memory)\",\"\(memory)\",\"\(memory)\"")
+            for item in items { _ = try? await api.executeAT("AT+CMGD=\(item.index)") }
+        }
+    }
+
+    /// 一次性清理旧版本留下的文本模式碎片。
+    ///
+    /// 旧版本把模块文本模式返回的每条分段记录都当成一条短信写进了本机历史，
+    /// 升级到 PDU 拼接后这些碎片会和新拼好的完整短信同时出现在聊天窗口里。
+    /// 只删「带模块交付 ID 的来信」：PDU 解出的短信没有交付 ID，不会被误伤。
+    private func purgeLegacyModuleFragmentsIfNeeded() {
+        guard !UserDefaults.standard.bool(forKey: legacyFragmentPurgeKey) else { return }
+        UserDefaults.standard.set(true, forKey: legacyFragmentPurgeKey)
+        let legacy = messages.filter { !$0.isOutgoing && $0.deliveryID != nil }
+        guard !legacy.isEmpty else { return }
+        messages = messages.filter { $0.isOutgoing || $0.deliveryID == nil }
+        _ = historyStore.saveMessages(messages)
+    }
+
     /// 记录当前已知短信作为后台新短信通知的基线；前台刷新同样并入，
     /// 保证用户正在看 App 时不会为已显示的消息重复弹通知。
     private func captureSMSSnapshot() {
@@ -995,9 +1074,12 @@ final class AppModel: ObservableObject {
         seenIncomingSMSIDs.formUnion(receivedMessages(from: messages).map(\.id))
     }
 
-    /// 收到方向、且已把长短信各段合并回一条的记录。
+    /// 收到的短信（不含本机发出的）。
+    ///
+    /// PDU 通道已经在 `SMSDecoder` 里按 UDH 把长短信拼成一条，这里不再做任何
+    /// 「按长度猜分段」的二次合并——旧启发式正是长短信在刷新之间反复裂开又合上的原因。
     private func receivedMessages(from records: [SMSMessage]) -> [SMSMessage] {
-        SMSMessage.mergedFragments(records).filter { !$0.isOutgoing }
+        records.filter { !$0.isOutgoing }
     }
 
     /// 前台把新短信直接并入已见集合；后台对未见过的呼入短信发送本地通知，

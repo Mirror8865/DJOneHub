@@ -154,7 +154,29 @@ struct DJOneHubAPI: Sendable {
     func gpsStart() async throws -> GPSControlResponse { try await postDecoded("api/gps/start", EmptyBody()) }
     func gpsStop() async throws -> GPSControlResponse { try await postDecoded("api/gps/stop", EmptyBody()) }
     func gpsRefresh() async throws -> GPSFixSummary { try await postDecoded("api/gps/refresh", EmptyBody()) }
-    func executeAT(_ command: String) async throws -> ATResult { try await postDecoded("api/at", ["command": command]) }
+    func executeAT(_ command: String, timeout: TimeInterval = 8) async throws -> ATResult {
+        try await postDecoded("api/at", ["command": command], timeout: timeout)
+    }
+
+    /// 读取一个短信存储区的 PDU 列表（`AT+CMGF=0` + `AT+CMGL=4`）。
+    ///
+    /// 模块自己每 8 秒会把短信模式切回文本模式（`AT+CMGF=1`），两次请求之间
+    /// 被它抢先时会返回 ERROR，这里重新固定 PDU 模式后再读一次。
+    /// PDU 里带 UDH，长短信的段序号才能被 App 正确拼接。
+    func pduSMSListing(memory: String) async throws -> [SMSListingEntry] {
+        let select = "AT+CPMS=\"\(memory)\",\"\(memory)\",\"\(memory)\""
+        _ = try await executeAT("AT+CMGF=0")
+        _ = try? await executeAT(select)
+        do {
+            let listing = try await executeAT("AT+CMGL=4", timeout: 20)
+            return SMSDecoder.parseListing(listing.response, memory: memory)
+        } catch {
+            _ = try await executeAT("AT+CMGF=0")
+            _ = try? await executeAT(select)
+            let listing = try await executeAT("AT+CMGL=4", timeout: 20)
+            return SMSDecoder.parseListing(listing.response, memory: memory)
+        }
+    }
 
     // MARK: eSIM、模块初始化与语音运行时
 

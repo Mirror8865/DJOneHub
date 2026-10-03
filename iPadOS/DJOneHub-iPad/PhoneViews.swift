@@ -2056,7 +2056,7 @@ struct MessagesView: View {
             .map { entry in
                 Conversation(
                     id: entry.key,
-                    messages: SMSMessage.mergedFragments(entry.value),
+                    messages: SMSMessage.chronological(entry.value),
                     recordIDs: Set(entry.value.map(\.id))
                 )
             }
@@ -2391,7 +2391,7 @@ struct ChatPane: View {
     private var messages: [SMSMessage] {
         // 一条长短信在模块侧是多条独立记录（发送按 70 个 UCS2 单元切段，
         // 收到的多段短信在 ME 存储里也各占一条），这里合回一个气泡。
-        SMSMessage.mergedFragments(model.messages.filter { $0.sender == handle })
+        SMSMessage.chronological(model.messages.filter { $0.sender == handle })
     }
 
     private var displayName: String {
