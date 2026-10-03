@@ -328,6 +328,8 @@ const (
 	usbGadgetPath      = "/sys/devices/virtual/android_usb/android0"
 	qdc507USBVendorID  = "2c7c"
 	qdc507USBProductID = "0125"
+	// 写入 functions 后内核重新枚举需要一点时间，校验窗口不能太短。
+	usbFunctionVerifyTimeout = 6 * time.Second
 )
 
 var qdc507KnownUSBFields = []string{"0x2C7C", "0x0125", "1", "1", "1", "1", "1", "1", "1"}
@@ -456,6 +458,16 @@ func (a *agent) usbProfile(response http.ResponseWriter, request *http.Request) 
 				writeError(response, http.StatusBadGateway, err.Error())
 				return
 			}
+			// 基带也可能接收了命令却没有真正写入：读回确认，不一致就写回原组合。
+			if readback, err := a.at.command(`AT+QCFG="usbcfg"`, 5*time.Second); err == nil {
+				if parsed, parseErr := parseUSBConfiguration(readback); parseErr == nil && parsed.uacEnabled() != wantUAC {
+					if _, restoreErr := a.at.command(configuration.withUAC(configuration.uacEnabled()), 8*time.Second); restoreErr != nil {
+						log.Printf("USBCFG 写入未生效且回滚失败: %v", restoreErr)
+					}
+					writeError(response, http.StatusBadGateway, "USBCFG 写入未生效，已写回原组合")
+					return
+				}
+			}
 		}
 		configuration.fields[8] = map[bool]string{true: "1", false: "0"}[wantUAC]
 	}
@@ -507,12 +519,12 @@ func usbGadgetHasAudio(readFile func(string) ([]byte, error)) bool {
 
 func activateMobileGadget() error {
 	functionsPath := usbGadgetPath + "/functions"
-	raw, err := os.ReadFile(functionsPath)
+	original, err := os.ReadFile(functionsPath)
 	if err != nil {
 		return fmt.Errorf("读取 USB functions 失败: %w", err)
 	}
 	var kept []string
-	for _, item := range strings.Split(strings.TrimSpace(string(raw)), ",") {
+	for _, item := range strings.Split(strings.TrimSpace(string(original)), ",") {
 		item = strings.TrimSpace(item)
 		if item != "" && item != "serial" && item != "audio" {
 			kept = append(kept, item)
@@ -533,7 +545,92 @@ func activateMobileGadget() error {
 	if err := os.WriteFile(usbGadgetPath+"/enable", []byte("1\n"), 0o600); err != nil {
 		return fmt.Errorf("重新启用 USB gadget 失败: %w", err)
 	}
+	if err := verifyUSBFunctions(kept); err != nil {
+		if restoreErr := restoreUSBFunctions(original); restoreErr != nil {
+			return fmt.Errorf("手机直连组合校验失败（%v），回滚原组合也失败：%w", err, restoreErr)
+		}
+		return fmt.Errorf("手机直连组合校验失败，已回滚原组合: %w", err)
+	}
 	return nil
+}
+
+// verifyUSBFunctions 确认内核真的采用了新组合：functions 与目标一致，且 ECM 网卡在位。
+// 只看 functions 写入是否报错不够：实测出现过写入返回成功、模块却只枚举出
+// DM/NMEA/Modem，以太网和 ADB 一起消失，只能断电重启才恢复。
+func verifyUSBFunctions(want []string) error {
+	deadline := time.Now().Add(usbFunctionVerifyTimeout)
+	var last string
+	var lastErr error
+	for {
+		raw, err := os.ReadFile(usbGadgetPath + "/functions")
+		switch {
+		case err != nil:
+			lastErr = err
+		case sameFunctionSet(string(raw), want):
+			last = strings.TrimSpace(string(raw))
+			if !containsFunction(want, "ecm") || usbNetdevPresent("ecm0") {
+				return nil
+			}
+			lastErr = errors.New("ecm0 网卡未出现")
+		default:
+			last = strings.TrimSpace(string(raw))
+			lastErr = errors.New("functions 与目标不一致")
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if lastErr == nil {
+		lastErr = errors.New("未读取到 USB functions")
+	}
+	return fmt.Errorf("%w（当前 %q）", lastErr, last)
+}
+
+func sameFunctionSet(raw string, want []string) bool {
+	got := map[string]bool{}
+	for _, item := range strings.Split(raw, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			got[item] = true
+		}
+	}
+	if len(got) != len(want) {
+		return false
+	}
+	for _, item := range want {
+		if !got[item] {
+			return false
+		}
+	}
+	return true
+}
+
+func containsFunction(functions []string, want string) bool {
+	for _, item := range functions {
+		if item == want {
+			return true
+		}
+	}
+	return false
+}
+
+func usbNetdevPresent(name string) bool {
+	_, err := os.Stat("/sys/class/net/" + name)
+	return err == nil
+}
+
+// restoreUSBFunctions 把 gadget 恢复成切换前的组合，避免一次失败的切换把模块
+// 留在只能枚举 DM/NMEA/Modem 的状态上。
+func restoreUSBFunctions(original []byte) error {
+	if err := os.WriteFile(usbGadgetPath+"/enable", []byte("0\n"), 0o600); err != nil {
+		return err
+	}
+	time.Sleep(500 * time.Millisecond)
+	if err := os.WriteFile(usbGadgetPath+"/functions", original, 0o600); err != nil {
+		_ = os.WriteFile(usbGadgetPath+"/enable", []byte("1\n"), 0o600)
+		return err
+	}
+	return os.WriteFile(usbGadgetPath+"/enable", []byte("1\n"), 0o600)
 }
 
 func macProfileCleanupCommand() *exec.Cmd {

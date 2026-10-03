@@ -364,6 +364,39 @@ func TestUSBGadgetHasAudio(t *testing.T) {
 	}
 }
 
+// functions 是唯一能证明内核真的采用了新组合的证据，顺序和空白都要容忍，
+// 但只要多出或缺少一项就必须判为未采用，否则切换失败会被当成成功。
+func TestSameFunctionSetToleratesOrderAndWhitespaceOnly(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want []string
+		ok   bool
+	}{
+		{"完全一致", "diag,ecm,ffs\n", []string{"diag", "ecm", "ffs"}, true},
+		{"顺序不同且带空白", " ffs, ecm , diag \n", []string{"diag", "ecm", "ffs"}, true},
+		{"多出 serial 视为未采用", "diag,ecm,ffs,serial\n", []string{"diag", "ecm", "ffs"}, false},
+		{"缺少一项视为未采用", "diag,ecm\n", []string{"diag", "ecm", "ffs"}, false},
+		{"空内容不匹配", "\n", []string{"diag", "ecm", "ffs"}, false},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			if got := sameFunctionSet(test.raw, test.want); got != test.ok {
+				t.Fatalf("sameFunctionSet(%q) = %t，期望 %t", test.raw, got, test.ok)
+			}
+		})
+	}
+}
+
+func TestContainsFunction(t *testing.T) {
+	if !containsFunction([]string{"diag", "ecm", "ffs"}, "ecm") {
+		t.Fatal("未在组合中找到 ecm")
+	}
+	if containsFunction([]string{"diag", "ffs"}, "ecm") {
+		t.Fatal("在不含 ecm 的组合里误报")
+	}
+}
+
 func TestCellularForwardingPolicyWritesBothProtocols(t *testing.T) {
 	for _, test := range []struct {
 		name    string
