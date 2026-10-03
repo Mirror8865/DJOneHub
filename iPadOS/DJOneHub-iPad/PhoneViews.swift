@@ -702,7 +702,7 @@ struct GlassAvatar: View {
 
 /// 分栏版式左列：系统灰底（列表区），与系统 App 的双栏左列一致。
 struct PhoneSplitListColumn<Content: View>: View {
-    /// 会话自定义壁纸：设了就在本列叠一层系统材质（磨砂），壁纸本身由上层整屏绘制。
+    /// 会话自定义壁纸：设了就用它做左列底板（先模糊，再叠系统材质）。
     var wallpaper: UIImage? = nil
     var wallpaperCanvas: CGSize = .zero
     var wallpaperOriginX: CGFloat = 0
@@ -712,18 +712,28 @@ struct PhoneSplitListColumn<Content: View>: View {
         VStack(spacing: 0) { content }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background {
-                if wallpaper != nil {
-                    // 会话壁纸由信息板块整屏铺在分栏容器底下（见 `MessagesView.regularBody`），
-                    // 这里只叠一层系统材质做「磨砂」：材质会实时采样身后的壁纸，
-                    // 因此左列与右列仍然是同一张图的连续裁切，且顶栏 / 状态栏区域也能透出来。
-                    // 不再在本列二次绘制壁纸——两列各画一份会在分栏线上露出接缝。
-                    Rectangle()
-                        .fill(.ultraThinMaterial)
-                        .ignoresSafeArea()
-                } else {
-                    // 左列比右列更深一档（systemGray5：浅色 #E5E5EA / 深色 #2C2C2E），
-                    // 与右列的系统白 / 纯黑形成系统设置 App 那种层次。
-                    Color(uiColor: .systemGray5).ignoresSafeArea()
+                ZStack {
+                    // 壁纸必须画在本列自己的内容里：
+                    // `NavigationStack` 会盖一层不透明底色，画在分栏容器底下根本看不到。
+                    if let wallpaper {
+                        PhoneWallpaperBackdrop(
+                            image: wallpaper,
+                            canvas: wallpaperCanvas,
+                            originX: wallpaperOriginX,
+                            blurRadius: 24
+                        )
+                    }
+                    if wallpaper != nil {
+                        // 左侧列表的液态玻璃底板：系统材质叠在模糊壁纸上，
+                        // 列表滚动时内容从材质里透出来（与系统「信息」侧栏一致）。
+                        Rectangle()
+                            .fill(.ultraThinMaterial)
+                            .ignoresSafeArea()
+                    } else {
+                        // 左列比右列更深一档（systemGray5：浅色 #E5E5EA / 深色 #2C2C2E），
+                        // 与右列的系统白 / 纯黑形成系统设置 App 那种层次。
+                        Color(uiColor: .systemGray5).ignoresSafeArea()
+                    }
                 }
             }
     }
@@ -2659,10 +2669,15 @@ struct ChatPane: View {
     /// 在任何照片上都有足够对比度）；没设就保持系统背景色，与系统「信息」默认会话一致。
     @ViewBuilder
     private var conversationBackground: some View {
-        if wallpaper != nil {
-            // 分栏版式：整屏壁纸已经由信息板块铺在分栏容器底下（含顶栏与状态栏），
-            // 本列必须保持透明，让同一张图连续透出来；再画一层反而会在第二次裁切处露白。
-            Color.clear
+        if let wallpaper, wallpaperCanvas != .zero {
+            // 分栏版式：与左列共用同一张图（各自计算入口偏移，得到相邻的两块裁切），
+            // 这层同样 `.ignoresSafeArea()`，所以它连状态栏、顶部导航栏、底部导航栏
+            // 那几条带子一起盖住（分栏两侧各画一半正好拼成整张图）。
+            PhoneWallpaperBackdrop(
+                image: wallpaper,
+                canvas: wallpaperCanvas,
+                originX: wallpaperOriginX
+            )
         } else if let image = chatBackgrounds.image(for: handle) {
             GeometryReader { proxy in
                 Image(uiImage: image)

@@ -141,14 +141,10 @@ final class DJOneHubNotificationDelegate: NSObject, UIApplicationDelegate, UNUse
 /// 定位精度降到公里级、只当作「进程存活心跳」使用：不读取坐标、不上传、不落盘，
 /// 借的是系统对定位类 App 的后台调度能力，而不是位置本身。
 ///
-/// 状态栏指示：`showsBackgroundLocationIndicator` 全程设为 `false`。
-///
-/// 「定位保活」开启且授权可用时持有 `CLBackgroundActivitySession`：
-/// 这是 iOS 官方允许 App 在后台继续收到定位更新的唯一途径，
-/// 也是能让进程不在进入后台后很快被系统挂起的保证。
-/// 关闭「定位保活」后不再创建会话、也不持续定位，
-/// 只保留显著位置变化 / 访问事件 / 地理围栏 / 后台刷新四条系统唤醒通道，
-/// 状态栏不会有任何常驻指示，代价是提醒可能延迟到下一次系统唤醒。
+/// 状态栏指示：全程把 `showsBackgroundLocationIndicator` 设为 `false`，并且**不**创建
+/// `CLBackgroundActivitySession`。那个会话会让系统在状态栏常驻「定位服务」指示，
+/// 而且这个指示由系统强制展示、App 无法关闭（v38 之前正是它在点亮图标）。
+/// 后台复活改由显著位置变化 / 访问事件 / 地理围栏 / 后台刷新任务四条系统通道承担。
 @MainActor
 final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
     private let manager = CLLocationManager()
@@ -163,12 +159,6 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
     private var monitoringVisits = false
     /// 地理围栏监控：进出围栏同样能拉起已被系统回收的进程，作为第三条复活通道。
     private var monitoredRegion: CLCircularRegion?
-    /// 后台活动会话（iOS 17+ 的 `CLBackgroundActivitySession`）。
-    /// 持有它，系统才会把本进程当作「正在使用定位」而不加以挂起，
-    /// 后台轮询（来电 / 短信提醒）才能持续跑下去。
-    /// 类型用 `Any?` 存储：本 App 最低支持 iOS 16.1，
-    /// 不能在存储属性上直接引用新系统类型。
-    private var activitySession: Any?
     /// 后台唤醒去重时间戳：定位回调很密集，避免每一次回调都重建轮询。
     private var lastBackgroundWake = Date.distantPast
     /// 「定位持续保活」开关。开启时用持续定位把进程留在运行态（最可靠）；
@@ -192,15 +182,6 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
         guard enabled else { return "已关闭" }
         if suspendedForCall { return "通话中已暂停" }
         if !locationHeartbeatEnabled { return "低功耗保活（仅系统唤醒，状态栏无指示）" }
-        // 前台不跑持续定位（不让状态栏常驻指示），
-        // 这不是故障：进入后台时系统会自动接管。
-        if !appIsBackground,
-           manager.authorizationStatus == .authorizedAlways
-               || manager.authorizationStatus == .authorizedWhenInUse {
-            return heartbeatActive
-                ? "保活运行中（后台与锁屏有效）"
-                : "保活已就绪（进入后台 / 锁屏后持续运行）"
-        }
         switch manager.authorizationStatus {
         case .authorizedAlways:
             return heartbeatActive ? "保活运行中（后台与锁屏有效）" : "正在启动"
@@ -267,8 +248,9 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
 
     func setApplicationIsBackground(_ isBackground: Bool) {
         appIsBackground = isBackground
-        // 前台只保持会话、不跑持续定位；进入后台后立刻把定位更新接上，
-        // 让系统把本进程当作「正在使用定位」而不加以挂起。
+        // 定位会话常驻：不是在进入后台的那一刻才启动。
+        // 系统对「已经在前台运行中的定位会话」会平滑续到后台；对「后台才临时启动」
+        // 的会话则常常延迟投递甚至直接拒绝，那正是「切后台/锁屏就收不到通知」的根因。
         restartTask?.cancel()
         restartTask = nil
         startIfAuthorized()
@@ -295,25 +277,14 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
         guard enabled, !suspendedForCall else { return }
         if !locationHeartbeatEnabled {
             // 低功耗保活：显著位置变化 / 访问 / 围栏监控仍然登记着，
-            // 但不创建定位会话、也不跑持续定位，状态栏不会有任何常驻指示。
-            if heartbeatActive || activitySession != nil { stopHeartbeat() }
+            // 只是不做持续定位，避免状态栏常驻定位指示。
+            heartbeatActive = false
             return
         }
         switch manager.authorizationStatus {
         case .authorizedAlways, .authorizedWhenInUse:
-            // 会话必须在已授权的前台创建，
-            // 系统才会把它平滑延续到后台（这是 Apple 对「使用期间 + 后台活动会话」
-            // 的标准用法）。
-            startActivitySessionIfNeeded()
-            guard appIsBackground else {
-                // 前台不跑持续定位：状态栏因此不会常驻「定位服务」指示。
-                // 一旦进入后台，`setApplicationIsBackground(true)` 会立刻把更新接上。
-                if heartbeatActive {
-                    heartbeatActive = false
-                    manager.stopUpdatingLocation()
-                }
-                return
-            }
+            // 「使用期间」+ 后台活动会话同样能持续收到后台定位回调，
+            // 所以两种授权都直接把心跳跑起来，不再等用户升级到「始终允许」。
             guard !heartbeatActive else { return }
             heartbeatActive = true
             manager.startUpdatingLocation()
@@ -365,24 +336,6 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
     private func stopHeartbeat() {
         heartbeatActive = false
         manager.stopUpdatingLocation()
-        stopActivitySession()
-    }
-
-    /// 创建后台活动会话：必须在 App 仍在前台（或已有授权）时创建，
-    /// 系统才会把它平滑延续到后台；在进入后台后才临时创建常常不被授予。
-    private func startActivitySessionIfNeeded() {
-        guard activitySession == nil, manager.allowsBackgroundLocationUpdates else { return }
-        if #available(iOS 17.0, *) {
-            activitySession = CLBackgroundActivitySession()
-        }
-    }
-
-    /// 无效化后系统不再为本进程保留后台定位调度。
-    private func stopActivitySession() {
-        if #available(iOS 17.0, *) {
-            (activitySession as? CLBackgroundActivitySession)?.invalidate()
-        }
-        activitySession = nil
     }
 
     /// 显著位置变化监控：这是系统允许的「进程被回收后仍能被拉起」通道。
