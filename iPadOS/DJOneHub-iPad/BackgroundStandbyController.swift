@@ -161,6 +161,10 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
     /// 这是官方给「必须长期在后台运行」的 App 提供的标准通道。
     /// 用 `Any?` 保存是因为它要求 iOS 17，而本 App 最低支持 16.1。
     private var backgroundActivitySession: Any?
+    /// 「定位持续保活」开关。开启时用持续定位把进程留在运行态（最可靠，但系统会在
+    /// 状态栏常驻定位指示）；关闭后不再跑持续定位，只留显著位置变化 / 访问 / 地理围栏 /
+    /// 后台任务这四条系统唤醒通道（状态栏干净，代价是提醒可能延迟到下一次系统唤醒）。
+    private var locationHeartbeatEnabled = true
 
     /// 是否授予了「始终允许」；只有它才能让定位更新在后台持续投递。
     var hasAlwaysAuthorization: Bool {
@@ -176,6 +180,7 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
     var statusText: String {
         guard enabled else { return "已关闭" }
         if suspendedForCall { return "通话中已暂停" }
+        if !locationHeartbeatEnabled { return "低功耗保活（仅系统唤醒，状态栏无指示）" }
         switch manager.authorizationStatus {
         case .authorizedAlways:
             return heartbeatActive ? "保活运行中（后台与锁屏有效）" : "正在启动"
@@ -206,6 +211,20 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
         // 缺失时直接开启会抛异常，因此这里按实际声明决定，保证 App 永不因保活崩溃。
         let backgroundModes = Bundle.main.object(forInfoDictionaryKey: "UIBackgroundModes") as? [String]
         manager.allowsBackgroundLocationUpdates = backgroundModes?.contains("location") ?? false
+        // 不再显示整条后台定位指示（胶囊状「实时活动」样式），只保留系统必须展示的定位箭头。
+        manager.showsBackgroundLocationIndicator = false
+    }
+
+    /// 「定位持续保活」开关：见 `locationHeartbeatEnabled` 的说明。
+    func setLocationHeartbeatEnabled(_ enabled: Bool) {
+        locationHeartbeatEnabled = enabled
+        if enabled {
+            startBackgroundActivitySession()
+            startIfAuthorized()
+        } else {
+            stopHeartbeat()
+            stopBackgroundActivitySession()
+        }
     }
 
     func setEnabled(_ enabled: Bool) {
@@ -214,8 +233,9 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
             // 权限弹窗必须在前台出现，用户才能看到并授权；随后由进入后台触发心跳。
             requestAuthorizationIfNeeded()
             // 后台活动会话必须在 App 仍在前台时创建，系统才会把它登记成
-            // 「允许在后台持续运行」的定位会话。
-            startBackgroundActivitySession()
+            // 「允许在后台持续运行」的定位会话。关闭定位保活时整条定位链路都不启动，
+            // 状态栏也就不会出现常驻指示。
+            if locationHeartbeatEnabled { startBackgroundActivitySession() }
             // 三条「被回收后仍能拉起进程」的通道全部登记：显著位置变化、访问事件、地理围栏。
             startSignificantChangeMonitoring()
             startVisitMonitoring()
@@ -261,6 +281,12 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
 
     private func startIfAuthorized() {
         guard enabled, !suspendedForCall else { return }
+        if !locationHeartbeatEnabled {
+            // 低功耗保活：显著位置变化 / 访问 / 围栏监控仍然登记着，
+            // 只是不做持续定位，避免状态栏常驻定位指示。
+            heartbeatActive = false
+            return
+        }
         switch manager.authorizationStatus {
         case .authorizedAlways, .authorizedWhenInUse:
             // 「使用期间」+ 后台活动会话同样能持续收到后台定位回调，

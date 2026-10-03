@@ -690,14 +690,25 @@ struct GlassAvatar: View {
 
 /// 分栏版式左列：系统灰底（列表区），与系统 App 的双栏左列一致。
 struct PhoneSplitListColumn<Content: View>: View {
+    var isTranslucent: Bool = false
     @ViewBuilder var content: Content
 
     var body: some View {
         VStack(spacing: 0) { content }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            // 左列比右列更深一档（systemGray5：浅色 #E5E5EA / 深色 #2C2C2E），
-            // 与右列的系统白 / 纯黑形成系统设置 App 那种层次。
-            .background(Color(uiColor: .systemGray5).ignoresSafeArea())
+            .background {
+                if isTranslucent {
+                    // 会话自定义背景：左列叠系统材质做满模糊，
+                    // 透出外层铺满整窗的背景图（与系统「信息」一致）。
+                    Rectangle()
+                        .fill(.ultraThinMaterial)
+                        .ignoresSafeArea()
+                } else {
+                    // 左列比右列更深一档（systemGray5：浅色 #E5E5EA / 深色 #2C2C2E），
+                    // 与右列的系统白 / 纯黑形成系统设置 App 那种层次。
+                    Color(uiColor: .systemGray5).ignoresSafeArea()
+                }
+            }
     }
 }
 
@@ -802,12 +813,19 @@ struct PhoneSplitContainer<Left: View, Right: View>: View {
 
 /// 分栏版式右列：系统白底（详情区）。
 struct PhoneSplitDetailColumn<Content: View>: View {
+    var isTranslucent: Bool = false
     @ViewBuilder var content: Content
 
     var body: some View {
         content
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(uiColor: .systemBackground).ignoresSafeArea())
+            .background {
+                // 半透明时不画自己的底色，交给外层统一铺会话背景，
+                // 避免和左列各自绘一层导致两侧明暗不一致。
+                if !isTranslucent {
+                    Color(uiColor: .systemBackground).ignoresSafeArea()
+                }
+            }
     }
 }
 
@@ -1794,12 +1812,15 @@ struct ContactDetailPane: View {
         .sheet(isPresented: $showingEditor, onDismiss: reloadContacts) {
             NativeContactCard(
                 identifier: contact.id,
+                phone: primaryPhone,
                 showsNavigationBar: true,
                 showsDoneButton: true,
                 allowsEditing: true,
                 startsInEditMode: true
             ) { _ in } onMessage: { _ in }
-            .presentationSizingIfAvailable()
+            // 系统联系人卡片是 UIKit 控制器，给它一个确定的最小尺寸；
+            // 用 `presentationSizing(.form)` 会让它在首次布局拿到 0 尺寸而整页空白。
+            .frame(minWidth: 340, minHeight: 520)
             .presentationDragIndicator(.visible)
         }
     }
@@ -2047,7 +2068,17 @@ struct MessagesView: View {
     /// 四个板块共用左列宽度：拖动中间手柄后写入同一个 AppStorage 键。
     @AppStorage("djonehub.split.left-width") private var splitLeftWidth: Double = 360
 
+    /// 会话背景（iOS 26「信息」的会话背景）：整窗铺满，
+    /// 左列列表也透出同一张图，由左列自己叠系统材质做满模糊。
+    @StateObject private var chatBackgrounds = ChatBackgroundStore.shared
+
     private var isRegular: Bool { horizontalSizeClass == .regular }
+
+    /// 当前选中会话的自定义背景图；没设就为 nil，回到系统默认底色。
+    private var conversationBackdrop: Image? {
+        guard let handle = selection, let image = chatBackgrounds.image(for: handle) else { return nil }
+        return Image(uiImage: image)
+    }
 
     private var allConversations: [Conversation] {
         let grouped = Dictionary(grouping: model.messages) { $0.sender }
@@ -2096,37 +2127,54 @@ struct MessagesView: View {
     // MARK: iPad 双列
 
     private var regularBody: some View {
-        PhoneSplitContainer(leftWidth: $splitLeftWidth) {
-            NavigationStack {
-                PhoneSplitListColumn {
-                    PhoneSearchField(placeholder: L10n.t("搜索"), text: $search)
-                        .padding(.horizontal, 16)
-                        .padding(.top, 4)
-                        .padding(.bottom, 8)
-                    List {
-                        conversationRows(linkRows: false)
-                    }
-                    .listStyle(.plain)
-                    .scrollContentBackground(.hidden)
-                    .scrollDismissesKeyboard(.interactively)
+        let hasBackdrop = conversationBackdrop != nil
+        return ZStack {
+            // 会话自定义背景：整窗铺满（含左列与状态栏区域），
+            // 与系统「信息」App 的会话背景一致；没设背景时两列保持系统底色。
+            if let backdrop = conversationBackdrop {
+                GeometryReader { proxy in
+                    backdrop
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                        .clipped()
+                        .overlay(Color.black.opacity(0.16))
                 }
-                .navigationTitle(isEditing ? L10n.t("已选择 \(checkedIDs.count) 项") : L10n.t("信息"))
-                .navigationBarTitleDisplayMode(.inline)
-                // 左列顶栏只有分类 / 编辑；右列顶栏是新信息 / 视频，与系统「信息」App 一致。
-                .toolbar { listToolbar(showsCompose: false) }
-                .immersiveBars()
+                .ignoresSafeArea()
             }
-        } right: {
-            PhoneSplitDetailColumn {
-                if let handle = selection {
-                    NavigationStack {
-                        ChatPane(handle: handle) {
-                            composeRecipient = ""
-                            showingCompose = true
+
+            PhoneSplitContainer(leftWidth: $splitLeftWidth) {
+                NavigationStack {
+                    PhoneSplitListColumn(isTranslucent: hasBackdrop) {
+                        PhoneSearchField(placeholder: L10n.t("搜索"), text: $search)
+                            .padding(.horizontal, 16)
+                            .padding(.top, 4)
+                            .padding(.bottom, 8)
+                        List {
+                            conversationRows(linkRows: false)
                         }
+                        .listStyle(.plain)
+                        .scrollContentBackground(.hidden)
+                        .scrollDismissesKeyboard(.interactively)
                     }
-                } else {
-                    EmptyStateView(title: L10n.t("选择信息开始聊天"), systemImage: "message")
+                    .navigationTitle(isEditing ? L10n.t("已选择 \(checkedIDs.count) 项") : L10n.t("信息"))
+                    .navigationBarTitleDisplayMode(.inline)
+                    // 左列顶栏只有分类 / 编辑；右列顶栏是新信息 / 视频，与系统「信息」App 一致。
+                    .toolbar { listToolbar(showsCompose: false) }
+                    .immersiveBars()
+                }
+            } right: {
+                PhoneSplitDetailColumn(isTranslucent: hasBackdrop) {
+                    if let handle = selection {
+                        NavigationStack {
+                            ChatPane(handle: handle, usesSharedBackdrop: hasBackdrop) {
+                                composeRecipient = ""
+                                showingCompose = true
+                            }
+                        }
+                    } else {
+                        EmptyStateView(title: L10n.t("选择信息开始聊天"), systemImage: "message")
+                    }
                 }
             }
         }
@@ -2383,6 +2431,9 @@ private struct ConversationRow: View {
 struct ChatPane: View {
     @EnvironmentObject private var model: AppModel
     let handle: String
+    /// 分栏版式下背景由外层整窗铺满（左列也要透出同一张图），
+    /// 这里就不再重复绘制背景，避免叠两层导致两侧明暗不一致。
+    var usesSharedBackdrop: Bool = false
     let onCompose: () -> Void
 
     @State private var draft = ""
@@ -2390,6 +2441,14 @@ struct ChatPane: View {
     @State private var showingMoreActions = false
     /// 会话背景（iOS 26「信息」的会话背景）：气泡的液态玻璃会折射背景内容。
     @StateObject private var chatBackgrounds = ChatBackgroundStore.shared
+
+    /// 显式 init：保证尾随闭包始终绑定 `onCompose`，
+    /// 不受后面那些带默认值的 `@State` 存储属性影响。
+    init(handle: String, usesSharedBackdrop: Bool = false, onCompose: @escaping () -> Void) {
+        self.handle = handle
+        self.usesSharedBackdrop = usesSharedBackdrop
+        self.onCompose = onCompose
+    }
 
     private var messages: [SMSMessage] {
         // 一条长短信在模块侧是多条独立记录（发送按 70 个 UCS2 单元切段，
@@ -2481,7 +2540,10 @@ struct ChatPane: View {
     /// 在任何照片上都有足够对比度）；没设就保持系统背景色，与系统「信息」默认会话一致。
     @ViewBuilder
     private var conversationBackground: some View {
-        if let image = chatBackgrounds.image(for: handle) {
+        if usesSharedBackdrop {
+            // 分栏版式：背景已由外层整窗铺满（含左列），这里保持透明。
+            Color.clear
+        } else if let image = chatBackgrounds.image(for: handle) {
             GeometryReader { proxy in
                 Image(uiImage: image)
                     .resizable()
@@ -2740,51 +2802,33 @@ private struct MessageBubble: View {
     }
 }
 
-/// iMessage 同款气泡轮廓：四角连续圆角，发件人一侧的下角按需带一个小角。
+/// iMessage 同款气泡轮廓：四角连续圆角，发件人一侧的下角在需要时收成小角（小尾巴）。
 ///
-/// 与系统「信息」App 的规则一致：连续同向的气泡只有最后一条带角，其余保持纯圆角，
-/// 整段消息看起来才是连贯的一块，而不是一串各自独立的气泡。
+/// 直接用系统公开 API `UnevenRoundedRectangle`（iOS 16 起）逐角指定半径，
+/// 不再自绘 `Path`：小尾巴是「把该角半径收小」而不是另画一个尖角，
+/// 带角与不带角的气泡外框尺寸完全一致，整段消息对齐，
+/// 形状也永远跟随系统圆角风格（不会随 SDK 变化而过时）。
+/// 与系统「信息」App 的规则一致：连续同向的气泡只有最后一条带小尾巴，
+/// 其余保持纯圆角，整段消息看起来才是连贯的一块。
 private struct MessageBubbleShape: Shape {
     let isOutgoing: Bool
     let hasTail: Bool
 
-    /// 小角占用的固定槽位。
-    ///
-    /// 关键点：无论这一条有没有小角，槽位都留出来，气泡本体尺寸完全一致。
-    /// 旧实现让带角的那条少 7pt 宽、少 7pt 高，同一段消息里它明显比别的矮一截、
-    /// 文字也被顶高，看起来「不整齐」，与系统「信息」App 的规则不符。
-    // 用计算属性而不是存储属性：存储属性会参与自动合成的 memberwise init，
-    // 把它的访问级别拉成 private，同文件里另一个类型再构造本 Shape 就会编不过。
-    private var tail: CGFloat { 7 }
+    /// 气泡本体的连续大圆角。
     private var corner: CGFloat { 20 }
+    /// 小尾巴半径：明显小于本体圆角，形成 iMessage 那种「一个小尾巴」的观感。
+    private var tailCorner: CGFloat { 6 }
 
     func path(in rect: CGRect) -> Path {
-        let body = CGRect(
-            x: rect.minX + (isOutgoing ? 0 : tail),
-            y: rect.minY,
-            width: rect.width - tail,
-            height: rect.height
-        )
-        var path = Path(roundedRect: body, cornerRadius: corner, style: .continuous)
-        guard hasTail else { return path }
-
-        // 与系统「信息」一致：发件人的小角落在右下、收件人的落在左下，
-        // 从底边向外交出一个小尖再回到侧边，形成平滑的小角。
-        let sign: CGFloat = isOutgoing ? 1 : -1
-        let outerX = isOutgoing ? body.maxX : body.minX
-        var horn = Path()
-        horn.move(to: CGPoint(x: outerX - sign * 15, y: body.maxY))
-        horn.addQuadCurve(
-            to: CGPoint(x: outerX + sign * tail, y: body.maxY + tail),
-            control: CGPoint(x: outerX + sign * tail * 0.10, y: body.maxY + tail * 0.45)
-        )
-        horn.addQuadCurve(
-            to: CGPoint(x: outerX, y: body.maxY - 15),
-            control: CGPoint(x: outerX + sign * tail, y: body.maxY - tail * 0.30)
-        )
-        horn.closeSubpath()
-        path.addPath(horn)
-        return path
+        // 发件人的小尾巴在右下、收件人的在左下（与系统「信息」一致）。
+        let small = hasTail ? tailCorner : corner
+        return UnevenRoundedRectangle(
+            topLeadingRadius: corner,
+            bottomLeadingRadius: isOutgoing ? corner : small,
+            bottomTrailingRadius: isOutgoing ? small : corner,
+            topTrailingRadius: corner,
+            style: .continuous
+        ).path(in: rect)
     }
 }
 
@@ -2897,14 +2941,21 @@ struct ChatContactInfoPanel: View {
             if let contact {
                 NativeContactCard(
                     identifier: contact.id,
+                    phone: handle,
                     showsNavigationBar: true,
                     showsDoneButton: true,
                     allowsEditing: true,
                     startsInEditMode: true
                 ) { _ in } onMessage: { _ in }
-                .presentationSizingIfAvailable()
+                // 同上：系统卡片需要确定尺寸，不能用 form 弹层尺寸。
+                .frame(minWidth: 340, minHeight: 520)
                 .presentationDragIndicator(.visible)
             }
+        }
+        .onChange(of: showingEditor) { isShowing in
+            // 编辑保存（或取消）后重新读取通讯录，本页立即同步新资料。
+            guard !isShowing else { return }
+            Task { await model.contacts.requestAccessAndLoad() }
         }
         .sheet(isPresented: $showingNewContact) {
             ContactNativeNew(contactStore: CNContactStore()) {
@@ -3275,17 +3326,59 @@ private struct NativeContactCard: UIViewControllerRepresentable {
     let onCall: (String) -> Void
     let onMessage: (String) -> Void
 
+    /// 解析系统联系人卡片要展示的 `CNContact`。
+    ///
+    /// 通讯录里被合并过的联系人（iCloud / 本机 / 企业多来源）本地 identifier 与
+    /// unified identifier 并不相同，只用 `unifiedContact(withIdentifier:)` 会取不到，
+    /// 卡片便退化成一张没有任何字段的临时联系人——这正是「点编辑弹出空白窗口」的根因。
+    /// 因此按 identifier → 号码逐级回退，任一命中都返回真实联系人。
+    private static func lookupStoredContact(
+        in store: CNContactStore,
+        identifier: String?,
+        phone: String?,
+        keys: [CNKeyDescriptor]
+    ) -> CNContact? {
+        if let identifier, !identifier.isEmpty {
+            if let unified = try? store.unifiedContact(withIdentifier: identifier, keysToFetch: keys) {
+                return unified
+            }
+            if let results = try? store.unifiedContacts(
+                matching: CNContact.predicateForContacts(withIdentifiers: [identifier]),
+                keysToFetch: keys
+            ), let matched = results.first {
+                return matched
+            }
+        }
+        if let phone, !phone.isEmpty {
+            let digits = phone.filter { $0.isNumber }
+            for candidate in [phone, digits] where !candidate.isEmpty {
+                if let results = try? store.unifiedContacts(
+                    matching: CNContact.predicateForContacts(matching: CNPhoneNumber(stringValue: candidate)),
+                    keysToFetch: keys
+                ), let matched = results.first {
+                    return matched
+                }
+            }
+        }
+        return nil
+    }
+
     func makeUIViewController(context: Context) -> UIViewController {
         let store = CNContactStore()
+        let keys: [CNKeyDescriptor] = [CNContactViewController.descriptorForRequiredKeys()]
         let resolved: CNContact
+        var matchedStoredContact = false
         if let contact {
             resolved = contact
-        } else if let identifier,
-                  let fetched = try? store.unifiedContact(
-                      withIdentifier: identifier,
-                      keysToFetch: [CNContactViewController.descriptorForRequiredKeys()]
-                  ) {
+            matchedStoredContact = true
+        } else if let fetched = Self.lookupStoredContact(
+            in: store,
+            identifier: identifier,
+            phone: phone,
+            keys: keys
+        ) {
             resolved = fetched
+            matchedStoredContact = true
         } else {
             // 号码不在通讯录时构造一张未保存的临时卡片（与 iMessage 展示陌生号码一致）。
             let draft = CNMutableContact()
@@ -3301,7 +3394,7 @@ private struct NativeContactCard: UIViewControllerRepresentable {
         controller.contactStore = store
         controller.delegate = context.coordinator
         // 只有通讯录里真实存在的联系人才能进入编辑态；陌生号码的临时卡片不可编辑。
-        let canEdit = allowsEditing && (contact != nil || identifier != nil)
+        let canEdit = allowsEditing && matchedStoredContact
         controller.allowsEditing = canEdit
         controller.allowsActions = true
         context.coordinator.contactViewController = controller

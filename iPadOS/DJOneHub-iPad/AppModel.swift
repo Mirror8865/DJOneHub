@@ -192,6 +192,8 @@ final class AppModel: ObservableObject {
         return info.version
     }()
     private let backgroundStandbyKey = "djonehub.background-standby-enabled"
+    /// 「定位持续保活」：关掉后状态栏不再常驻定位指示，只保留系统唤醒通道。
+    private let standbyLocationKey = "djonehub.standby-location-enabled"
     private let lowPowerModeKey = "djonehub.low-power-mode-enabled"
     private let liveActivityKey = "djonehub.live-activity-enabled"
     private let smsNotificationKey = "djonehub.sms-notifications-enabled"
@@ -249,6 +251,9 @@ final class AppModel: ObservableObject {
         lowPowerModeEnabled = storedLowPowerValue ?? true
         liveActivity.setEnabled(storedLiveActivityValue ?? true)
         backgroundStandby.setEnabled(storedValue ?? true)
+        backgroundStandby.setLocationHeartbeatEnabled(
+            UserDefaults.standard.object(forKey: standbyLocationKey) as? Bool ?? true
+        )
         // 先加载手机副本，再启动轮询，避免模块暂时离线时界面显示为空。
         restoreLocalHistory()
         captureSMSSnapshot()
@@ -469,6 +474,13 @@ final class AppModel: ObservableObject {
     func setBackgroundStandbyEnabled(_ enabled: Bool) {
         UserDefaults.standard.set(enabled, forKey: backgroundStandbyKey)
         backgroundStandby.setEnabled(enabled)
+    }
+
+    /// 切换「定位持续保活」。关闭后不再持续定位（状态栏没有常驻定位指示），
+    /// 只靠显著位置变化 / 访问 / 围栏 / 后台任务唤醒进程补发通知，及时性会下降。
+    func setStandbyLocationEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: standbyLocationKey)
+        backgroundStandby.setLocationHeartbeatEnabled(enabled)
     }
 
     func setLowPowerModeEnabled(_ enabled: Bool) {

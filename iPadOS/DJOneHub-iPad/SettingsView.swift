@@ -105,6 +105,7 @@ struct SettingsView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @AppStorage("djonehub.background-standby-enabled") private var backgroundStandbyEnabled = true
+    @AppStorage("djonehub.standby-location-enabled") private var standbyLocationEnabled = true
     @AppStorage("djonehub.low-power-mode-enabled") private var lowPowerModeEnabled = true
     @AppStorage("djonehub.live-activity-enabled") private var liveActivityEnabled = true
     @AppStorage("djonehub.sms-notifications-enabled") private var smsNotificationsEnabled = true
@@ -456,6 +457,12 @@ struct SettingsView: View {
                 .onChange(of: backgroundStandbyEnabled) { enabled in
                     model.setBackgroundStandbyEnabled(enabled)
                 }
+            Toggle(L10n.t("定位持续保活"), isOn: $standbyLocationEnabled)
+                .tint(Color(uiColor: .systemGreen))
+                .onChange(of: standbyLocationEnabled) { enabled in
+                    model.setStandbyLocationEnabled(enabled)
+                }
+                .disabled(!backgroundStandbyEnabled)
             LabeledContent(L10n.t("保活状态"), value: model.backgroundStandby.statusText)
             LabeledContent(
                 L10n.t("被回收后恢复"),
@@ -466,7 +473,7 @@ struct SettingsView: View {
         } header: {
             Text(L10n.t("后台与保活"))
         } footer: {
-            Text("不使用静音音频后台播放。开启并授权“始终允许”定位后，App 用后台定位维持进程，同时登记显著位置变化监控与后台刷新任务；进程被系统回收时，系统会用这两条通道把它重新拉起并补发遗漏的来电与短信通知。若你在应用切换器里手动上滑杀掉 App，iOS 会暂停这些调度，需要重新打开 App 才能恢复。")
+            Text("不使用静音音频后台播放。开启后并授权“始终允许”定位，App 就能在后台与锁屏时继续收发通知，并登记显著位置变化监控与后台刷新任务；进程被系统回收时，系统会用这两条通道把它重新拉起并补发遗漏的来电与短信通知。“定位持续保活”关闭后不再跑持续定位（状态栏不再常驻定位指示），仅保留系统唤醒通道，提醒可能延迟到下一次系统唤醒。若你在应用切换器里手动上滑杀掉 App，iOS 会暂停这些调度，需要重新打开 App 才能恢复。")
         }
         Section {
             Toggle("短信通知", isOn: $smsNotificationsEnabled)
