@@ -220,7 +220,7 @@ enum ModuleUSBLinkState: Equatable, Sendable {
         case .ready:
             return "链路正常但模块代理未响应：可到「诊断与维护」看网络诊断，必要时重启模块。"
         case let .leaseMissing(interface, address):
-            return "\(interface) 未拿到 192.168.225.x 地址（当前 \(address)）：模块 DHCP 未响应，重新插拔或重启模块即可恢复。"
+            return "\(interface) 未拿到 192.168.225.x 地址（当前 \(address)）：模块 DHCP 未响应，App 正在自动重连；若长时间无反应，请拔下模块再插回。"
         case .missing:
             return "未检测到模块以太网接口：请检查 USB 连接。"
         }
@@ -257,6 +257,7 @@ enum ModuleUSBInterfaceResolver {
         let names = moduleInterfaceNames(from: addresses)
         if let name = names.sorted().first,
            let address = addresses.first(where: { $0.name == name })?.address {
+            rememberModuleInterfaceName(name)
             return .ready(interface: name, address: address)
         }
         // 169.254.x 是「链路在、但没拿到 DHCP 租约」的系统自分配地址。
@@ -274,6 +275,56 @@ enum ModuleUSBInterfaceResolver {
         let path = latestPath
         stateLock.unlock()
         return path?.availableInterfaces.first { names.contains($0.name) }
+    }
+
+    /// 租约丢失（169.254.x）时，网卡已经不在 `192.168.225.x` 反查结果里，
+    /// 只能靠上一次成功时的名字把这块 USB ECM 网卡认出来。
+    private static let rememberedInterfaceKey = "djonehub.module-interface-name"
+
+    static func rememberModuleInterfaceName(_ name: String) {
+        guard !name.isEmpty else { return }
+        let defaults = UserDefaults.standard
+        if defaults.string(forKey: rememberedInterfaceKey) != name {
+            defaults.set(name, forKey: rememberedInterfaceKey)
+        }
+    }
+
+    static func rememberedModuleInterfaceName() -> String? {
+        let value = UserDefaults.standard.string(forKey: rememberedInterfaceKey)
+        return (value?.isEmpty == false) ? value : nil
+    }
+
+    private static func currentInterface(named name: String) -> NWInterface? {
+        ensureMonitor()
+        stateLock.lock()
+        let path = latestPath
+        stateLock.unlock()
+        return path?.availableInterfaces.first { $0.name == name }
+    }
+
+    /// 主动向 USB ECM 网卡「索取一次流量」。
+    ///
+    /// iOS 只为「有真实需求」的接口维持 IPv4 服务。模块侧每次建立 / 回滚语音路由都会
+    /// 短暂改写 `/sys/class/android_usb/f_audio/audio_enable`，USB gadget 随之瞬时重枚举；
+    /// 一旦 iPad 的 DHCP 请求正好落在重枚举窗口里失败，系统就退回 169.254.x 自分配地址，
+    /// 并且在出现新的链路事件之前不会再次续租——表现正是「用一会儿就断、只有重启才恢复」。
+    ///
+    /// App 唯一能做的是让这块网卡持续保持「被需要」：反复用 `.wiredEthernet` 发起一次
+    /// 有界连接，促使系统重新评估该接口并重跑 DHCP。单次失败不做任何处理。
+    static func demandModuleInterface(timeout: TimeInterval = 0.8) async {
+        guard let port = NWEndpoint.Port(rawValue: 7575) else { return }
+        let parameters = NWParameters(tls: nil, tcp: NWProtocolTCP.Options())
+        if let name = rememberedModuleInterfaceName(), let interface = currentInterface(named: name) {
+            parameters.requiredInterface = interface
+        } else {
+            parameters.requiredInterfaceType = .wiredEthernet
+        }
+        let connection = NWConnection(
+            host: NWEndpoint.Host("192.168.225.1"),
+            port: port,
+            using: parameters
+        )
+        await ModuleInterfaceDemand.run(connection, timeout: timeout)
     }
 
     /// USB 拔出、链路重枚举或严格接口连接失败后重建路径监控，
@@ -330,6 +381,50 @@ enum ModuleUSBInterfaceResolver {
             )
         }
         return result
+    }
+}
+
+/// 有界地「使用」一次待恢复的 USB ECM 网卡：走到 ready / 失败 / 超时就关闭连接，绝不抛出。
+private final class ModuleInterfaceDemand: @unchecked Sendable {
+    private let lock = NSLock()
+    private var finished = false
+    private let connection: NWConnection
+    private let continuation: CheckedContinuation<Void, Never>
+
+    private init(connection: NWConnection, continuation: CheckedContinuation<Void, Never>) {
+        self.connection = connection
+        self.continuation = continuation
+    }
+
+    static func run(_ connection: NWConnection, timeout: TimeInterval) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            ModuleInterfaceDemand(connection: connection, continuation: continuation)
+                .start(timeout: timeout)
+        }
+    }
+
+    private func start(timeout: TimeInterval) {
+        let queue = DispatchQueue(label: "com.jieden.djonehub.usb-demand")
+        connection.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .ready, .failed, .cancelled:
+                self?.finish()
+            default:
+                break
+            }
+        }
+        connection.start(queue: queue)
+        queue.asyncAfter(deadline: .now() + timeout) { [weak self] in self?.finish() }
+    }
+
+    private func finish() {
+        lock.lock()
+        let shouldResume = !finished
+        finished = true
+        lock.unlock()
+        guard shouldResume else { return }
+        connection.cancel()
+        continuation.resume()
     }
 }
 

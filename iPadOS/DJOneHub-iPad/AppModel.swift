@@ -162,6 +162,9 @@ final class AppModel: ObservableObject {
     private var callEventTask: Task<Void, Never>?
     private var moduleUpdateTask: Task<Void, Never>?
     private var moduleMetadataTask: Task<Void, Never>?
+    /// USB ECM 掉租约后的自动恢复看护；只在本机链路状态不是 ready 时存在。
+    private var moduleLinkRecoveryTask: Task<Void, Never>?
+    private var moduleLinkRecoveryGeneration = 0
     private var nextModuleUpdateAttempt = Date.distantPast
     private var startingCallAudio = false
     private var appIsActive = true
@@ -278,6 +281,57 @@ final class AppModel: ObservableObject {
     func refreshModuleLinkState() {
         let link = api.moduleLinkState()
         if link != moduleLinkState { moduleLinkState = link }
+        updateModuleLinkRecovery(for: link)
+    }
+
+    /// 模块网卡掉到 169.254.x（DHCP 租约丢了）之后，iOS 不会自己重跑 DHCP，
+    /// 只有重新插拔 USB 或重启设备才会恢复。这里起一个低开销看护：持续对那块
+    /// USB ECM 网卡制造真实需求并重建路径监控，尽力促使系统重新续租；一旦恢复立刻停。
+    private func updateModuleLinkRecovery(for link: ModuleUSBLinkState) {
+        guard !link.isReady else {
+            stopModuleLinkRecovery()
+            return
+        }
+        switch link {
+        case .leaseMissing:
+            startModuleLinkRecovery()
+        case .missing:
+            // 从未连上过模块时不要空转：只有「之前连上过、现在整块网卡都不见了」才值得尝试。
+            if ModuleUSBInterfaceResolver.rememberedModuleInterfaceName() != nil {
+                startModuleLinkRecovery()
+            } else {
+                stopModuleLinkRecovery()
+            }
+        case .ready, .unknown:
+            break
+        }
+    }
+
+    private func startModuleLinkRecovery() {
+        guard moduleLinkRecoveryTask == nil else { return }
+        moduleLinkRecoveryGeneration &+= 1
+        let generation = moduleLinkRecoveryGeneration
+        moduleLinkRecoveryTask = Task { [weak self] in
+            // 有界重试：每次轮询失败都会重新触发，所以一轮跑空不会让恢复能力丢掉。
+            for _ in 0..<150 {
+                guard !Task.isCancelled else { break }
+                guard let self else { return }
+                // 丢掉缓存的 NWInterface 与路径监控，下一次解析从全新的 NWPathMonitor 开始。
+                self.api.resetLocalConnectionState()
+                await ModuleUSBInterfaceResolver.demandModuleInterface()
+                guard !Task.isCancelled, generation == self.moduleLinkRecoveryGeneration else { return }
+                let link = self.api.moduleLinkState()
+                if self.moduleLinkState != link { self.moduleLinkState = link }
+                if link.isReady { break }
+                try? await Task.sleep(for: .seconds(2))
+            }
+            self?.stopModuleLinkRecovery()
+        }
+    }
+
+    private func stopModuleLinkRecovery() {
+        moduleLinkRecoveryTask?.cancel()
+        moduleLinkRecoveryTask = nil
     }
 
     // MARK: - 系统权限（首次接入引导页）
@@ -416,6 +470,7 @@ final class AppModel: ObservableObject {
         // 那次请求会重写模块 USB gadget（enable=0 → 改 functions → enable=1）并重启
         // 模块，iPad 侧 en3 随即掉租约退回 169.254.x，而且只有拔插 / 重启设备才能恢复。
         // 宁可让用户手动在「设置 › 模块设置 › 连接」里切一次，也不能让 App 自动改 gadget。
+        refreshModuleLinkState()
     }
 
     /// 模块在线时与其 1 秒 AT 轮询对齐；离线后退避，避免断开模块时持续唤醒手机和 USB 栈。
@@ -440,6 +495,7 @@ final class AppModel: ObservableObject {
         moduleUpdateTask = nil
         moduleMetadataTask?.cancel()
         moduleMetadataTask = nil
+        stopModuleLinkRecovery()
         audio.deactivate()
         backgroundStandby.setEnabled(false)
         Task { await liveActivity.stop() }
@@ -587,6 +643,10 @@ final class AppModel: ObservableObject {
                 audio.deactivate()
                 await registerAudioHost(false)
                 guard !Task.isCancelled, generation == pollingGeneration else { return }
+                // 模块侧挂断后 1.5 秒会回滚语音路由并短暂改写 audio_enable，USB gadget 可能瞬时重枚举。
+                // 立刻丢掉缓存网卡并重读链路，让 iOS 更快重新评估这块 ECM 网卡、尽快续租。
+                api.resetLocalConnectionState()
+                refreshModuleLinkState()
                 backgroundStandby.resumeAfterCall()
                 isMuted = false
                 isSpeakerEnabled = false
