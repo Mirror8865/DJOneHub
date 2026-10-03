@@ -123,6 +123,8 @@ final class AppModel: ObservableObject {
     /// 避免用户点了一个其实已经授权的项却看不到任何反应。
     @Published private(set) var permissionStatesLoaded = false
     @Published var connectionMessage: String?
+    /// 用户此刻打开的短信会话；前台时用来跳过它自己的通知横幅。
+    @Published var openConversationHandle: String?
     @Published var isBusy = false
     @Published var isMuted = false
     @Published var isSpeakerEnabled = false
@@ -196,6 +198,12 @@ final class AppModel: ObservableObject {
     private let maxMessageCount = 2_000
     /// 已见过的呼入短信 ID 集合；后台刷新时只对集合外的新短信发通知，避免重复提醒。
     private var seenIncomingSMSIDs: Set<String> = []
+    /// 已经提醒过的未接来电 id：模块每轮都回传完整历史，不去重会反复弹。
+    private var notifiedMissedCallIDs: Set<String> = []
+    /// 用户在本机接听 / 拒接 / 挂断过的通话 id。
+    /// 模块对所有「未接通就结束的来电」都记 `missed`，包括用户主动拒接的那通；
+    /// 用它把用户自己处理过的通话从「未接来电」提醒里排除掉。
+    private var handledCallIDs: Set<String> = []
     /// 用户在本机删除的通话记录 / 短信 ID。
     /// 模块接口每轮都会回传完整历史，不做墓碑过滤的话，用户刚删掉的记录下一轮就会复活。
     private var deletedCallIDs: Set<String> = []
@@ -241,6 +249,8 @@ final class AppModel: ObservableObject {
         // 先加载手机副本，再启动轮询，避免模块暂时离线时界面显示为空。
         restoreLocalHistory()
         captureSMSSnapshot()
+        // 本机已有的未接来电不再补提醒，只提醒本次运行期间新产生的。
+        notifiedMissedCallIDs.formUnion(callHistory.lazy.filter(\.missed).map(\.id))
         startCallEventBridgeIfNeeded()
         restartPolling()
     }
@@ -323,7 +333,9 @@ final class AppModel: ObservableObject {
                 let link = self.api.moduleLinkState()
                 if self.moduleLinkState != link { self.moduleLinkState = link }
                 if link.isReady { break }
-                try? await Task.sleep(for: .seconds(2))
+                // 重建 NWPathMonitor 与触发 DHCP 都用 4 秒的稀疏节奏：够快恢复，
+                // 又不会让 USB / 网络栈一直处于高频唤醒状态。
+                try? await Task.sleep(for: .seconds(4))
             }
             self?.stopModuleLinkRecovery()
         }
@@ -478,8 +490,17 @@ final class AppModel: ObservableObject {
         if consecutivePollFailures > 0 {
             return min(3, pow(2, Double(consecutivePollFailures - 1)))
         }
-        // 低耗电只影响后台空闲期；一旦发现通话立即恢复模块原生的 1 秒同步频率。
-        if lowPowerModeEnabled, !appIsActive, activeCall == nil { return 2 }
+        // 后台空闲期放慢轮询：来电由长轮询事件桥在状态变化时立刻推回，不需要
+        // 用 1 秒一次的 AT 轮询兜底；每一条 AT 指令都会唤醒模块 CPU，这本身就是
+        // 模块发热与耗电的主要来源之一。通话中或前台仍然保持 1 秒。
+        if !appIsActive, activeCall == nil {
+            return lowPowerModeEnabled ? 8 : 5
+        }
+        // 前台空闲时也放慢：来电 / 新短信由长轮询事件桥与短信刷新单独负责，
+        // 不需要每秒一条 AT 状态请求。通话中必须保持 1 秒以跟上状态变化。
+        if activeCall == nil {
+            return lowPowerModeEnabled ? 4 : 2
+        }
         return 1
     }
 
@@ -570,6 +591,7 @@ final class AppModel: ObservableObject {
                 }
             }
             if callHistory != history { callHistory = history }
+            notifyMissedCalls(in: history)
             consecutivePollFailures = 0
 
             if let call = status.active,
@@ -640,6 +662,8 @@ final class AppModel: ObservableObject {
             if status.active?.state == "active" {
                 await startCallAudioIfReady()
             } else if status.active == nil, previousCall != nil {
+                // 电话已经结束（含响铃结束变成未接来电）：先收掉锁屏上那条还在响的通知。
+                incomingNotifier.clearNotifications(for: previousCall.id)
                 audio.deactivate()
                 await registerAudioHost(false)
                 guard !Task.isCancelled, generation == pollingGeneration else { return }
@@ -696,7 +720,9 @@ final class AppModel: ObservableObject {
             // 读取放在独立任务里异步跑：同一个 AT 端口还承担 1 秒一次的通话轮询，
             // 同步等待会把来电检测拖慢，甚至错过 CallKit 上报窗口。
             let active = appIsActive
-            nextMessagesRefresh = Date().addingTimeInterval(active ? 3 : 8)
+            // 后台把 PDU 全量读取放慢：一次要跑 AT+CMGF/AT+CMGL 好几条指令，
+            // 是常驻 AT 流量里最重的一项；15 秒的接收延迟对后台短信提示可以接受。
+            nextMessagesRefresh = Date().addingTimeInterval(active ? 4 : 15)
             if messagesRefreshTask == nil {
                 messagesRefreshTask = Task { [weak self] in
                     await self?.refreshMessages(silently: true)
@@ -709,7 +735,10 @@ final class AppModel: ObservableObject {
     /// 蜂窝状态和版本不必跟随每秒通话轮询；独立刷新避免慢 AT 状态接口拖住来电检测。
     private func scheduleModuleMetadataRefresh(generation: Int) {
         guard moduleMetadataTask == nil, Date() >= nextModuleMetadataRefresh else { return }
-        nextModuleMetadataRefresh = Date().addingTimeInterval(10)
+        // 这一路要读蜂窝状态、版本和整块 sysfs 功率/温度（模块侧最重的周期性 IO）。
+        // 它只在设置页被看到，放慢到 15/60 秒对界面没有可感知影响，
+        // 却能把模块被唤醒读写 sysfs 的次数降到原来的三分之一以下。
+        nextModuleMetadataRefresh = Date().addingTimeInterval(appIsActive ? 15 : 60)
         moduleMetadataTask = Task { [weak self] in
             await self?.refreshModuleMetadata(generation: generation)
         }
@@ -785,6 +814,7 @@ final class AppModel: ObservableObject {
 
     func answer() async {
         audio.stopCallTone()
+        markCallHandled(activeCall?.id)
         if callKit.managesCurrentCall {
             await perform {
                 do {
@@ -802,6 +832,7 @@ final class AppModel: ObservableObject {
     func reject() async {
         audio.stopCallTone()
         let dismissedID = activeCall?.id
+        markCallHandled(dismissedID)
         // 拒接同样是关键操作，理由与挂断一致。
         isBusy = true
         defer { isBusy = false }
@@ -825,6 +856,7 @@ final class AppModel: ObservableObject {
     func hangup() async {
         audio.stopCallTone()
         let dismissedID = activeCall?.id
+        markCallHandled(dismissedID)
         // 挂断是关键操作，不能受 isBusy 早退影响：否则界面点了没反应，
         // 模块侧却已经挂断，就出现「电话挂了但界面停在通话页」。
         isBusy = true
@@ -900,7 +932,11 @@ final class AppModel: ObservableObject {
             // 连接模式只用于展示；真正需要切回手机直连时，必须由用户在
             // 「设置 › 模块设置 › 连接」里显式点按，App 任何路径都不再自动改 gadget。
             setupStage = .ready
-            UserDefaults.standard.set(true, forKey: "djonehub.first-connection-complete")
+            // 这里绝不能写 `djonehub.first-connection-complete`：RootView 的 fullScreenCover
+            // 观察的就是这个键，模块一就绪就会把引导页强制关掉，用户还没授权系统权限
+            // 就被送进主界面，之后也再没有入口弹权限面板。首次页何时结束只由用户在
+            // 页内点「完成 / 稍后」决定，这里只记录「模块侧已经准备好」。
+            UserDefaults.standard.set(true, forKey: "djonehub.module-setup-ready")
         } catch {
             setupStage = .failed(error.localizedDescription)
         }
@@ -1081,7 +1117,10 @@ final class AppModel: ObservableObject {
         } catch {
             return nil
         }
-        return (SMSDecoder.assemble(entries), entries, moduleIDs)
+        // 只把已经收齐的短信交出去，同时只确认这些短信对应的模块记录：
+        // 还没收齐的长短信分段必须留在模块存储里，否则永远拼不完整。
+        let assembly = SMSDecoder.assemble(entries)
+        return (assembly.messages, assembly.consumed, moduleIDs)
     }
 
     /// 把 PDU 解出的完整短信并入本机历史；用户删过的（墓碑集合）不再复活。
@@ -1148,16 +1187,16 @@ final class AppModel: ObservableObject {
         // 先把各段合并回一条再判断「是不是新短信」：直接用未合并的记录，
         // 一条长短信会变成好几条通知，且先后是模块的存储顺序而不是阅读顺序。
         let incoming = receivedMessages(from: merged)
-        if appIsActive {
-            seenIncomingSMSIDs.formUnion(incoming.map(\.id))
-            return
-        }
         let smsNotificationsEnabled = UserDefaults.standard.object(forKey: smsNotificationKey) as? Bool ?? true
         let freshMessages = incoming.filter { !seenIncomingSMSIDs.contains($0.id) }
         if smsNotificationsEnabled {
             // 按「旧 → 新」投递：系统把最后投递的排在最上面，所以最新的一条在最前，
             // 与「信息」App 的通知顺序一致（原先是新在前，投递后顺序正好反了）。
-            for message in freshMessages {
+            //
+            // 不再用「appIsActive 就整个跳过」：那条提前返回会把前台期间到达的所有
+            // 新短信一次性标记为已见而不发通知，表现就是「同一个人连发多条只有第一
+            // 条有通知」。现在只跳过「用户正开着的那个会话」，其余照常提醒。
+            for message in freshMessages where !isViewingConversation(message.sender) {
                 smsNotifier.post(
                     message: message,
                     displayName: contacts.displayName(for: message.sender)
@@ -1165,6 +1204,38 @@ final class AppModel: ObservableObject {
             }
         }
         seenIncomingSMSIDs.formUnion(incoming.map(\.id))
+    }
+
+    /// 用户此刻是否正开在这个会话里（只有这种情况下才不打扰）。
+    private func isViewingConversation(_ sender: String) -> Bool {
+        appIsActive && openConversationHandle == sender
+    }
+
+    /// 记录用户已处理的通话，并收掉它留在锁屏上的振铃通知。
+    private func markCallHandled(_ callID: String?) {
+        guard let callID, !callID.isEmpty else { return }
+        handledCallIDs.insert(callID)
+        if handledCallIDs.count > 200 { handledCallIDs.removeAll() }
+        incomingNotifier.clearNotifications(for: callID)
+    }
+
+    /// 未接来电提醒。
+    ///
+    /// 模块把未接来电写成一条**历史记录**（`missed == true`、`endedAt != nil`、`active == nil`），
+    /// 它永远不会经过 `activeCall`，所以原来的来电通知路径完全看不到它——这正是
+    /// 「有未接电话没有通知」。这里在历史列表里发现新出现的未接记录时补一条通知。
+    private func notifyMissedCalls(in history: [CallRecord]) {
+        for record in history where record.missed && record.direction == "incoming" {
+            guard !notifiedMissedCallIDs.contains(record.id) else { continue }
+            notifiedMissedCallIDs.insert(record.id)
+            // 用户自己接听 / 拒接 / 挂断过的通话不是「未接来电」，不再补提醒。
+            guard !handledCallIDs.contains(record.id) else { continue }
+            incomingNotifier.postMissed(
+                record: record,
+                displayName: contacts.displayName(for: record.number ?? "")
+            )
+        }
+        if notifiedMissedCallIDs.count > 1_000 { notifiedMissedCallIDs.removeAll() }
     }
 
     func clearLocalMessages() {

@@ -109,6 +109,16 @@ final class DJOneHubNotificationDelegate: NSObject, UIApplicationDelegate, UNUse
         }
     }
 
+    /// App 在前台时系统默认不展示任何横幅；显式声明展示选项，
+    /// 让前台运行期间收到的短信与未接来电也能正常提醒。
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .list, .sound])
+    }
+
     private static func reportActionFailure(_ error: Error) {
         let content = UNMutableNotificationContent()
         content.title = "DJOneHub 操作失败"
@@ -447,16 +457,19 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
     }
 }
 
-/// App 在后台检测到模块新短信后发送本地通知；不依赖 APNs 或远程服务器。
+/// App 检测到模块新短信后发送本地通知；不依赖 APNs 或远程服务器。
 /// 与来电通知共用同一套通知授权，样式贴近 iMessage：标题显示联系人，正文显示短信内容。
 @MainActor
 final class SMSNotifier {
-    /// 每个「发件人 + 时间」最近一次投递用的标识符与内容。
+    /// 已投递过的「短信身份 → 通知标识符」。
     ///
-    /// 一条长短信的各段可能分两次才到齐：第一段先弹一条通知，补全后应当
-    /// **替换**掉它，而不是再多弹一条。系统的通知去重就是按 identifier 做的，
-    /// 复用同一个标识符重新 add 即可原地替换。
-    private var posted: [String: (identifier: String, content: String)] = [:]
+    /// 身份直接用 `SMSMessage.id`：不同的短信身份不同，各自独立提醒，
+    /// 因此不会出现「同一个人连发多条只有第一条有通知」；同一条短信被重复
+    /// 投递时复用同一个 identifier 原地替换，也不会重复弹。
+    ///
+    /// 长短信的「先半条、后整条」已经由 `SMSDecoder.assemble` 在源头压住
+    /// （段数不齐的分组不交付），所以这里不需要再按正文前缀猜分段。
+    private var posted: [String: String] = [:]
 
     func post(message: SMSMessage, displayName: String) {
         let sender = message.sender.isEmpty ? "未知号码" : message.sender
@@ -466,22 +479,22 @@ final class SMSNotifier {
         if name != sender { content.subtitle = sender }
         content.body = message.content
         content.sound = .default
-        // 同一联系人按会话线程聚合，锁屏上相同发件人的通知会折叠成一组。
+        // 同一联系人按会话线程聚合，锁屏上相同发件人的通知折叠成一组，
+        // 组内每一条仍然各自可见。
         content.threadIdentifier = "djonehub.sms.\(sender)"
-        // 标识符不能包含短信 ID 中的控制字符，改用哈希加随机串保证唯一。
-        let key = "\(sender)\u{0}\(message.timestamp.timeIntervalSince1970)"
+        content.userInfo = ["djonehub_sms_id": message.id]
+
+        let identity = message.id
         let identifier: String
-        if let previous = posted[key],
-           message.content.count > previous.content.count,
-           message.content.hasPrefix(previous.content) {
-            // 同一条长短信补齐后的后半段：复用标识符，替换掉只带前半段的那条。
-            identifier = previous.identifier
+        if let existing = posted[identity] {
+            identifier = existing
         } else {
-            identifier = "djonehub.sms.\(abs(message.id.hashValue)).\(UUID().uuidString)"
+            identifier = "djonehub.sms.\(Self.sanitized(identity)).\(abs(identity.hashValue))"
         }
-        posted[key] = (identifier, message.content)
-        // 只用来识别「刚刚那条被补全了」，不需要长期保留。
-        if posted.count > 64 { posted.removeAll() }
+        posted[identity] = identifier
+        // 只用于判断「这条短信是否已经提醒过」，不需要长期保留。
+        if posted.count > 256 { posted.removeAll() }
+
         let request = UNNotificationRequest(
             identifier: identifier,
             content: content,
@@ -489,12 +502,20 @@ final class SMSNotifier {
         )
         UNUserNotificationCenter.current().add(request)
     }
+
+    /// 系统通知标识符只接受常规字符：`SMSMessage.id` 用 `\u{0}` 连接字段，
+    /// 直接塞进 identifier 会被系统静默丢弃，这里统一映射掉。
+    private static func sanitized(_ identity: String) -> String {
+        String(identity.map { $0.isLetter || $0.isNumber ? $0 : "_" })
+    }
 }
 
 /// App 在后台检测到模块来电后发送本地通知；不依赖 APNs 或远程服务器。
 @MainActor
 final class IncomingCallNotifier {
     private var notifiedCallIDs: [String] = []
+    /// 已经提醒过的未接来电 id；模块每轮都回传完整历史，不去重会反复弹。
+    private var notifiedMissedCallIDs: [String] = []
 
     func requestAuthorization() {
         IncomingCallNotification.registerCategory()
@@ -502,6 +523,11 @@ final class IncomingCallNotifier {
     }
 
     func update(call: CallRecord?, callerName: String?, appIsActive: Bool) {
+        // 通话已经离开振铃状态（被接听或结束）时立刻收掉锁屏上那条还在响的通知，
+        // 避免点进去是一通早就结束的电话。
+        if let call, !["incoming", "waiting"].contains(call.state) {
+            clearNotifications(for: call.id)
+        }
         guard !appIsActive,
               let call,
               call.direction == "incoming",
@@ -527,6 +553,41 @@ final class IncomingCallNotifier {
             trigger: nil
         )
         UNUserNotificationCenter.current().add(request)
+    }
+
+    /// 未接来电提醒。
+    ///
+    /// 模块把未接来电只写成一条**历史记录**（`missed == true`、`active == nil`），
+    /// 它永远不会经过 `update(call:)` 的振铃分支，所以必须单独补一条通知，
+    /// 否则锁屏与通知中心里完全看不到有电话打来过。
+    func postMissed(record: CallRecord, displayName: String) {
+        guard !notifiedMissedCallIDs.contains(record.id) else { return }
+        notifiedMissedCallIDs.append(record.id)
+        if notifiedMissedCallIDs.count > 64 { notifiedMissedCallIDs.removeFirst(32) }
+
+        let number = record.number?.isEmpty == false ? record.number! : "未知号码"
+        let title = displayName.isEmpty ? number : displayName
+        let content = UNMutableNotificationContent()
+        content.title = "未接来电"
+        content.body = title == number ? number : "\(title) · \(number)"
+        content.sound = .default
+        content.interruptionLevel = .timeSensitive
+        content.threadIdentifier = "djonehub.missed"
+        content.userInfo = [IncomingCallNotification.callIDKey: record.id]
+        let request = UNNotificationRequest(
+            identifier: "djonehub.missed.\(record.id)",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request)
+    }
+
+    /// 接听 / 拒接 / 挂断或通话结束后清掉这通电话留下的所有锁屏提醒。
+    func clearNotifications(for callID: String) {
+        let identifiers = ["djonehub.incoming.\(callID)", "djonehub.missed.\(callID)"]
+        let center = UNUserNotificationCenter.current()
+        center.removeDeliveredNotifications(withIdentifiers: identifiers)
+        center.removePendingNotificationRequests(withIdentifiers: identifiers)
     }
 }
 

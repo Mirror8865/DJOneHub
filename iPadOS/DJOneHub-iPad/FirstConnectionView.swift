@@ -139,6 +139,9 @@ struct FirstConnectionView: View {
                 Task { await model.refreshPermissionStates() }
             }
         }
+        // 引导页只允许由页内的「完成 / 稍后」结束：禁止下滑手势顺手关掉它。
+        // 否则系统权限还没走完就被永久跳过，模块又在线的用户会直接被送进主界面。
+        .interactiveDismissDisabled()
     }
 
     /// 首次安装打开 App 就在引导页列出全部需要的系统权限：
@@ -208,8 +211,8 @@ struct FirstConnectionView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer(minLength: 8)
-            if !model.permissionStatesLoaded || isRequestingAllPermissions || requestingPermission == permission {
-                // 状态还没读回来 / 正在等待系统面板：显示进度，让「点按有反应」可见。
+            if isRequestingAllPermissions || requestingPermission == permission {
+                // 正在等待系统面板：显示进度，让「点按有反应」可见。
                 ProgressView().controlSize(.small)
             } else {
                 // 不再因为「已拒绝」就禁用按钮：禁用会让点按毫无反应。

@@ -2420,7 +2420,8 @@ struct ChatPane: View {
                                     .frame(maxWidth: .infinity)
                                     .padding(.vertical, 8)
                             }
-                            MessageBubble(message: message)
+                            // iMessage 规则：同一发件人连续多条时，只有最后一条带小角。
+                            MessageBubble(message: message, hasTail: isLastOfRun(at: index))
                         }
                     }
                     .padding(.horizontal, 16)
@@ -2455,6 +2456,14 @@ struct ChatPane: View {
             }
         }
         .immersiveBars()
+        // 让通知层知道用户当前正开在哪个会话里：只有这个会话的新短信不再打扰。
+        .onAppear { model.openConversationHandle = handle }
+        .onDisappear {
+            if model.openConversationHandle == handle { model.openConversationHandle = nil }
+        }
+        .onChange(of: handle) { newValue in
+            model.openConversationHandle = newValue
+        }
         .navigationDestination(isPresented: $showingContactInfo) {
             ChatContactInfoPanel(handle: handle)
         }
@@ -2562,6 +2571,18 @@ struct ChatPane: View {
         Task { _ = await model.sendSMS(to: handle, content: text) }
     }
 
+    /// 该条是否是「同一发件人连续多条」的最后一条。
+    ///
+    /// 与系统「信息」App 一致：连续的气泡只有最后一条带小角，整段消息看起来
+    /// 是一个连贯的块；换人（收发方向变了）或隔了时间分隔就重新起一段。
+    private func isLastOfRun(at index: Int) -> Bool {
+        guard index + 1 < messages.count else { return true }
+        let current = messages[index]
+        let next = messages[index + 1]
+        guard next.isOutgoing == current.isOutgoing else { return true }
+        return timeSeparator(for: next.timestamp, previous: current.timestamp) != nil
+    }
+
     private func scrollToLast(_ proxy: ScrollViewProxy, animated: Bool) {
         guard let last = messages.last else { return }
         if animated {
@@ -2603,6 +2624,8 @@ private struct GlassCapsuleBackground: ViewModifier {
 /// 消息气泡：自己发的在右侧系统蓝底，对方发的在左侧系统灰底。
 private struct MessageBubble: View {
     let message: SMSMessage
+    /// 是否是「同一发件人连续多条」的最后一条；只有它带 iMessage 的小角。
+    let hasTail: Bool
 
     var body: some View {
         HStack {
@@ -2613,7 +2636,7 @@ private struct MessageBubble: View {
                 .foregroundStyle(message.isOutgoing ? Color.white : Color.primary)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 9)
-                .modifier(MessageBubbleBackground(isOutgoing: message.isOutgoing))
+                .modifier(MessageBubbleBackground(isOutgoing: message.isOutgoing, hasTail: hasTail))
                 .textSelection(.enabled)
 
             if !message.isOutgoing { Spacer(minLength: 48) }
@@ -2622,31 +2645,64 @@ private struct MessageBubble: View {
     }
 }
 
+/// iMessage 同款气泡轮廓：四角连续圆角，发件人一侧的下角按需带一个小角。
+///
+/// 与系统「信息」App 的规则一致：连续同向的气泡只有最后一条带角，其余保持纯圆角，
+/// 整段消息看起来才是连贯的一块，而不是一串各自独立的气泡。
+private struct MessageBubbleShape: Shape {
+    let isOutgoing: Bool
+    let hasTail: Bool
+
+    func path(in rect: CGRect) -> Path {
+        let tail: CGFloat = hasTail ? 7 : 0
+        // 小角占据底部与外角的一小条空间，正文区域相应内缩，保证文字不被角压住。
+        let body = CGRect(
+            x: rect.minX + (isOutgoing ? 0 : tail),
+            y: rect.minY,
+            width: rect.width - tail,
+            height: rect.height - tail
+        )
+        var path = Path(roundedRect: body, cornerRadius: 20, style: .continuous)
+        guard hasTail else { return path }
+
+        // 从底边靠近角落处向外收成一个尖，再回到外角上方的侧边，形成平滑的小角。
+        var horn = Path()
+        let bottomAnchor = CGPoint(x: isOutgoing ? body.maxX - 13 : body.minX + 13, y: body.maxY - 1)
+        let tip = CGPoint(x: isOutgoing ? body.maxX + tail : body.minX - tail, y: body.maxY + tail)
+        let sideAnchor = CGPoint(x: isOutgoing ? body.maxX - 1 : body.minX + 1, y: body.maxY - 13)
+        let firstControl = CGPoint(x: isOutgoing ? body.maxX + tail * 0.12 : body.minX - tail * 0.12,
+                                   y: body.maxY + tail * 0.55)
+        let secondControl = CGPoint(x: isOutgoing ? body.maxX + tail * 0.92 : body.minX - tail * 0.92,
+                                    y: body.maxY - tail * 0.18)
+        horn.move(to: bottomAnchor)
+        horn.addQuadCurve(to: tip, control: firstControl)
+        horn.addQuadCurve(to: sideAnchor, control: secondControl)
+        horn.closeSubpath()
+        path.addPath(horn)
+        return path
+    }
+}
+
 /// iMessage 同款气泡底：iOS 26 液态玻璃（发送方带系统蓝着色），旧系统回退为实心气泡。
 private struct MessageBubbleBackground: ViewModifier {
     let isOutgoing: Bool
+    let hasTail: Bool
 
     func body(content: Content) -> some View {
+        let shape = MessageBubbleShape(isOutgoing: isOutgoing, hasTail: hasTail)
         if #available(iOS 26.0, *) {
             if isOutgoing {
-                content.glassEffect(
-                    .regular.tint(Color(uiColor: .systemBlue)),
-                    in: RoundedRectangle(cornerRadius: 20, style: .continuous)
-                )
+                content.glassEffect(.regular.tint(Color(uiColor: .systemBlue)), in: shape)
             } else {
-                content.glassEffect(
-                    .regular,
-                    in: RoundedRectangle(cornerRadius: 20, style: .continuous)
-                )
+                content.glassEffect(.regular, in: shape)
             }
         } else {
             content.background(
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .fill(
-                        isOutgoing
-                            ? Color(uiColor: .systemBlue)
-                            : Color(uiColor: .secondarySystemBackground)
-                    )
+                shape.fill(
+                    isOutgoing
+                        ? Color(uiColor: .systemBlue)
+                        : Color(uiColor: .secondarySystemBackground)
+                )
             )
         }
     }

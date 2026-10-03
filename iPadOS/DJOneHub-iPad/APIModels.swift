@@ -96,6 +96,16 @@ struct SMSListingEntry: Sendable {
     let pdu: [UInt8]
 }
 
+/// `SMSDecoder.assemble` 的产出：可以放进消息列表的完整短信，
+/// 以及已经被完整消费、可以从模块存储里删掉的原始记录。
+///
+/// 两者必须分开返回：分段还没收齐的长短信不能交付，它的那些分段也就**不能删**，
+/// 否则后面的分段到了也拼不起来，短信会永远缺一段。
+struct SMSAssembly: Sendable {
+    let messages: [SMSMessage]
+    let consumed: [SMSListingEntry]
+}
+
 /// 一条 SMS-DELIVER 的解码结果；带 UDH 时给出拼接用的参考号、总段数与段序号。
 struct SMSDecodedDelivery: Sendable {
     let sender: String
@@ -118,6 +128,9 @@ enum SMSDecoder {
     static let unsegmentedFragmentUnits = 70
     /// 无 UDH 分段重聚的时间窗：模块发送的多段几乎同时到达。
     static let unsegmentedJoinWindow: TimeInterval = 60
+    /// 带 UDH 的长短信长时间收不齐时的兜底时长：超过它就先把已到的部分交出来，
+    /// 宁可显示「半条」也不整条吞掉；正常情况远早于此就收齐了。
+    static let incompleteGroupTimeout: TimeInterval = 90
 
     /// 解析一个存储区的 `AT+CMGL=4` 响应。
     static func parseListing(_ response: String, memory: String) -> [SMSListingEntry] {
@@ -171,36 +184,51 @@ enum SMSDecoder {
     }
 
     /// 把本次读到的所有存储记录拼成完整短信（只产出收到的消息）。
-    static func assemble(_ entries: [SMSListingEntry]) -> [SMSMessage] {
-        var groups: [String: [SMSDecodedDelivery]] = [:]
-        var singles: [SMSDecodedDelivery] = []
-        for entry in entries {
+    ///
+    /// 关键点是**只交付收齐的长短信**：分段短信是逐条到达的，以前来一段就拼一段，
+    /// 于是同一条长短信在消息窗口里先裂成几条、补齐后又合成一条，反复变化。
+    /// 现在段数不齐的分组先压住不交付（它的分段也不会被删），收齐后再一次给出。
+    static func assemble(_ entries: [SMSListingEntry], now: Date = Date()) -> SMSAssembly {
+        // 记住每条记录在入参里的下标，用来回传「可以删除」的模块记录。
+        var groups: [String: [(offset: Int, delivery: SMSDecodedDelivery)]] = [:]
+        var singles: [(offset: Int, delivery: SMSDecodedDelivery)] = []
+        for (offset, entry) in entries.enumerated() {
             guard let delivery = decode(entry.pdu) else { continue }
             if let reference = delivery.reference, let total = delivery.total, delivery.sequence != nil {
-                groups["\(delivery.sender)|\(reference)|\(total)", default: []].append(delivery)
+                groups["\(delivery.sender)|\(reference)|\(total)", default: []].append((offset, delivery))
             } else {
-                singles.append(delivery)
+                singles.append((offset, delivery))
             }
         }
 
         var deliveries: [SMSDecodedDelivery] = []
+        var consumedOffsets: [Int] = []
         for parts in groups.values {
-            let ordered = parts.sorted { ($0.sequence ?? 0) < ($1.sequence ?? 0) }
+            let ordered = parts.sorted { ($0.delivery.sequence ?? 0) < ($1.delivery.sequence ?? 0) }
             guard let last = ordered.last else { continue }
+            let total = last.delivery.total ?? ordered.count
+            let present = Set(ordered.compactMap(\.delivery.sequence))
+            // 收齐了才交付；长时间收不齐（丢段）时兜底先交已到的部分，绝不整条吞掉。
+            guard present.count >= total
+                    || now.timeIntervalSince(last.delivery.timestamp) > incompleteGroupTimeout else { continue }
             deliveries.append(
                 SMSDecodedDelivery(
-                    sender: last.sender,
-                    text: ordered.map(\.text).joined(),
-                    timestamp: last.timestamp,
-                    reference: last.reference,
-                    total: last.total,
-                    sequence: last.sequence
+                    sender: last.delivery.sender,
+                    text: ordered.map(\.delivery.text).joined(),
+                    timestamp: last.delivery.timestamp,
+                    reference: last.delivery.reference,
+                    total: last.delivery.total,
+                    sequence: last.delivery.sequence
                 )
             )
+            consumedOffsets += ordered.map(\.offset)
         }
-        deliveries += rejoinUnsegmented(singles)
 
-        return deliveries
+        let rejoined = rejoinUnsegmented(singles.map(\.delivery), now: now)
+        deliveries += rejoined.deliveries
+        consumedOffsets += rejoined.consumedOffsets.map { singles[$0].offset }
+
+        let messages = deliveries
             .sorted { $0.timestamp < $1.timestamp }
             .map { delivery in
                 SMSMessage(
@@ -212,6 +240,10 @@ enum SMSDecoder {
                     direction: .incoming
                 )
             }
+        return SMSAssembly(
+            messages: messages,
+            consumed: consumedOffsets.sorted().map { entries[$0] }
+        )
     }
 
     /// 解码一条 SMS-DELIVER PDU；其它类型（状态报告等）返回 nil。
@@ -312,41 +344,63 @@ enum SMSDecoder {
     /// 拿到的是互相独立的短信。第 1..n-1 段长度必然正好 70，因此用这个固定
     /// 长度加一个短时间窗把它们接回去；真实手机发的长短信一定带 UDH，
     /// 走的是上面的确定性拼接，不会误判。
-    static func rejoinUnsegmented(_ singles: [SMSDecodedDelivery]) -> [SMSDecodedDelivery] {
-        var grouped: [String: [SMSDecodedDelivery]] = [:]
-        for delivery in singles { grouped[delivery.sender, default: []].append(delivery) }
+    /// 重聚结果：可交付的记录，以及**已经完整消费、可以从模块删除**的入参下标。
+    struct UnsegmentedRejoin {
+        let deliveries: [SMSDecodedDelivery]
+        let consumedOffsets: [Int]
+    }
+
+    static func rejoinUnsegmented(_ singles: [SMSDecodedDelivery], now: Date = Date()) -> UnsegmentedRejoin {
+        // 带上下标分组，才能把「已完整消费」的位置回传给调用方去删模块副本。
+        var grouped: [String: [(offset: Int, delivery: SMSDecodedDelivery)]] = [:]
+        for (offset, delivery) in singles.enumerated() {
+            grouped[delivery.sender, default: []].append((offset, delivery))
+        }
 
         var result: [SMSDecodedDelivery] = []
+        var consumed: [Int] = []
         for list in grouped.values {
-            let ordered = list.sorted { $0.timestamp < $1.timestamp }
+            let ordered = list.sorted { $0.delivery.timestamp < $1.delivery.timestamp }
             var cursor = 0
             while cursor < ordered.count {
                 var run = [ordered[cursor]]
                 while let tail = run.last,
-                      tail.text.utf16.count == unsegmentedFragmentUnits,
+                      tail.delivery.text.utf16.count == unsegmentedFragmentUnits,
                       cursor + 1 < ordered.count,
-                      ordered[cursor + 1].timestamp.timeIntervalSince(tail.timestamp) <= unsegmentedJoinWindow {
+                      ordered[cursor + 1].delivery.timestamp.timeIntervalSince(tail.delivery.timestamp) <= unsegmentedJoinWindow {
                     cursor += 1
                     run.append(ordered[cursor])
                 }
-                if run.count > 1, let last = run.last {
+                defer { cursor += 1 }
+                guard let last = run.last else { continue }
+
+                if run.count > 1 {
                     result.append(
                         SMSDecodedDelivery(
-                            sender: last.sender,
-                            text: run.map(\.text).joined(),
-                            timestamp: last.timestamp,
+                            sender: last.delivery.sender,
+                            text: run.map(\.delivery.text).joined(),
+                            timestamp: last.delivery.timestamp,
                             reference: nil,
                             total: nil,
                             sequence: nil
                         )
                     )
-                } else if let first = run.first {
-                    result.append(first)
+                    consumed += run.map(\.offset)
+                    continue
                 }
-                cursor += 1
+
+                // 单条且长度正好是第一段的标准长度：很可能后面还有分段。
+                // 先压一小段时间等后续分段到达，避免同一条短信反复裂开又合上；
+                // 超过时间窗仍没有后续，就按完整短信交付，不会把短信卡住。
+                if last.delivery.text.utf16.count == unsegmentedFragmentUnits,
+                   now.timeIntervalSince(last.delivery.timestamp) <= unsegmentedJoinWindow {
+                    continue
+                }
+                result.append(last.delivery)
+                consumed.append(last.offset)
             }
         }
-        return result
+        return UnsegmentedRejoin(deliveries: result, consumedOffsets: consumed)
     }
 
     /// 解出地址字段；TON=5 是字母数字（GSM 7 位打包）发件人，其余按 BCD 数字处理。

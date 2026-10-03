@@ -405,6 +405,23 @@ struct SettingsView: View {
         } header: {
             Text(L10n.t("流量"))
         }
+        // 首次接入页只能走一次；这里保留补授权入口，避免权限没走完就再也弹不出来。
+        Section {
+            Button {
+                Task { await model.requestAllMissingPermissions() }
+            } label: {
+                Label(L10n.t("重新申请系统权限"), systemImage: "checkmark.shield")
+            }
+            Button {
+                model.resetModuleSetup()
+            } label: {
+                Label(L10n.t("重新运行首次接入向导"), systemImage: "arrow.triangle.2.circlepath")
+            }
+        } header: {
+            Text(L10n.t("权限与向导"))
+        } footer: {
+            Text("系统权限面板只会在首次询问时弹出；若已被记成「拒绝」，请到「设置 › DJOneHub」手动打开。")
+        }
     }
 
     private var appVersionText: String {
@@ -649,16 +666,40 @@ struct SettingsView: View {
         }
     }
 
-    /// AT 调试：输入行 + 发送动作行 + 等宽的返回结果行。
+    /// AT 调试：长条液态玻璃输入框（两端纯圆）+ 右侧垂直居中的蓝色胶囊发送按钮。
     @ViewBuilder
     private var atSection: some View {
         Section {
-            TextField(L10n.t("AT 指令"), text: $atCommand)
-                .textInputAutocapitalization(.characters)
-                .autocorrectionDisabled()
-                .font(.system(.body, design: .monospaced))
-            Button(L10n.t("发送 AT")) { Task { await executeAT() } }
-                .disabled(busy || atCommand.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            HStack(spacing: 8) {
+                TextField(L10n.t("AT 指令"), text: $atCommand)
+                    .textInputAutocapitalization(.characters)
+                    .autocorrectionDisabled()
+                    .font(.system(.body, design: .monospaced))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
+                    // 与搜索框同一套两端纯圆的液态玻璃胶囊。
+                    .modifier(GlassSearchFieldBackground())
+                    .accessibilityLabel(L10n.t("AT 指令"))
+
+                Button {
+                    Task { await executeAT() }
+                } label: {
+                    Text(L10n.t("发送"))
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .frame(height: 36)
+                        .padding(.horizontal, 16)
+                        .background(Capsule(style: .continuous).fill(Color(uiColor: .systemBlue)))
+                }
+                .buttonStyle(.plain)
+                .disabled(!canSendAT)
+                .opacity(canSendAT ? 1 : 0.4)
+                .accessibilityLabel(L10n.t("发送 AT"))
+            }
+            // 这一行自带玻璃胶囊背景，不再需要 Form 的分组底板与分割线。
+            .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+            .listRowBackground(Color.clear)
+            .listRowSeparator(.hidden)
         } header: {
             Text(L10n.t("AT 调试"))
         } footer: {
@@ -676,6 +717,11 @@ struct SettingsView: View {
                 Text("返回结果")
             }
         }
+    }
+
+    /// AT 输入框有内容且没有其它请求在跑时才允许发送。
+    private var canSendAT: Bool {
+        !busy && !atCommand.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     /// 服务控制：破坏性动作单独成组，说明放到脚注。
@@ -998,61 +1044,51 @@ private struct NetworkDiagnosticView: View {
     }
 }
 
-/// 设置页功率卡的完整读数面板；卡片保持紧凑，详细传感器只在用户长按时显示。
+/// 设置页功率卡的完整读数面板。
+///
+/// 直接由系统 sheet 承载内容，不再在 sheet 里再叠一层自绘卡片——那层白色圆角板
+/// 正是「浮窗内又套了一个白板块」的来源。这里按系统设置 App 的分组列表排版。
 private struct PowerDetailsPopover: View {
     let systemPower: SystemPowerStatus?
     let onDismiss: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Label("完整功率与温度", systemImage: "thermometer.medium")
-                    .font(.headline)
-                Spacer()
-                Button(action: onDismiss) {
-                    Image(systemName: "xmark")
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(.secondary)
+        NavigationStack {
+            List {
+                // 固定字段模板始终存在，数据回来后原位更新，避免面板突然改变结构。
+                Section(L10n.t("供电与温度")) {
+                    powerRow("最高温度", maximumTemperature.map { String(format: "%.0f°C", $0) } ?? "--")
+                    powerRow("电压", voltage.map { String(format: "%.2f V", $0) } ?? "--")
+                    powerRow("电流", current.map { String(format: "%.2f A", $0) } ?? "--")
+                    powerRow("功率", power.map { String(format: "%.1f W", $0) } ?? "--")
+                    powerRow("电量", capacity.map { "\($0)%" } ?? "--")
+                    powerRow("外部供电", online.map { $0 ? "已连接" : "未连接" } ?? "--")
+                    powerRow("系统状态", statusText ?? "--")
                 }
-                .buttonStyle(.plain)
-            }
-
-            // 固定字段模板始终存在，数据回来后原位更新，避免面板突然改变结构。
-            detailRow("最高温度", maximumTemperature.map { String(format: "%.0f°C", $0) } ?? "--")
-            detailRow("电压", voltage.map { String(format: "%.2f V", $0) } ?? "--")
-            detailRow("电流", current.map { String(format: "%.2f A", $0) } ?? "--")
-            detailRow("功率", power.map { String(format: "%.1f W", $0) } ?? "--")
-            detailRow("电量", capacity.map { "\($0)%" } ?? "--")
-            detailRow("外部供电", online.map { $0 ? "已连接" : "未连接" } ?? "--")
-            detailRow("系统状态", statusText ?? "--")
-
-            Divider()
-
-            Text("传感器明细")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-            ScrollView {
-                VStack(spacing: 9) {
+                Section {
                     if readings.isEmpty {
-                        detailRow("读取状态", systemPower == nil ? "等待模块连接" : "暂不支持读取")
+                        powerRow("读取状态", systemPower == nil ? "等待模块连接" : "暂不支持读取")
                     } else {
                         ForEach(readings) { reading in
-                            detailRow(reading.name, readingText(reading))
+                            powerRow(reading.name, readingText(reading))
                         }
                     }
+                } header: {
+                    Text(L10n.t("传感器明细"))
+                } footer: {
+                    Text(readings.isEmpty
+                         ? L10n.t("模块未上报可读传感器。")
+                         : L10n.t("共 \(readings.count) 个传感器读数。"))
                 }
             }
-            .frame(maxHeight: 180)
+            .navigationTitle(L10n.t("功率与温度"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(L10n.t("完成"), action: onDismiss)
+                }
+            }
         }
-        .padding(16)
-        .frame(width: 300, alignment: .leading)
-        // 弹层内容视图按官方文档使用普通材质，自定义玻璃背景只留给真正的控制元素。
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(.primary.opacity(0.08))
-        }
-        .shadow(color: .black.opacity(0.18), radius: 18, y: 8)
     }
 
     private func readingText(_ reading: SystemPowerReading) -> String {
@@ -1080,14 +1116,10 @@ private struct PowerDetailsPopover: View {
     private var online: Bool? { readings.compactMap(\.online).first }
     private var statusText: String? { readings.compactMap(\.status).first(where: { !$0.isEmpty }) }
 
-    private func detailRow(_ title: String, _ value: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Spacer(minLength: 8)
+    private func powerRow(_ title: String, _ value: String) -> some View {
+        LabeledContent(title) {
             Text(value)
-                .font(.caption.weight(.medium).monospacedDigit())
+                .font(.callout.monospacedDigit())
                 .multilineTextAlignment(.trailing)
         }
     }
