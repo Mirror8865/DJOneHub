@@ -443,7 +443,11 @@ func (a *agent) usbProfile(response http.ResponseWriter, request *http.Request) 
 	// 基带 USBCFG 已恢复 UAC 不代表 Linux gadget 已恢复 audio；手机模式
 	// Agent 残留时必须把它视作一次真实的 Mac 组合修复。
 	macGadgetRepair := mode == "mac" && !usbGadgetHasAudio(os.ReadFile)
-	if changed {
+	// 反向的半切换同样存在：基带已经回到手机组合（usbcfg UAC=0），但 Linux gadget 里
+	// 还留着 audio/serial。此时 changed 为假，过去会直接回一句“已经是直连模式”就放手，
+	// iPad 侧永远看不到 ECM。activateMobileGadget 现在自带校验和回滚，可以安全补一次。
+	mobileGadgetRepair := mode == "mobile" && usbGadgetHasAudio(os.ReadFile)
+	if changed || mobileGadgetRepair {
 		if a.controlOnly {
 			if mode != "mobile" {
 				writeError(response, http.StatusConflict, "控制服务只允许切换为手机直连模式")
@@ -472,14 +476,16 @@ func (a *agent) usbProfile(response http.ResponseWriter, request *http.Request) 
 		configuration.fields[8] = map[bool]string{true: "1", false: "0"}[wantUAC]
 	}
 	message := "当前已经是 iPad 直连模式"
-	needsReconnect := changed || macGadgetRepair
+	needsReconnect := changed || macGadgetRepair || mobileGadgetRepair
 	if mode == "mac" {
 		message = "已切换为 Mac 完整模式，模块正在重启；重连后可直接插到 Mac"
 	} else if changed {
 		message = "已切换为 iPad 直连模式，模块正在重启；重连后请重新插拔 USB"
+	} else if mobileGadgetRepair {
+		message = "已修复 iPad 直连组合，模块正在重启；重连后请重新插拔 USB"
 	}
 	writeUSBProfile(response, configuration, configuration.withUAC(wantUAC), needsReconnect, message)
-	if changed || macGadgetRepair {
+	if changed || macGadgetRepair || mobileGadgetRepair {
 		// 先把成功响应交给客户端，再重启模块；否则预期中的 USB 断开会被 UI 误报为失败。
 		go func() {
 			time.Sleep(350 * time.Millisecond)
