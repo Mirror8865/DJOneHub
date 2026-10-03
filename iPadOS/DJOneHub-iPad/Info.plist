@@ -38,6 +38,12 @@
 	<string>用于在拨号、最近通话和短信中显示联系人姓名，并支持从通讯录直接拨号。</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>用于通过 USB 网络连接 QDC507 模块并控制电话、短信、4G、GPS 与 eSIM。</string>
+	<!-- 首次接入页用它触发一次本地网络授权：未声明类型时 Bonjour 浏览会直接失败，
+	     系统也就不会弹授权面板。App 自身不发布也不依赖 Bonjour 服务。 -->
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_djonehub._tcp</string>
+	</array>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
 	<string>开启“后台保活”后，App 使用后台定位让进程保持活跃，以便在熄屏或切到后台时仍能收到模块转发的来电与短信通知。App 不记录、不上传任何位置数据。</string>
 	<key>NSLocationWhenInUseUsageDescription</key>

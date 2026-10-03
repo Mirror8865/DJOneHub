@@ -80,6 +80,22 @@ final class AudioSessionController: ObservableObject {
         }
     }
 
+    /// 首次接入页展示用的麦克风授权状态；不触发系统弹窗。
+    var microphonePermissionState: PermissionState {
+        if #available(iOS 17.0, *) {
+            switch AVAudioApplication.shared.recordPermission {
+            case .granted: return .granted
+            case .denied: return .denied
+            default: return .notDetermined
+            }
+        }
+        switch AVAudioSession.sharedInstance().recordPermission {
+        case .granted: return .granted
+        case .denied: return .denied
+        default: return .notDetermined
+        }
+    }
+
     @discardableResult
     func activateForCall(sessionAlreadyActive: Bool = false) async -> Bool {
         guard !active else { return true }

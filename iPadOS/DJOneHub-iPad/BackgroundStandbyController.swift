@@ -255,6 +255,24 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
         }
     }
 
+    /// 首次接入页展示用的定位授权状态；不触发系统弹窗。
+    /// 只拿到「使用期间」时仍算未完成，因为保活必须是「始终允许」。
+    var locationPermissionState: PermissionState {
+        switch manager.authorizationStatus {
+        case .authorizedAlways:
+            return .granted
+        case .denied, .restricted:
+            return .denied
+        default:
+            return .notDetermined
+        }
+    }
+
+    /// 首次接入页的「始终允许」按钮：再申请一次；已拒绝时系统不会再弹窗。
+    func requestAlwaysAuthorization() {
+        manager.requestAlwaysAuthorization()
+    }
+
     /// 只有「始终允许」才能让定位更新穿透到后台；权限不足时补一次系统申请。
     private func requestAuthorizationIfNeeded() {
         let status = manager.authorizationStatus

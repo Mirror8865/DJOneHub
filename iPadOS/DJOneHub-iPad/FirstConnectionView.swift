@@ -6,6 +6,7 @@ struct FirstConnectionView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.scenePhase) private var scenePhase
     @State private var runStarted = false
 
     var body: some View {
@@ -89,6 +90,7 @@ struct FirstConnectionView: View {
                         }
                     }
                 }
+                permissionSection
                 .padding(horizontalSizeClass == .compact ? 18 : 24)
             }
             .navigationTitle("首次接入")
@@ -98,11 +100,82 @@ struct FirstConnectionView: View {
                 }
             }
             .task {
+                // 引导页是用户第一个看到的界面，先把全部系统权限状态读出来。
+                await model.refreshPermissionStates()
                 guard !runStarted else { return }
                 runStarted = true
                 await model.prepareModuleForFirstConnection()
             }
+            .onChange(of: scenePhase) { phase in
+                // 从系统设置改完权限回来要立刻反映到列表。
+                guard phase == .active else { return }
+                Task { await model.refreshPermissionStates() }
+            }
         }
+    }
+
+    /// 首次安装打开 App 就在引导页列出全部需要的系统权限：
+    /// 已允许的打勾；未获取的可以再点申请，被永久拒绝时直接跳系统设置
+    /// （iOS 不允许 App 自己改权限）。
+    private var permissionSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(L10n.t("系统权限"), systemImage: "checkmark.shield")
+                .font(.headline)
+            Text(L10n.t("把下面几项一次授权完，来电、短信与保活才能正常工作。"))
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+
+            VStack(spacing: 0) {
+                ForEach(Array(AppPermission.allCases.enumerated()), id: \.element.id) { index, permission in
+                    if index > 0 { Divider().padding(.leading, 40) }
+                    permissionRow(permission)
+                }
+            }
+        }
+        .padding(14)
+        // 引导页内容层按官方文档使用普通材质而非液态玻璃。
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private func permissionRow(_ permission: AppPermission) -> some View {
+        let state = model.permissionState(for: permission)
+        return HStack(spacing: 12) {
+            Image(systemName: permission.systemImage)
+                .frame(width: 28)
+                .foregroundStyle(state == .granted ? Color.green : Color.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(permission.title)
+                Text(permission.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 8)
+            Button {
+                requestPermission(permission)
+            } label: {
+                Text(permissionButtonTitle(for: state))
+            }
+            .buttonStyle(.bordered)
+            .disabled(state == .granted)
+        }
+        .padding(.vertical, 10)
+    }
+
+    private func permissionButtonTitle(for state: PermissionState) -> String {
+        switch state {
+        case .granted: return L10n.t("已允许")
+        case .denied: return L10n.t("去设置")
+        default: return L10n.t("申请")
+        }
+    }
+
+    private func requestPermission(_ permission: AppPermission) {
+        // 已被永久拒绝时系统不会再弹窗，只能去系统设置里打开。
+        if model.permissionState(for: permission) == .denied {
+            UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!)
+            return
+        }
+        Task { await model.requestPermission(permission) }
     }
 
     private func setupRow(_ title: String, icon: String, active: Bool, complete: Bool) -> some View {

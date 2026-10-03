@@ -1,5 +1,7 @@
 import Foundation
+import Network
 import UIKit
+import UserNotifications
 
 enum ModuleUpdatePolicy {
     static func shouldInstall(installed: String, available: String) -> Bool {
@@ -44,6 +46,60 @@ enum ModuleSetupStage: Equatable {
     }
 }
 
+/// 单个系统权限在引导页可见的状态。iOS 不允许 App 直接改系统开关，
+/// 所以只区分：已授权 / 被拒绝（需去系统设置）/ 还没问过。
+enum PermissionState: Equatable {
+    case granted
+    case denied
+    case notDetermined
+}
+
+/// 首次接入引导页列出的系统权限。
+enum AppPermission: String, CaseIterable, Identifiable {
+    case microphone
+    case locationAlways
+    case notifications
+    case localNetwork
+    case contacts
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .microphone: return L10n.t("麦克风")
+        case .locationAlways: return L10n.t("始终允许定位")
+        case .notifications: return L10n.t("通知")
+        case .localNetwork: return L10n.t("本地网络")
+        case .contacts: return L10n.t("通讯录")
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .microphone:
+            return L10n.t("通话语音需要麦克风")
+        case .locationAlways:
+            return L10n.t("保活与后台唤醒需要「始终允许」")
+        case .notifications:
+            return L10n.t("接收来电与短信提醒")
+        case .localNetwork:
+            return L10n.t("访问模块与本机所在网络上的设备")
+        case .contacts:
+            return L10n.t("来电显示联系人姓名与头像")
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .microphone: return "mic.fill"
+        case .locationAlways: return "location.fill"
+        case .notifications: return "bell.badge.fill"
+        case .localNetwork: return "wifi.router.fill"
+        case .contacts: return "person.crop.circle.fill"
+        }
+    }
+}
+
 /// 移动端 App 的主状态中心：前台轮询模块代理并驱动五个主要页面。
 @MainActor
 final class AppModel: ObservableObject {
@@ -61,6 +117,8 @@ final class AppModel: ObservableObject {
     @Published var isOnline = false
     /// 本机 USB ECM 链路状态：区分「模块网卡正常 / 有网卡但没 DHCP 租约 / 没有网卡」。
     @Published var moduleLinkState: ModuleUSBLinkState = .unknown
+    /// 首次接入引导页展示的系统权限状态；回到前台时刷新。
+    @Published private(set) var permissionStates: [AppPermission: PermissionState] = [:]
     @Published var connectionMessage: String?
     @Published var isBusy = false
     @Published var isMuted = false
@@ -165,6 +223,7 @@ final class AppModel: ObservableObject {
         // 诊断器只监听系统网络路径并写入本地沙盒，不改变路由、DNS 或模块配置。
         Task { await NetworkDiagnosticRecorder.shared.start() }
         incomingNotifier.requestAuthorization()
+        Task { await refreshPermissionStates() }
         let storedValue = UserDefaults.standard.object(forKey: backgroundStandbyKey) as? Bool
         let storedLowPowerValue = UserDefaults.standard.object(forKey: lowPowerModeKey) as? Bool
         let storedLiveActivityValue = UserDefaults.standard.object(forKey: liveActivityKey) as? Bool
@@ -193,6 +252,8 @@ final class AppModel: ObservableObject {
         restoreLocalHistory()
         // 回到前台把当前已知短信并入通知基线：用户正在看 App，不需要再为旧短信弹通知。
         captureSMSSnapshot()
+        // 用户可能在系统设置里改过权限，回到前台重读一次。
+        Task { await refreshPermissionStates() }
         // 休眠期间 USB ECM 可能重枚举。先取消旧请求并清空接口缓存，再创建全新的轮询与事件连接。
         api.resetLocalConnectionState()
         restartCallEventBridge()
@@ -212,6 +273,68 @@ final class AppModel: ObservableObject {
     func refreshModuleLinkState() {
         let link = api.moduleLinkState()
         if link != moduleLinkState { moduleLinkState = link }
+    }
+
+    // MARK: - 系统权限（首次接入引导页）
+
+    func permissionState(for permission: AppPermission) -> PermissionState {
+        permissionStates[permission] ?? .notDetermined
+    }
+
+    /// 只读状态，不会触发任何系统弹窗。
+    func refreshPermissionStates() async {
+        var states: [AppPermission: PermissionState] = [:]
+        states[.microphone] = audio.microphonePermissionState
+        states[.locationAlways] = backgroundStandby.locationPermissionState
+        states[.contacts] = contacts.permissionState
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        switch settings.authorizationStatus {
+        case .authorized, .provisional, .ephemeral:
+            states[.notifications] = .granted
+        case .denied:
+            states[.notifications] = .denied
+        default:
+            states[.notifications] = .notDetermined
+        }
+        // iOS 没有公开的本地网络授权查询 API；模块一旦连上就说明系统已放行。
+        states[.localNetwork] = (isOnline || moduleLinkState.isReady) ? .granted : .notDetermined
+        if states != permissionStates { permissionStates = states }
+    }
+
+    /// 再申请一次指定权限；已被永久拒绝时系统不会再弹窗，UI 会引导用户去系统设置。
+    @discardableResult
+    func requestPermission(_ permission: AppPermission) async -> Bool {
+        switch permission {
+        case .microphone:
+            _ = await audio.requestMicrophonePermission()
+        case .locationAlways:
+            backgroundStandby.requestAlwaysAuthorization()
+            // 授权面板是异步的，等一小会儿再回读状态。
+            try? await Task.sleep(for: .milliseconds(800))
+        case .notifications:
+            IncomingCallNotification.registerCategory()
+            _ = try? await UNUserNotificationCenter.current()
+                .requestAuthorization(options: [.alert, .sound, .badge])
+        case .contacts:
+            await contacts.requestAccessAndLoad()
+        case .localNetwork:
+            await probeLocalNetworkAccess()
+        }
+        await refreshPermissionStates()
+        return permissionState(for: permission) == .granted
+    }
+
+    /// 本地网络没有授权查询 API：起一次 Bonjour 浏览让系统弹一次授权，
+    /// 之后再按「模块能否连上」反推是否已放行。
+    private func probeLocalNetworkAccess() async {
+        let browser = NWBrowser(
+            for: .bonjour(type: "_djonehub._tcp", domain: nil),
+            using: .tcp
+        )
+        browser.stateUpdateHandler = { _ in }
+        browser.start(queue: DispatchQueue.global(qos: .utility))
+        try? await Task.sleep(for: .seconds(1.5))
+        browser.cancel()
     }
 
     /// 用户重新插拔模块后手动触发：重建 USB 链路解析并立刻重读链路状态。

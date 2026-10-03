@@ -84,6 +84,20 @@ final class ContactStore: ObservableObject {
         return value
     }
 
+    /// 首次接入页展示用的通讯录授权状态；不触发系统弹窗。
+    var permissionState: PermissionState {
+        let status = CNContactStore.authorizationStatus(for: .contacts)
+        if #available(iOS 18.0, *), status == .limited { return .granted }
+        switch status {
+        case .authorized:
+            return .granted
+        case .denied, .restricted:
+            return .denied
+        default:
+            return .notDetermined
+        }
+    }
+
     func requestAccessAndLoad() async {
         do {
             // Contacts 的授权与枚举 API 会执行同步工作，必须离开主线程。

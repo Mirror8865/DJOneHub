@@ -714,7 +714,10 @@ struct PhoneSplitListColumn<Content: View>: View {
 ///
 /// 左列宽度由用户拖动中间的分栏手柄调节，并写入同一个 `AppStorage` 键，
 /// 因此四个板块始终共用同一宽度。手柄静止时完全不可见（列表之间没有分割线），
-/// 悬停或拖动时才浮出一条细指示线。
+/// 分栏拖动手势的坐标空间名。手柄本身会跟着手指移动，若用默认的
+/// 局部坐标空间，位移会随视图移动被反复重算，两侧内容就会抽搐抖动。
+private let splitDragCoordinateSpace = "djonehub.split.drag"
+
 struct PhoneSplitContainer<Left: View, Right: View>: View {
     @Binding var leftWidth: Double
     @ViewBuilder var left: Left
@@ -732,7 +735,8 @@ struct PhoneSplitContainer<Left: View, Right: View>: View {
         GeometryReader { proxy in
             // 右列至少保留 360pt，窗口变窄时左列自动收紧上限。
             let limit = max(minWidth, min(maxWidth, proxy.size.width - 360))
-            let width = min(max(CGFloat(leftWidth) + dragOffset, minWidth), limit)
+            // 拖动过程中把宽度对齐到整点：文字与列表不会因为亚像素变化反复重排。
+            let width = min(max(CGFloat(leftWidth) + dragOffset, minWidth), limit).rounded()
             ZStack(alignment: .topLeading) {
                 HStack(spacing: 0) {
                     left
@@ -746,7 +750,13 @@ struct PhoneSplitContainer<Left: View, Right: View>: View {
                     .offset(x: width - handleWidth / 2)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // 拖动分栏时不允许系统给列表尺寸变化补间：List 内容高度随宽度
+            // 变化时的隐式动画正是两侧内容「抽搐抖动」的来源。
+            .transaction { transaction in
+                if dragOffset != 0 { transaction.animation = nil }
+            }
         }
+        .coordinateSpace(name: splitDragCoordinateSpace)
     }
 
     private func handle(limit: CGFloat) -> some View {
@@ -761,10 +771,11 @@ struct PhoneSplitContainer<Left: View, Right: View>: View {
         .frame(width: handleWidth)
         .frame(maxHeight: .infinity)
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.15)) { isHoveringHandle = hovering }
+            // 不加补间：手柄会随指针微动，补间反而让指示线反复闪烁。
+            isHoveringHandle = hovering
         }
         .gesture(
-            DragGesture(minimumDistance: 1)
+            DragGesture(minimumDistance: 1, coordinateSpace: .named(splitDragCoordinateSpace))
                 .updating($dragOffset) { value, state, _ in
                     state = value.translation.width
                 }
@@ -1193,7 +1204,6 @@ private struct RecentsRow: View {
                 isLast: isSelectionLast,
                 cornerRadius: 20
             )
-            .padding(.vertical, -2)
         )
         .contentShape(Rectangle())
     }
@@ -1715,7 +1725,6 @@ private struct ContactRow: View {
                 isLast: isSelectionLast,
                 cornerRadius: 20
             )
-            .padding(.vertical, -2)
         )
         .contentShape(Rectangle())
     }
@@ -2024,7 +2033,8 @@ struct MessagesView: View {
     private var allConversations: [Conversation] {
         let grouped = Dictionary(grouping: model.messages) { $0.sender }
         return grouped
-            .map { Conversation(id: $0.key, messages: $0.value.sorted { $0.timestamp < $1.timestamp }) }
+            // 列表预览也要用合并后的完整内容，否则只能看到最后一段。
+            .map { Conversation(id: $0.key, messages: SMSMessage.mergedFragments($0.value)) }
             .sorted { ($0.last?.timestamp ?? .distantPast) > ($1.last?.timestamp ?? .distantPast) }
     }
 
@@ -2301,6 +2311,9 @@ private struct ConversationRow: View {
                     .foregroundStyle(isHighlighted ? Color.white.opacity(0.85) : Color.secondary)
                     .lineLimit(2)
             }
+            // 行高不能随列宽变化：否则拖动分栏时预览文字在 1/2 行
+            // 之间来回跳，整个 List 的内容高度也跟着不停地抖动。
+            .frame(height: 56, alignment: .leading)
             Spacer(minLength: 8)
             if let timestamp = conversation.last?.timestamp {
                 Text(Self.rowTimestampText(timestamp))
@@ -2318,7 +2331,6 @@ private struct ConversationRow: View {
                 isLast: isSelectionLast,
                 cornerRadius: 20
             )
-            .padding(.vertical, -2)
         )
         .contentShape(Rectangle())
     }
@@ -2351,9 +2363,9 @@ struct ChatPane: View {
     @State private var showingContactInfo = false
 
     private var messages: [SMSMessage] {
-        model.messages
-            .filter { $0.sender == handle }
-            .sorted { $0.timestamp < $1.timestamp }
+        // 一条长短信在模块侧是多条独立记录（发送按 70 个 UCS2 单元切段，
+        // 收到的多段短信在 ME 存储里也各占一条），这里合回一个气泡。
+        SMSMessage.mergedFragments(model.messages.filter { $0.sender == handle })
     }
 
     private var displayName: String {
@@ -2460,7 +2472,9 @@ struct ChatPane: View {
     /// 底部输入条：整条液态玻璃胶囊，发送 / 语音按钮在胶囊内部；
     /// 没有文字时显示语音输入，有文字时显示发送。输入条固定在窗口底部，不随输入法键盘上移。
     private var composer: some View {
-        HStack(alignment: .bottom, spacing: 8) {
+        // + 号与发送 / 语音按钮都在同一条液态玻璃胶囊内部：+ 贴左侧垂直居中，
+        // 输入框在中间，发送 / 语音在右侧，整条胶囊固定在窗口底部不上移。
+        HStack(alignment: .center, spacing: 4) {
             Menu {
                 Button {
                     Task { await model.refreshMessages() }
@@ -2477,40 +2491,38 @@ struct ChatPane: View {
                     .font(.system(size: 20, weight: .medium))
                     .foregroundStyle(.secondary)
                     .frame(width: 34, height: 34)
+                    .contentShape(Circle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel(L10n.t("更多"))
 
-            // 发送 / 语音按钮与输入框垂直居中对齐（不再贴底）。
-            HStack(alignment: .center, spacing: 4) {
-                TextField(L10n.t("iMessage 信息"), text: $draft, axis: .vertical)
-                    .lineLimit(1...6)
-                    .textFieldStyle(.plain)
-                    .padding(.leading, 16)
-                    .padding(.vertical, 10)
+            TextField(L10n.t("iMessage 信息"), text: $draft, axis: .vertical)
+                .lineLimit(1...6)
+                .textFieldStyle(.plain)
+                .padding(.leading, 6)
+                .padding(.vertical, 10)
 
-                if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    DictationButton { recognized in
-                        draft = recognized
-                    }
-                    .padding(.trailing, 6)
-                } else {
-                    Button(action: send) {
-                        Image(systemName: "arrow.up")
-                            .font(.system(size: 15, weight: .bold))
-                            .foregroundStyle(.white)
-                            .frame(width: 30, height: 30)
-                            .background(Circle().fill(Color(uiColor: .systemBlue)))
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.trailing, 6)
-                    .accessibilityLabel(L10n.t("发送"))
+            if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                DictationButton { recognized in
+                    draft = recognized
                 }
+            } else {
+                Button(action: send) {
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 30, height: 30)
+                        .background(Circle().fill(Color(uiColor: .systemBlue)))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(L10n.t("发送"))
             }
-            // 输入条与搜索框同高（实心胶囊，不在键盘上方上移）。
-            .frame(minHeight: 46)
-            .modifier(GlassCapsuleBackground())
         }
+        .frame(minHeight: 46)
+        .padding(.leading, 6)
+        .padding(.trailing, 6)
+        // 输入条与搜索框同高（实心胶囊，不在键盘上方上移）。
+        .modifier(GlassCapsuleBackground())
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
     }

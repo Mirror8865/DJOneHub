@@ -73,6 +73,49 @@ struct SMSMessage: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
+extension SMSMessage {
+    /// 合法的分段长度：
+    /// - UCS2：单段 70、带 UDH 联合 67（本模块自己就按 70 个 UCS2 单元切）；
+    /// - GSM-7：单段 160、带 UDH 联合 153。
+    /// 实际边界会因四字节补位（emoji 等代理对）少 1～4 个单元，
+    /// 所以宽容到 66～70 / 152～160。只有上一段落在这些长度上才合并，
+    /// 避免把两条真正独立的短信误合成一条。
+    static let fragmentBoundaries: Set<Int> = [70, 69, 68, 67, 66, 160, 159, 158, 153, 152]
+    /// 同一条长短信的各段几乎同时到达；超过这个间隔就不再当作同一条。
+    static let fragmentJoinWindow: TimeInterval = 30
+
+    /// 把同发件人、同方向、时间相邻且上一段正好在分段边界上的
+    /// 连续记录合回一条：模块侧一条长短信会被拆成多条独立短信
+    /// （发送按 70 个 UCS2 单元切段，收到的多段短信在 ME 存储里也各占一条），
+    /// 不合并就会把一条长短信显示成一串气泡。
+    ///
+    /// 合并后沿用最后一段的 id / 时间 / 交付标识，因此列表选中、
+    /// 滚动定位与本机删除仍然指向真实记录。
+    static func mergedFragments(_ messages: [SMSMessage]) -> [SMSMessage] {
+        let ordered = messages.sorted { $0.timestamp < $1.timestamp }
+        var merged: [SMSMessage] = []
+        for message in ordered {
+            guard let last = merged.last,
+                  last.sender == message.sender,
+                  last.isOutgoing == message.isOutgoing,
+                  message.timestamp.timeIntervalSince(last.timestamp) <= fragmentJoinWindow,
+                  fragmentBoundaries.contains(last.content.utf16.count) else {
+                merged.append(message)
+                continue
+            }
+            merged[merged.count - 1] = SMSMessage(
+                sender: message.sender,
+                content: last.content + message.content,
+                code: last.code ?? message.code,
+                timestamp: message.timestamp,
+                deliveryID: message.deliveryID,
+                direction: message.direction
+            )
+        }
+        return merged
+    }
+}
+
 struct SMSStatus: Codable, Sendable {
     let autoCleanupME: Bool
     let count: Int?
