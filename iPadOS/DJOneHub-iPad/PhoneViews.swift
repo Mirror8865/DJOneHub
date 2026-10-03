@@ -710,15 +710,18 @@ struct PhoneSplitListColumn<Content: View>: View {
         VStack(spacing: 0) { content }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background {
-                // 会话壁纸由根视图那一层（`ChatWallpaperRootLayer`）
-                // 统一铺满整窗（状态栏 / 顶栏 / 底部条都在它下面）。
-                // 本列只负责压一层系统材质：材质会把身后那张壁纸磨砂掉，
-                // 于是左列自然成为「模糊壁纸侧栏」，与右列共用同一张图；
-                // 画在本列里还能让磨砂边界跟着拖动实时走，不会滞后。
-                if wallpaper != nil {
-                    Rectangle()
-                        .fill(.ultraThinMaterial)
+                if let wallpaper {
+                    // 本列在 `NavigationStack` 里面，所以这里画出来的图一定看得见；
+                    // 再压一层系统材质把它磨砂掉，左列就是「模糊壁纸侧栏」。
+                    // 只压材质不画图是看不到东西的——分栏容器底下那层会被
+                    // `NavigationStack` 的不透明底色整块盖住。
+                    ChatWallpaperFill(image: wallpaper, dim: 0.16)
                         .ignoresSafeArea()
+                        .overlay {
+                            Rectangle()
+                                .fill(.ultraThinMaterial)
+                                .ignoresSafeArea()
+                        }
                 } else {
                     // 左列比右列更深一档（systemGray5：浅色 #E5E5EA / 深色 #2C2C2E），
                     // 与右列的系统白 / 纯黑形成系统设置 App 那种层次。
@@ -747,14 +750,16 @@ enum PhoneSplitLayout {
     }
 }
 
-/// 根视图层的会话壁纸：整窗铺满（含状态栏 / 顶部导航栏 / 底部导航栏）。
+/// 会话壁纸的「一次铺满」绘制：`scaledToFill` 到所在视图的完整尺寸，永远不留白。
 ///
-/// 只有**根视图**这一层能铺满整窗：会话页自己无论怎么
-/// `.ignoresSafeArea()`，都够不到标签内容区之外的那几条带子——上下留白就是这么来的。
-/// 这里用一次 `scaledToFill` 把同一张图铺满整窗，天然没有接缝，
-/// 也不再需要按列做坐标换算。
-struct ChatWallpaperRootLayer: View {
+/// 关键用法约束：**必须画在 `NavigationStack` 的内容里面**。分栏两列各自的
+/// `NavigationStack` 会盖上一层不透明底色，把壁纸画在分栏容器底下（含根视图那一层）
+/// 会被整块盖住，表现就是「设了背景却完全看不到」。`PhoneSplitListColumn`
+/// 与 `ChatPane` 都在 `NavigationStack` 内部，所以它们才画得出这张图。
+struct ChatWallpaperFill: View {
     let image: UIImage
+    /// 压一层黑色，保证气泡与文字在任意照片上都有对比度。
+    var dim: Double = 0
 
     var body: some View {
         GeometryReader { proxy in
@@ -763,11 +768,23 @@ struct ChatWallpaperRootLayer: View {
                 .scaledToFill()
                 .frame(width: proxy.size.width, height: proxy.size.height)
                 .clipped()
+                .overlay(Color.black.opacity(dim))
         }
-        .ignoresSafeArea()
-        .overlay(Color.black.opacity(0.16))
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
+    }
+}
+
+/// 根视图层的会话壁纸：整窗铺满（含状态栏 / 顶部导航栏 / 底部导航栏）。
+///
+/// 这一层是「兜底」：只要标签容器在那些带子上是透的，它就把壁纸补到边；
+/// 真正保证内容区一定能看到壁纸的，是每一列 `NavigationStack` 内部各自画的那一层。
+struct ChatWallpaperRootLayer: View {
+    let image: UIImage
+
+    var body: some View {
+        ChatWallpaperFill(image: image)
+            .ignoresSafeArea()
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
     }
 }
 
@@ -1925,6 +1942,10 @@ struct ContactDetailPane: View {
                 }
             }
             .frame(width: 188, height: 188)
+            // 照片是 `scaledToFill` 的，必须自己裁成圆形：少了这一句，
+            // 换过头像的联系人在详情页就是一个正方形照片 + 一个圆形描边
+            // （看起来像「正方形里套了个头像框」），与系统联系人卡片不一致。
+            .clipShape(Circle())
             .modifier(GlassAvatarBackground())
             .overlay(Circle().strokeBorder(Color.white.opacity(0.35), lineWidth: 1))
 
@@ -2636,8 +2657,11 @@ struct ChatPane: View {
     /// 没设就保持系统背景色，与系统「信息」默认会话一致。
     @ViewBuilder
     private var conversationBackground: some View {
-        if chatBackgrounds.image(for: handle) != nil {
-            Color.clear
+        if let image = chatBackgrounds.image(for: handle) {
+            // 会话页在 `NavigationStack` 内部，只有画在这里才看得见；
+            // 根视图那一层会被 `NavigationStack` 的不透明底色盖掉。
+            ChatWallpaperFill(image: image, dim: 0.16)
+                .ignoresSafeArea()
         } else {
             Color(uiColor: .systemBackground).ignoresSafeArea()
         }
