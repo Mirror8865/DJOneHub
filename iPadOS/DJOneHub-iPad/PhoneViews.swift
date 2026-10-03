@@ -2213,7 +2213,7 @@ struct MessagesView: View {
     /// 当前选中会话的自定义背景图；没设就为 nil，回到系统默认底色。
     private var conversationBackdrop: UIImage? {
         guard let handle = selection, let image = chatBackgrounds.image(for: handle) else { return nil }
-        return Image(uiImage: image)
+        return image
     }
 
     private var allConversations: [Conversation] {
