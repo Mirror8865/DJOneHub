@@ -30,7 +30,15 @@ var (
 	digitsPattern  = regexp.MustCompile(`^[0-9]{5,22}$`)
 )
 
+// modemIdentityInterval 静态身份字段的重读间隔。
+const modemIdentityInterval = 10 * time.Minute
+
 // refreshModem 独立读取各项状态；单项失败不会抹掉其他已取得的信息。
+//
+// 静态身份类字段（固件串 / ICCID / IMSI / IMEI）在整机运行期间几乎不变，却占了
+// 每次轮询里将近一半的 AT 指令。AT 通道每发一条指令都会唤醒基带 CPU，这是模块
+// 发热与耗电的主要来源之一，所以把它们降频到「首次 + 每十分钟一次」；动态字段
+// （SIM 状态 / 运营商 / 信号 / 网络模式 / 注册）仍然每次轮询都读。
 func (a *agent) refreshModem() {
 	status := modemStatus{}
 	var failures []string
@@ -43,15 +51,30 @@ func (a *agent) refreshModem() {
 		return response
 	}
 
-	status.Firmware = parseFirmware(run("ATI"))
+	a.mu.RLock()
+	previous := a.modem
+	identityAt := a.modemIdentityAt
+	a.mu.RUnlock()
+	needIdentity := previous.Firmware == "" || previous.ICCID == "" ||
+		previous.IMSI == "" || previous.IMEI == "" ||
+		time.Since(identityAt) > modemIdentityInterval
+	if needIdentity {
+		status.Firmware = firstNonEmpty(parseFirmware(run("ATI")), previous.Firmware)
+		status.ICCID = firstNonEmpty(commandValue(run("AT+QCCID"), "+QCCID:"), previous.ICCID)
+		status.IMSI = firstNonEmpty(firstNumericLine(run("AT+CIMI")), previous.IMSI)
+		status.IMEI = firstNonEmpty(firstNumericLine(run("AT+CGSN")), previous.IMEI)
+	} else {
+		status.Firmware = previous.Firmware
+		status.ICCID = previous.ICCID
+		status.IMSI = previous.IMSI
+		status.IMEI = previous.IMEI
+	}
+
 	cpin := strings.ToUpper(run("AT+CPIN?"))
 	status.SIMInserted = strings.Contains(cpin, "READY")
 	status.Operator = normalizeOperator(parseOperator(run("AT+COPS?")))
 	status.SignalDBM = parseSignalDBM(run("AT+CSQ"))
 	status.NetworkMode, status.RadioBand = parseNetworkInfo(run("AT+QNWINFO"))
-	status.ICCID = commandValue(run("AT+QCCID"), "+QCCID:")
-	status.IMSI = firstNumericLine(run("AT+CIMI"))
-	status.IMEI = firstNumericLine(run("AT+CGSN"))
 	registration := parseRegistration(run("AT+CEREG?"))
 	if registration == 0 {
 		registration = parseRegistration(run("AT+CREG?"))
@@ -63,7 +86,18 @@ func (a *agent) refreshModem() {
 
 	a.mu.Lock()
 	a.modem = status
+	if needIdentity {
+		a.modemIdentityAt = time.Now()
+	}
 	a.mu.Unlock()
+}
+
+// firstNonEmpty 让一次失败的静态字段读取保留上一轮的值，而不是把它清成空串。
+func firstNonEmpty(value, fallback string) string {
+	if value != "" {
+		return value
+	}
+	return fallback
 }
 
 func parseFirmware(response string) string {

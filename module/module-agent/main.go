@@ -40,8 +40,17 @@ type agent struct {
 	callEventRevision uint64
 	callEventChanged  chan struct{}
 	messages          []storedSMS
+	// 已经被手机确认落盘、并让模块删除的交付 ID。
+	//
+	// 8 秒轮询的 AT 读取与 ack 存在天然竞态：读取先开始、ack 在读取过程中把同一条
+	// 记录从队列里删掉，读取结束后这条记录又被当成新短信放回队列，手机已经落盘的
+	// 短信就会在 /api/sms 里反复出现。记下已确认的 ID，入队时直接跳过。
+	delivered         map[string]bool
 	smsAuto           bool
 	smsError          string
+	// 上一次读取静态身份字段（固件串 / ICCID / IMSI / IMEI）的时间。
+	// 这些字段整机运行期间几乎不变，却在每次轮询里占掉大半 AT 指令。
+	modemIdentityAt   time.Time
 	gps               gpsTracker
 	muted             bool
 	isRecording       bool
@@ -268,8 +277,11 @@ func allowedRemote(remote string) bool {
 func (a *agent) pollLoop() {
 	// Agent 重启后恢复用户选择的关闭数据策略，但保留 IMS 与语音注册。
 	a.enforceCellularPolicy()
+	// 通话状态必须保持 1 秒一拍：CallKit 振铃完全依赖这里把 AT+CLCC 的变化推出去。
 	callTicker := time.NewTicker(time.Second)
-	modemTicker := time.NewTicker(5 * time.Second)
+	// 模块状态（信号 / 注册 / 运营商 / 网络模式）变化很慢，8 秒一拍足够；
+	// 静态身份字段已经降到每十分钟才重读一次（见 modem.go）。
+	modemTicker := time.NewTicker(8 * time.Second)
 	smsTicker := time.NewTicker(8 * time.Second)
 	defer callTicker.Stop()
 	defer modemTicker.Stop()

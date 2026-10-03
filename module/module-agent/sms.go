@@ -29,6 +29,10 @@ type storedSMS struct {
 
 var verificationCodePattern = regexp.MustCompile(`(?:^|[^0-9])([0-9]{4,8})(?:[^0-9]|$)`)
 
+// maxDeliveredSMSIDs 已确认交付 ID 的记忆上限；超出就整体丢弃重建。
+// 交付 ID 自带「存储区 + 槽位 + 正文摘要」，槽位被复用时摘要不同的新短信不会误伤。
+const maxDeliveredSMSIDs = 512
+
 func (a *agent) refreshSMS() {
 	items, err := a.readAllSMS()
 	if err != nil {
@@ -39,8 +43,16 @@ func (a *agent) refreshSMS() {
 	}
 
 	a.mu.Lock()
+	if a.delivered == nil {
+		a.delivered = make(map[string]bool)
+	}
 	combined := append([]storedSMS(nil), a.messages...)
 	for _, item := range items {
+		// 手机已经确认落盘并让模块删掉的记录不再入队：本轮的 AT 读取可能早于
+		// 删除完成，重新入队会让同一条短信在 /api/sms 里反复出现。
+		if item.Message.DeliveryID != "" && a.delivered[item.Message.DeliveryID] {
+			continue
+		}
 		if !containsStoredSMS(combined, item) {
 			combined = append(combined, item)
 		}
@@ -347,6 +359,17 @@ func (a *agent) smsAck(response http.ResponseWriter, request *http.Request) {
 		}
 	}
 	a.messages = remaining
+	if len(succeeded) > 0 {
+		if a.delivered == nil {
+			a.delivered = make(map[string]bool)
+		}
+		for id := range succeeded {
+			a.delivered[id] = true
+		}
+		if len(a.delivered) > maxDeliveredSMSIDs {
+			a.delivered = make(map[string]bool)
+		}
+	}
 	a.mu.Unlock()
 	if len(failures) > 0 {
 		writeError(response, http.StatusBadGateway, "删除已交付模块短信失败: "+strings.Join(failures, "; "))
@@ -406,6 +429,7 @@ func (a *agent) smsClear(response http.ResponseWriter, request *http.Request) {
 	}
 	a.mu.Lock()
 	a.messages = nil
+	a.delivered = nil
 	a.mu.Unlock()
 	writeJSON(response, http.StatusOK, map[string]any{"cleared": true, "before": totalBefore, "after": 0})
 }

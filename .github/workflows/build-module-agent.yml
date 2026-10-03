@@ -1,0 +1,50 @@
+name: Build module agent (QDC507 armv7)
+
+# 只编译 module-agent 的 Go 源码，产出可单独部署到 4G 模块的 qdc507-armv7 二进制。
+# 这个工作流不参与 IPA 构建：IPA 用的是发布好的 .djupdate 包。
+# 仅在手动触发或改到 module-agent 源码时运行。
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - 'module/module-agent/**'
+      - '.github/workflows/build-module-agent.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.13'
+          cache-dependency-path: module/module-agent/go.sum
+
+      - name: Show toolchain
+        run: go version
+
+      - name: Build armv7 agent (compile check + artifact)
+        working-directory: module/module-agent
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 \
+            go build -trimpath -ldflags='-s -w' -o qdc507-agent .
+          go version -m qdc507-agent
+          sha256sum qdc507-agent
+
+      - name: Unit tests
+        working-directory: module/module-agent
+        continue-on-error: true
+        run: go test ./...
+
+      - name: Upload agent binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: qdc507-agent-armv7
+          path: module/module-agent/qdc507-agent
+          if-no-files-found: error
