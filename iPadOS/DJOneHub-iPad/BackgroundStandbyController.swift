@@ -155,9 +155,14 @@ final class DJOneHubNotificationDelegate: NSObject, UIApplicationDelegate, UNUse
 /// 进程随即被挂起、轮询停摆，表现就是「切后台 / 锁屏收不到通知，只有重新打开
 /// App 才补齐」。所以持续定位是保活的地基，任何情况下都不能被动关掉。
 ///
-/// 关于 `CLServiceSession`：官方文档说明它只表示「App 对定位授权的目标」并提供
-/// 诊断，**不负责后台投递**，所以这里不再创建它（v43 曾误以为它是投递前提）。
-/// `CLBackgroundActivitySession` 保留，但只用于「使用期间」授权的回退路径——
+/// 关于 `CLServiceSession`：官方文档《Handling location updates in the background》
+/// 把「后台持续投递」明确挂在它上面——「Create a `CLServiceSession` requiring the
+/// relevant form of authorization… Create the session while your app is in the foreground.
+/// If your app terminates, you must recreate the `CLServiceSession` immediately upon launch
+/// in the background.」v39 为了去掉状态栏图标把它删掉了，后台投递因此失去了
+/// 官方要求的授权目标声明，进程随即被系统挂起，表现就是「切后台 / 锁屏收不到通知」。
+/// 现在把它和 `CLLocationUpdate.liveUpdates()` 一起恢复成主链路。
+/// `CLBackgroundActivitySession` 只用于「使用期间」授权的回退路径——
 /// 那种授权下它的指示由系统强制显示，App 关不掉。
 /// 另有显著位置变化 / 访问事件 / 地理围栏 / 后台刷新任务四条唤醒通道兜底。
 @MainActor
@@ -175,9 +180,22 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
     /// 地理围栏监控：进出围栏同样能拉起已被系统回收的进程，作为第三条复活通道。
     private var monitoredRegion: CLCircularRegion?
     /// 「使用期间」授权下的回退会话（iOS 17+）。
-    /// `CLServiceSession` 已移除：官方文档说明它只表达「授权目标」并提供诊断，
-    /// 不是后台投递的前提，创建它反而多一条会向用户重复要授权的路径。
+    /// 它自带系统指示（状态栏常驻的定位 / 导航样式图标），App 关不掉；
+    /// 只有拿不到「始终允许」时才启用，因为那种授权档位下没有它系统不投递后台定位。
     private var backgroundActivitySession: Any?
+    /// iOS 18+ 服务会话：向 Core Location 声明「本 App 的后台工作流需要始终允许」。
+    ///
+    /// 官方文档要求它**必须在前台创建**；进程被系统回收后重新拉起时要立刻重建。
+    /// 它同时会在前台自动补一次「始终允许」升级申请，是拿到干净授权档位的关键。
+    private var serviceSession: Any?
+    /// iOS 17+ 官方连续定位流（`CLLocationUpdate.liveUpdates()`）。
+    /// 每个回调都是一次进程存活心跳，与 `CLLocationManager` 的持续定位互为备份：
+    /// 任一条链路被系统掐断，另一条仍能把进程留在运行态。
+    private var liveUpdatesTask: Task<Void, Never>?
+    /// 连续定位流当前是否处于已连接状态（用于设置页诊断文案）。
+    private var liveUpdatesActive = false
+    /// 连续定位流异常结束后的重连间隔，收到回调即复位。
+    private var liveUpdatesRetryDelay: TimeInterval = 2
     /// 最近一次收到定位回调的时刻。定位回调本身就是进程存活心跳，
     /// 看门狗据此判断投递链路是否还活着（见 `watchdogTick()`）。
     private var lastDeliveryAt = Date.distantPast
@@ -238,7 +256,8 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
             } else {
                 backgroundBeat = ""
             }
-            return "保活运行中（\(beat)\(backgroundBeat) · 状态栏无指示）"
+            let modernChannel = liveUpdatesActive ? " · 官方定位流已连接" : " · 官方定位流重连中"
+            return "保活运行中（\(beat)\(backgroundBeat)\(modernChannel) · 状态栏无指示）"
         case .authorizedWhenInUse:
             // 只拿到「使用期间」时系统会优先回收进程，保活随时可能失效，
             // 所以这里明确提示去升级授权。
@@ -316,6 +335,7 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
             stopSignificantChangeMonitoring()
             stopVisitMonitoring()
             stopRegionMonitoring()
+            stopServiceSession()
         }
     }
 
@@ -362,6 +382,7 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
                 // 重新确认这次后台定位请求（进程被回收后又被系统拉起、或系统丢掉
                 // 了旧请求时，就靠这一步把投递链路接回来）。
                 manager.startUpdatingLocation()
+                startModernChannelsIfNeeded()
                 return
             }
             heartbeatActive = true
@@ -372,6 +393,9 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
             startWhenInUseBackgroundSessionIfNeeded()
             lastDeliveryAt = Date()
             manager.startUpdatingLocation()
+            // iOS 17/18 起官方把「后台持续投递」挂在服务会话 + 连续定位流上：
+            // 和老的 CLLocationManager 同时跑，两条链路互为备份。
+            startModernChannelsIfNeeded()
         case .notDetermined:
             requestAuthorizationIfNeeded()
         case .denied, .restricted:
@@ -421,6 +445,7 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
         heartbeatActive = false
         manager.stopUpdatingLocation()
         stopBackgroundSessions()
+        stopLiveUpdates()
     }
 
     /// 「使用期间」授权下的回退：`CLBackgroundActivitySession` 是官方文档里
@@ -454,6 +479,99 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
 
     private func stopBackgroundSessions() {
         stopBackgroundActivitySession()
+    }
+
+    /// 现代定位链路（iOS 17+）：服务会话 + 连续定位流。
+    ///
+    /// 旧版只有 `CLLocationManager.startUpdatingLocation()` 一条链路，而 iOS 26 的
+    /// 官方文档把「后台持续投递」明确挂在 `CLServiceSession` 与
+    /// `CLLocationUpdate.liveUpdates()` 上。两条链路一起跑：
+    /// 老的负责显著位置变化 / 访问事件 / 地理围栏，新的负责持续心跳与授权声明。
+    private func startModernChannelsIfNeeded() {
+        guard enabled, !suspendedForCall else { return }
+        switch manager.authorizationStatus {
+        case .authorizedAlways, .authorizedWhenInUse:
+            break
+        default:
+            return
+        }
+        if #available(iOS 18.0, *) {
+            startServiceSessionIfNeeded()
+        }
+        if #available(iOS 17.0, *) {
+            startLiveUpdatesIfNeeded()
+        }
+    }
+
+    /// 服务会话：官方文档要求「在前台创建」，进程被系统回收后重新启动时还要
+    /// 「immediately upon launch in the background」立刻重建，所以两条路径都补建。
+    @available(iOS 18.0, *)
+    private func startServiceSessionIfNeeded() {
+        guard enabled, serviceSession == nil else { return }
+        let status = manager.authorizationStatus
+        // 「被拒绝 / 受限」时创建会话没有意义，系统也不会再弹授权面板。
+        guard status != .denied, status != .restricted else { return }
+        // 未授权时系统只在前台弹面板；后台被拉起的进程跳过，等回到前台再补建。
+        if status == .notDetermined, UIApplication.shared.applicationState == .background {
+            return
+        }
+        serviceSession = CLServiceSession(authorization: .always)
+    }
+
+    private func stopServiceSession() {
+        if #available(iOS 18.0, *) {
+            (serviceSession as? CLServiceSession)?.invalidate()
+        }
+        serviceSession = nil
+    }
+
+    @available(iOS 17.0, *)
+    private func startLiveUpdatesIfNeeded() {
+        guard enabled, !suspendedForCall, liveUpdatesTask == nil else { return }
+        liveUpdatesActive = true
+        liveUpdatesTask = Task { @MainActor [weak self] in
+            await self?.runLiveUpdates()
+            self?.liveUpdatesTask = nil
+        }
+    }
+
+    private func stopLiveUpdates() {
+        liveUpdatesTask?.cancel()
+        liveUpdatesTask = nil
+        liveUpdatesActive = false
+    }
+
+    /// 连续定位流：正常时永不结束；被系统断开就按退避重连，
+    /// 保证进程永远有一条定位请求在途，系统就不会因为「无投递需求」而挂起它。
+    @available(iOS 17.0, *)
+    private func runLiveUpdates() async {
+        while !Task.isCancelled {
+            do {
+                for try await update in CLLocationUpdate.liveUpdates() {
+                    if Task.isCancelled { break }
+                    liveUpdatesRetryDelay = 2
+                    handleLiveUpdate(update)
+                }
+            } catch {
+                // 授权被收回、会话缺失或系统临时拒绝投递都会走到这里，退避后重连。
+            }
+            liveUpdatesActive = false
+            guard !Task.isCancelled, enabled, !suspendedForCall else { break }
+            try? await Task.sleep(for: .seconds(liveUpdatesRetryDelay))
+            liveUpdatesRetryDelay = min(30, liveUpdatesRetryDelay * 2)
+        }
+        liveUpdatesActive = false
+    }
+
+    /// 一次定位回调 = 一次「进程还活着」的凭证，与 `CLLocationManager` 的回调同等待遇。
+    @available(iOS 17.0, *)
+    private func handleLiveUpdate(_ update: CLLocationUpdate) {
+        heartbeatActive = true
+        lastDeliveryAt = Date()
+        guard UIApplication.shared.applicationState != .active else { return }
+        appIsBackground = true
+        UserDefaults.standard.set(lastDeliveryAt, forKey: "djonehub.standby.last-background-beat")
+        dispatchBackgroundWake()
     }
 
     /// 显著位置变化监控：这是系统允许的「进程被回收后仍能被拉起」通道。
@@ -565,6 +683,9 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
             startIfAuthorized()
             return
         }
+        // 现代链路同样要自愈：进程被拉起、授权档位变化或系统掐断投递时，
+        // 每 30 秒确认一次服务会话与连续定位流都还在。
+        startModernChannelsIfNeeded()
         // 5 分钟没有任何定位回调：**只补一次 startUpdatingLocation()**，绝不 stop + start。
         // 从后台重新协商定位会话会被系统延迟投递甚至直接拒绝，那正是「切后台 /
         // 锁屏收不到通知」的老根因；而重复 start 是幂等的，只会让请求更稳。
