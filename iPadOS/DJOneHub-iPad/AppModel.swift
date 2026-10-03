@@ -169,6 +169,8 @@ final class AppModel: ObservableObject {
     private var hasStarted = false
     private var consecutivePollFailures = 0
     private var nextMessagesRefresh = Date.distantPast
+    /// 下一次允许让模块执行 AT+CMGL 全量扫描的时间（见 poll 里的短信节流说明）。
+    private var nextModuleSMSScan = Date.distantPast
     private var nextAudioDiagnosticRefresh = Date.distantPast
     private var nextModuleMetadataRefresh = Date.distantPast
     private var audioWarmupCallID: String?
@@ -396,6 +398,10 @@ final class AppModel: ObservableObject {
         pollingGeneration &+= 1
         let generation = pollingGeneration
         pollingTask?.cancel()
+        // 重新开始轮询（含从后台回到前台）时立刻补一次短信同步与一次模块全量扫描，
+        // 不让用户回到 App 还要等上一轮的间隔走完才看到新短信。
+        nextMessagesRefresh = .distantPast
+        nextModuleSMSScan = .distantPast
         pollingTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.poll(generation: generation)
@@ -620,11 +626,18 @@ final class AppModel: ObservableObject {
         }
 
         if Date() >= nextMessagesRefresh {
-            // 前台保持原有节奏；后台也要定期拉取，否则新短信永远要等用户打开 App 才出现。
-            // 后台低频拉取即可兼顾及时性与耗电，短信本身不像来电那样要求秒级响应。
+            // 新短信要尽快到手机：前台每 3 秒读一次模块**已经缓存**的列表
+            // （纯 JSON，不走 AT），后台放宽到 12 秒——原先前台要等 30 秒。
+            // 真正让模块去执行 `AT+CMGL` 全量读取的动作单独节流：它和 1 秒一次的
+            // 通话轮询共用同一条 AT 通道，问得太勤会把来电检测拖慢；
+            // 模块自己每 8 秒也会扫一次，所以 10 秒的节奏不会漏消息。
             let active = appIsActive
-            nextMessagesRefresh = Date().addingTimeInterval(active ? 30 : 15)
-            await refreshMessages(silently: true)
+            nextMessagesRefresh = Date().addingTimeInterval(active ? 3 : 12)
+            let shouldScanModule = Date() >= nextModuleSMSScan
+            if shouldScanModule {
+                nextModuleSMSScan = Date().addingTimeInterval(active ? 10 : 12)
+            }
+            await refreshMessages(silently: true, forceModuleScan: shouldScanModule)
         }
     }
 
@@ -959,9 +972,11 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func refreshMessages(silently: Bool = false) async {
+    /// - Parameter forceModuleScan: 是否让模块立刻执行一次 `AT+CMGL` 全量读取。
+    ///   轮询里只在节流窗口到期时为 `true`；手动刷新、发完短信走默认值 `true`。
+    func refreshMessages(silently: Bool = false, forceModuleScan: Bool = true) async {
         do {
-            try await api.refreshSMS()
+            if forceModuleScan { try await api.refreshSMS() }
             let remoteMessages = try await api.messages()
             let mergedMessages = await mergeMessages(remoteMessages)
             if messages != mergedMessages { messages = mergedMessages }
@@ -975,13 +990,22 @@ final class AppModel: ObservableObject {
     /// 记录当前已知短信作为后台新短信通知的基线；前台刷新同样并入，
     /// 保证用户正在看 App 时不会为已显示的消息重复弹通知。
     private func captureSMSSnapshot() {
-        seenIncomingSMSIDs.formUnion(messages.filter { !$0.isOutgoing }.map(\.id))
+        // 基线必须和发通知用同一套 ID（合并后的），否则一条长短信的每一段
+        // 都会被当成一条独立短信，反复提醒。
+        seenIncomingSMSIDs.formUnion(receivedMessages(from: messages).map(\.id))
+    }
+
+    /// 收到方向、且已把长短信各段合并回一条的记录。
+    private func receivedMessages(from records: [SMSMessage]) -> [SMSMessage] {
+        SMSMessage.mergedFragments(records).filter { !$0.isOutgoing }
     }
 
     /// 前台把新短信直接并入已见集合；后台对未见过的呼入短信发送本地通知，
     /// 发送后并入集合，避免同一会话里反复提醒同一条消息。
     private func handleIncomingSMSNotifications(_ merged: [SMSMessage]) {
-        let incoming = merged.filter { !$0.isOutgoing }
+        // 先把各段合并回一条再判断「是不是新短信」：直接用未合并的记录，
+        // 一条长短信会变成好几条通知，且先后是模块的存储顺序而不是阅读顺序。
+        let incoming = receivedMessages(from: merged)
         if appIsActive {
             seenIncomingSMSIDs.formUnion(incoming.map(\.id))
             return
@@ -989,6 +1013,8 @@ final class AppModel: ObservableObject {
         let smsNotificationsEnabled = UserDefaults.standard.object(forKey: smsNotificationKey) as? Bool ?? true
         let freshMessages = incoming.filter { !seenIncomingSMSIDs.contains($0.id) }
         if smsNotificationsEnabled {
+            // 按「旧 → 新」投递：系统把最后投递的排在最上面，所以最新的一条在最前，
+            // 与「信息」App 的通知顺序一致（原先是新在前，投递后顺序正好反了）。
             for message in freshMessages {
                 smsNotifier.post(
                     message: message,
@@ -1148,8 +1174,15 @@ final class AppModel: ObservableObject {
     }
 
     private func normalizedMessages(_ records: [SMSMessage]) -> [SMSMessage] {
+        // 时间戳完全相同的多条记录（同一条长短信的各段）必须有确定的先后：
+        // 原先只按时间戳排，而 Swift 的 sorted 并不稳定、输入又来自字典的值，
+        // 每次刷新的相对顺序都可能不同——界面就会在「合并成一条」和「拆成
+        // 好几条」之间反复跳。这里补一个稳定的全序决胜键。
         Array(records
-            .sorted { $0.timestamp > $1.timestamp }
+            .sorted { lhs, rhs in
+                if lhs.timestamp != rhs.timestamp { return lhs.timestamp > rhs.timestamp }
+                return lhs.id < rhs.id
+            }
             .prefix(maxMessageCount))
     }
 

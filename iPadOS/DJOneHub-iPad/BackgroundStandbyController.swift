@@ -451,6 +451,13 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
 /// 与来电通知共用同一套通知授权，样式贴近 iMessage：标题显示联系人，正文显示短信内容。
 @MainActor
 final class SMSNotifier {
+    /// 每个「发件人 + 时间」最近一次投递用的标识符与内容。
+    ///
+    /// 一条长短信的各段可能分两次才到齐：第一段先弹一条通知，补全后应当
+    /// **替换**掉它，而不是再多弹一条。系统的通知去重就是按 identifier 做的，
+    /// 复用同一个标识符重新 add 即可原地替换。
+    private var posted: [String: (identifier: String, content: String)] = [:]
+
     func post(message: SMSMessage, displayName: String) {
         let sender = message.sender.isEmpty ? "未知号码" : message.sender
         let name = displayName.isEmpty ? sender : displayName
@@ -461,9 +468,22 @@ final class SMSNotifier {
         content.sound = .default
         // 同一联系人按会话线程聚合，锁屏上相同发件人的通知会折叠成一组。
         content.threadIdentifier = "djonehub.sms.\(sender)"
+        // 标识符不能包含短信 ID 中的控制字符，改用哈希加随机串保证唯一。
+        let key = "\(sender)\u{0}\(message.timestamp.timeIntervalSince1970)"
+        let identifier: String
+        if let previous = posted[key],
+           message.content.count > previous.content.count,
+           message.content.hasPrefix(previous.content) {
+            // 同一条长短信补齐后的后半段：复用标识符，替换掉只带前半段的那条。
+            identifier = previous.identifier
+        } else {
+            identifier = "djonehub.sms.\(abs(message.id.hashValue)).\(UUID().uuidString)"
+        }
+        posted[key] = (identifier, message.content)
+        // 只用来识别「刚刚那条被补全了」，不需要长期保留。
+        if posted.count > 64 { posted.removeAll() }
         let request = UNNotificationRequest(
-            // 标识符不能包含短信 ID 中的控制字符，改用哈希加随机串保证唯一。
-            identifier: "djonehub.sms.\(abs(message.id.hashValue)).\(UUID().uuidString)",
+            identifier: identifier,
             content: content,
             trigger: nil
         )

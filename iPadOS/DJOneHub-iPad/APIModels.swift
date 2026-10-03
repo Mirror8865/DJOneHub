@@ -95,31 +95,42 @@ extension SMSMessage {
     /// 一段短信不会超过 160 个单元；更长的上一段说明它本身已经是完整短信。
     static let fragmentMaximumLength = 200
 
+    /// 模块 `delivery_id` 形如 `ME-12-<digest>`：前缀是「存储介质-槽位」。
+    /// 一条长短信被模块拆成多条记录时，各段占用**连续槽位**，槽位号就是分段的
+    /// 真实先后——比时间戳可靠得多（各段时间戳常常完全相同）。
+    var storageSlot: (memory: String, index: Int)? {
+        guard let deliveryID else { return nil }
+        let parts = deliveryID.split(separator: "-")
+        guard parts.count >= 2, let index = Int(parts[1]) else { return nil }
+        return (String(parts[0]), index)
+    }
+
     /// 把同发件人、同方向、时间相邻、且上一段看起来是「被切断的一段」的连续记录合回一条。
     ///
     /// 模块侧一条长短信会被拆成多条独立短信（发送按 70 个 UCS2 单元切段，
     /// 收到的多段短信在 ME 存储里也各占一条），不合并就会把一条长短信显示成一串气泡。
     /// 合并后沿用最后一段的 id / 时间 / 交付标识，因此列表选中、滚动定位与本机删除
     /// 仍然指向真实记录。
+    ///
+    /// **顺序必须是确定的全序**：同一条长短信各段的时间戳往往一模一样，之前靠
+    /// 「输入方向」猜、再配合字典顺序与不稳定的 `sorted`，每次刷新都可能给出不同的
+    /// 相对顺序——于是同一条短信会在「一个气泡」和「好几个气泡」之间来回跳，
+    /// 聊天窗口的先后也会反。现在统一按（时间升序，模块存储槽位升序，内容）排
+    /// 一次确定的顺序，输出恒为「旧 → 新」，与聊天窗口自上而下的渲染顺序一致。
     static func mergedFragments(_ messages: [SMSMessage]) -> [SMSMessage] {
         guard messages.count > 1 else { return messages }
-        // App 内部的短信列表始终是「最新在前」的倒序。同一条长短信的各段
-        // 时间戳可能完全相同（模块一次写入），倒序排列会把分段顺序整个反过来，
-        // 上一段变成后半段，边界判断自然就合不回去——这正是长短信被拆成
-        // 一串气泡的原因。所以先按输入方向把顺序摆正，再按时间升序排列。
-        let ordered: [SMSMessage]
-        if isNewestFirst(messages) {
-            ordered = Array(messages.reversed())
-        } else {
-            // 输入不是倒序时做一次稳定排序，时间戳相同的保持原有先后顺序。
-            ordered = messages.enumerated()
-                .sorted { lhs, rhs in
-                    if lhs.element.timestamp == rhs.element.timestamp {
-                        return lhs.offset < rhs.offset
-                    }
-                    return lhs.element.timestamp < rhs.element.timestamp
-                }
-                .map(\.element)
+        let ordered = messages.sorted { lhs, rhs in
+            if lhs.timestamp != rhs.timestamp { return lhs.timestamp < rhs.timestamp }
+            let leftSlot = lhs.storageSlot
+            let rightSlot = rhs.storageSlot
+            if let leftSlot, let rightSlot {
+                if leftSlot.memory != rightSlot.memory { return leftSlot.memory < rightSlot.memory }
+                if leftSlot.index != rightSlot.index { return leftSlot.index < rightSlot.index }
+            } else if (leftSlot == nil) != (rightSlot == nil) {
+                // 有槽位的排在没槽位的前面；旧版模块没有槽位，保持稳定即可。
+                return rightSlot == nil
+            }
+            return lhs.content < rhs.content
         }
 
         var merged: [SMSMessage] = []
@@ -128,6 +139,7 @@ extension SMSMessage {
                   last.sender == message.sender,
                   last.isOutgoing == message.isOutgoing,
                   isFragmentTail(last.content),
+                  isSameFragmentRun(last, message),
                   message.timestamp.timeIntervalSince(last.timestamp) <= joinWindow(for: last.content) else {
                 merged.append(message)
                 continue
@@ -144,16 +156,16 @@ extension SMSMessage {
         return merged
     }
 
-    /// 输入是否已经是「最新在前」的倒序排列。
-    private static func isNewestFirst(_ messages: [SMSMessage]) -> Bool {
-        var sawStrictlyNewer = false
-        for index in 1..<messages.count {
-            let previous = messages[index - 1].timestamp
-            let current = messages[index].timestamp
-            if current > previous { return false }
-            if current < previous { sawStrictlyNewer = true }
-        }
-        return sawStrictlyNewer
+    /// 两段是否属于同一条被拆开的长短信。
+    ///
+    /// 模块 `delivery_id` 带存储槽位时优先用槽位判断：一条长短信的各段占用
+    /// **连续槽位**，而同一发件人先后发来的两条独立短信不会；这能挡掉「两条
+    /// 各 50 字的独立短信被长度启发式误合成一条」。旧版模块没有槽位、
+    /// 或两段时间戳完全相同（模块一次写入）时，退回原来的长度 / 时间窗口判断。
+    private static func isSameFragmentRun(_ last: SMSMessage, _ next: SMSMessage) -> Bool {
+        guard let lastSlot = last.storageSlot, let nextSlot = next.storageSlot else { return true }
+        if last.timestamp == next.timestamp { return true }
+        return lastSlot.memory == nextSlot.memory && nextSlot.index == lastSlot.index + 1
     }
 
     /// 上一段是否像「一条长短信被切断的前半段」。

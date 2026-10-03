@@ -2016,7 +2016,12 @@ private struct InfoCardRow: View {
 /// 会话模型：iMessage 按对端号码分组。
 private struct Conversation: Identifiable {
     let id: String
+    /// 用于显示的消息列表：同一条长短信的各段已经合回一个气泡（输出恒为「旧 → 新」）。
     let messages: [SMSMessage]
+    /// 这些气泡背后的**本机原始记录** ID。删除时必须按真实记录打墓碑：
+    /// 合并后的气泡 ID 是拼出来的，直接拿它去删，墓碑里记不到原始记录，
+    /// 模块下一轮刷新就会把同一批分段原样回传，表现为「长短信删不掉」。
+    let recordIDs: Set<String>
     var last: SMSMessage? { messages.last }
 }
 
@@ -2048,7 +2053,13 @@ struct MessagesView: View {
         let grouped = Dictionary(grouping: model.messages) { $0.sender }
         return grouped
             // 列表预览也要用合并后的完整内容，否则只能看到最后一段。
-            .map { Conversation(id: $0.key, messages: SMSMessage.mergedFragments($0.value)) }
+            .map { entry in
+                Conversation(
+                    id: entry.key,
+                    messages: SMSMessage.mergedFragments(entry.value),
+                    recordIDs: Set(entry.value.map(\.id))
+                )
+            }
             .sorted { ($0.last?.timestamp ?? .distantPast) > ($1.last?.timestamp ?? .distantPast) }
     }
 
@@ -2225,7 +2236,7 @@ struct MessagesView: View {
                     .listRowInsets(rowInsets)
                     .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                         Button(role: .destructive) {
-                            model.deleteMessages(ids: Set(conversation.messages.map(\.id)))
+                            model.deleteMessages(ids: conversation.recordIDs)
                             if selection == conversation.id { selection = nil }
                         } label: {
                             Label(L10n.t("删除"), systemImage: "trash")
@@ -2277,7 +2288,7 @@ struct MessagesView: View {
     private func deleteCheckedConversations() {
         var ids = Set<String>()
         for conversation in allConversations where checkedIDs.contains(conversation.id) {
-            ids.formUnion(conversation.messages.map(\.id))
+            ids.formUnion(conversation.recordIDs)
         }
         guard !ids.isEmpty else { return }
         model.deleteMessages(ids: ids)
