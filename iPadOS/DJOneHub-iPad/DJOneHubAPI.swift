@@ -38,6 +38,11 @@ struct DJOneHubAPI: Sendable {
         transport.resetConnectionState()
     }
 
+    /// 当前 USB ECM 物理链路状态：只读本机网卡与系统路径，不发起 HTTP 请求。
+    func moduleLinkState() -> ModuleUSBLinkState {
+        ModuleUSBInterfaceResolver.linkState()
+    }
+
     /// 限制高权限控制接口只能指向环回或私有网络，避免误发到公网主机。
     private static func isAllowedLocalURL(_ url: URL) -> Bool {
         guard url.scheme == "http", let host = url.host?.lowercased() else { return false }

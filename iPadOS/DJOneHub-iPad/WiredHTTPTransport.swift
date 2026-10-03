@@ -167,15 +167,65 @@ struct NetworkInterfaceAddress: Equatable, Sendable {
     let address: String
 }
 
+/// 模块 USB ECM 链路状态：把一句「模块离线」拆成可执行的几种原因，
+/// 供设置页与轮询失败时给出准确诊断。
+enum ModuleUSBLinkState: Equatable, Sendable {
+    /// 还没有跑过一轮检测。
+    case unknown
+    /// 正常：网卡已拿到 192.168.225.x 地址。
+    case ready(interface: String, address: String)
+    /// 有 USB 网卡但没拿到模块网段地址（通常是模块 DHCP 未响应，
+    /// 系统自分配 169.254.x）。
+    case leaseMissing(interface: String, address: String)
+    /// 系统里既没有模块网段地址，也没有自分配地址的 USB 网卡。
+    case missing
+
+    var isReady: Bool {
+        if case .ready = self { return true }
+        return false
+    }
+
+    /// 设置页里显示的一行链路摘要。
+    var displayText: String {
+        switch self {
+        case .unknown:
+            return "尚未检测"
+        case let .ready(interface, address):
+            return "\(interface) · \(address)"
+        case let .leaseMissing(interface, address):
+            return "\(interface) · 未获取到 192.168.225.x（当前 \(address)）"
+        case .missing:
+            return "未检测到模块以太网接口"
+        }
+    }
+
+    /// 轮询连续失败时给用户看的可执行诊断。
+    var pollFailureDescription: String {
+        switch self {
+        case .unknown:
+            return "模块控制连接失败。"
+        case .ready:
+            return "链路正常但模块代理未响应：可到「诊断与维护」看网络诊断，必要时重启模块。"
+        case let .leaseMissing(interface, address):
+            return "\(interface) 未拿到 192.168.225.x 地址（当前 \(address)）：模块 DHCP 未响应，重新插拔或重启模块即可恢复。"
+        case .missing:
+            return "未检测到模块以太网接口：请检查 USB 连接。"
+        }
+    }
+}
+
 /// 从本机 192.168.225.x 地址反查模块 USB ECM 接口。通过接口名精确绑定后，
 /// 即使 VPN 改写默认路由，发往模块的请求也不会误入 utun 或 Wi-Fi。
+///
+/// 解析过程不再阻塞 Swift 并发线程：常驻一个 NWPathMonitor，把最新 NWPath
+/// 关在锁内，resolve() 只做 getifaddrs + 查表。旧实现每次解析都
+/// 新建 monitor 并 semaphore.wait(0.35s)，模块离线时设置页并发拉取十几个接口
+/// 会把协作线程池占满，表现为「App 突然再也连不上模块，重启才好」。
 enum ModuleUSBInterfaceResolver {
     private static let monitorQueue = DispatchQueue(label: "com.jieden.djonehub.usb-interface")
-    private static let cacheLock = NSLock()
-    private static var cachedInterface: NWInterface?
-    private static var cacheExpiresAt: UInt64 = 0
-    // 状态轮询每秒执行一次；短缓存可以避免每个 HTTP 请求都创建 NWPathMonitor。
-    private static let cacheLifetimeNanoseconds: UInt64 = 1_000_000_000
+    private static let stateLock = NSLock()
+    private static var latestPath: NWPath?
+    private static var monitor: NWPathMonitor?
 
     static func moduleInterfaceNames(from addresses: [NetworkInterfaceAddress]) -> Set<String> {
         Set(addresses.compactMap { item in
@@ -188,53 +238,60 @@ enum ModuleUSBInterfaceResolver {
         })
     }
 
-    static func resolve(timeout: TimeInterval = 0.35) -> NWInterface? {
-        let names = moduleInterfaceNames(from: systemInterfaceAddresses())
-        guard !names.isEmpty else {
-            invalidate()
-            return nil
+    /// 当前物理链路状态：区分「模块网卡正常」、「有网卡但没租约」与「没有网卡」。
+    static func linkState() -> ModuleUSBLinkState {
+        let addresses = systemInterfaceAddresses()
+        let names = moduleInterfaceNames(from: addresses)
+        if let name = names.sorted().first,
+           let address = addresses.first(where: { $0.name == name })?.address {
+            return .ready(interface: name, address: address)
         }
-
-        let now = DispatchTime.now().uptimeNanoseconds
-        cacheLock.lock()
-        if now < cacheExpiresAt,
-           let cachedInterface,
-           names.contains(cachedInterface.name) {
-            cacheLock.unlock()
-            return cachedInterface
+        // 169.254.x 是「链路在、但没拿到 DHCP 租约」的系统自分配地址。
+        if let selfAssigned = addresses.first(where: { isSelfAssignedAddress($0.address) }) {
+            return .leaseMissing(interface: selfAssigned.name, address: selfAssigned.address)
         }
-        cacheLock.unlock()
-
-        let monitor = NWPathMonitor()
-        let semaphore = DispatchSemaphore(value: 0)
-        let lock = NSLock()
-        var resolved: NWInterface?
-        monitor.pathUpdateHandler = { path in
-            lock.lock()
-            resolved = path.availableInterfaces.first { names.contains($0.name) }
-            lock.unlock()
-            semaphore.signal()
-        }
-        monitor.start(queue: monitorQueue)
-        _ = semaphore.wait(timeout: .now() + timeout)
-        monitor.cancel()
-        lock.lock()
-        let result = resolved
-        lock.unlock()
-
-        cacheLock.lock()
-        cachedInterface = result
-        cacheExpiresAt = result == nil ? 0 : now + cacheLifetimeNanoseconds
-        cacheLock.unlock()
-        return result
+        return .missing
     }
 
-    /// USB 拔出或严格接口连接失败后立即丢弃缓存，避免下一次请求继续使用旧网卡对象。
+    static func resolve() -> NWInterface? {
+        let names = moduleInterfaceNames(from: systemInterfaceAddresses())
+        guard !names.isEmpty else { return nil }
+        ensureMonitor()
+        stateLock.lock()
+        let path = latestPath
+        stateLock.unlock()
+        return path?.availableInterfaces.first { names.contains($0.name) }
+    }
+
+    /// USB 拔出、链路重枚举或严格接口连接失败后重建路径监控，
+    /// 避免下一次请求继续使用旧网卡对象。
     static func invalidate() {
-        cacheLock.lock()
-        cachedInterface = nil
-        cacheExpiresAt = 0
-        cacheLock.unlock()
+        stateLock.lock()
+        let stale = monitor
+        monitor = nil
+        latestPath = nil
+        stateLock.unlock()
+        stale?.cancel()
+    }
+
+    /// 常驻监控只创建一次；之后每次解析都只读内存里的最新路径。
+    private static func ensureMonitor() {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard monitor == nil else { return }
+        let created = NWPathMonitor()
+        created.pathUpdateHandler = { path in
+            stateLock.lock()
+            latestPath = path
+            stateLock.unlock()
+        }
+        monitor = created
+        created.start(queue: monitorQueue)
+    }
+
+    private static func isSelfAssignedAddress(_ address: String) -> Bool {
+        let octets = address.split(separator: ".", omittingEmptySubsequences: false)
+        return octets.count == 4 && octets[0] == "169" && octets[1] == "254"
     }
 
     private static func systemInterfaceAddresses() -> [NetworkInterfaceAddress] {

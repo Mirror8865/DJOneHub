@@ -141,6 +141,8 @@ struct SettingsView: View {
     @State private var selectedSection: SettingsSection? = .status
     /// 系统设置 App 顶部的搜索框：按标题过滤左侧分类。
     @State private var settingsSearch = ""
+    /// 与另外三个板块共用同一个左列宽度键，四个板块的分栏宽度保持一致。
+    @AppStorage("djonehub.split.left-width") private var splitLeftWidth: Double = 360
     let onClose: (() -> Void)?
 
     init(onClose: (() -> Void)? = nil) {
@@ -231,8 +233,8 @@ struct SettingsView: View {
     private var settingsSplitView: some View {
         NavigationStack {
             // 与通话 / 联系人 / 信息三个板块保持同一套版式：
-            // 页内分栏 + 一条顶栏 + 内容铺满全屏（顶部交给系统的滚动边缘渐变模糊）。
-            HStack(spacing: 0) {
+            // 页内分栏 + 可拖动分栏手柄 + 一条顶栏 + 内容铺满全屏。
+            PhoneSplitContainer(leftWidth: $splitLeftWidth) {
                 VStack(spacing: 0) {
                     PhoneSearchField(placeholder: L10n.t("搜索"), text: $settingsSearch)
                         .padding(.horizontal, 16)
@@ -267,25 +269,26 @@ struct SettingsView: View {
                     .tint(Color(uiColor: .systemBlue))
                     .scrollDismissesKeyboard(.interactively)
                 }
-                // 与通话 / 联系人 / 信息三个板块同一套左栏底色：浅色淡灰、深色深灰。
-                .background(Color(uiColor: .secondarySystemBackground).ignoresSafeArea())
-                .frame(width: 320)
-
-                // 右栏与通话 / 联系人 / 信息三个板块同一套底色：浅色纯白、深色纯黑；
-                // 分组卡片用 secondarySystemBackground，浅色淡灰、深色深灰，卡片始终可辨。
+                // 左栏比右栏深一档（systemGray5）：浅色 #E5E5EA、深色 #2C2C2E，
+                // 与另外三个板块的左列完全同一套底色。
+                .background(Color(uiColor: .systemGray5).ignoresSafeArea())
+            } right: {
+                // 右栏浅灰底（systemGroupedBackground：浅色 #F2F2F7 / 深色 #000000），
+                // 分组卡片纯白（secondarySystemGroupedBackground：浅色 #FFFFFF / 深色 #1C1C1E），
+                // 与系统设置 App 的「App 列表」层次一致。
                 Form {
                     Group { sectionContent(selectedSection ?? .status) }
-                        .listRowBackground(Color(uiColor: .secondarySystemBackground))
+                        .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
                     if !actionMessage.isEmpty {
                         Section {
                             Text(actionMessage).font(.footnote).foregroundStyle(.secondary)
                         }
-                        .listRowBackground(Color(uiColor: .secondarySystemBackground))
+                        .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
                     }
                 }
                 .formStyle(.grouped)
                 .scrollContentBackground(.hidden)
-                .background(Color(uiColor: .systemBackground).ignoresSafeArea())
+                .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .navigationTitle(L10n.t("设置"))
@@ -365,6 +368,12 @@ struct SettingsView: View {
             LabeledContent(L10n.t("模块代理")) {
                 Text(model.isOnline ? L10n.t("在线") : L10n.t("离线"))
                     .foregroundStyle(model.isOnline ? Color.green : Color.red)
+            }
+            // USB ECM 物理链路：区分「网卡正常」、「有网卡但没 DHCP
+            // 租约（常见于模块 DHCP 挂掉、只能重启设备才恢复）」与「没有网卡」。
+            LabeledContent(L10n.t("模块链路")) {
+                Text(model.moduleLinkState.displayText)
+                    .foregroundStyle(model.moduleLinkState.isReady ? Color.secondary : Color.orange)
             }
             LabeledContent("App 版本", value: appVersionText)
             LabeledContent("Agent 版本", value: model.agentVersion ?? (model.isOnline ? "读取中" : "--"))
@@ -701,6 +710,8 @@ struct SettingsView: View {
     private func refreshAll() async {
         // 轮询开始时记录版本；请求返回时若用户已修改策略，则该回包已过期。
         let policyRevisionAtRequest = cellularPolicyRevision
+        // 每次刷新都顺手重读本机链路状态，不依赖下一次轮询。
+        model.refreshModuleLinkState()
         async let modemRequest = try? model.api.modemStatus()
         async let trafficRequest = try? model.api.networkTraffic()
         async let powerRequest = try? model.api.systemPower()

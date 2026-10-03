@@ -59,6 +59,8 @@ final class AppModel: ObservableObject {
     @Published var messages: [SMSMessage] = []
     @Published var numberInput = ""
     @Published var isOnline = false
+    /// 本机 USB ECM 链路状态：区分「模块网卡正常 / 有网卡但没 DHCP 租约 / 没有网卡」。
+    @Published var moduleLinkState: ModuleUSBLinkState = .unknown
     @Published var connectionMessage: String?
     @Published var isBusy = false
     @Published var isMuted = false
@@ -199,6 +201,13 @@ final class AppModel: ObservableObject {
         backgroundStandby.setApplicationIsBackground(true)
         // 进程一旦被系统回收，只有系统调度能重新拉起它；这里补排一次后台刷新任务。
         StandbyBackgroundScheduler.schedule()
+    }
+
+    /// 立刻重新读取一次本机 USB 链路状态；不发起 HTTP 请求，供设置页与轮询复用。
+    /// 只在状态真正变化时写入 @Published，避免每秒刷新界面。
+    func refreshModuleLinkState() {
+        let link = api.moduleLinkState()
+        if link != moduleLinkState { moduleLinkState = link }
     }
 
     /// 被系统在后台唤醒（显著位置变化 / 后台刷新任务）时恢复保活与轮询。
@@ -383,6 +392,7 @@ final class AppModel: ObservableObject {
                 Task { await NetworkDiagnosticRecorder.shared.recordModuleOnline() }
             }
             if connectionMessage != nil { connectionMessage = nil }
+            refreshModuleLinkState()
             scheduleModuleMetadataRefresh(generation: generation)
             let callerName = status.active.map { contacts.displayName(for: $0.number) }
             let confirmedEndedCall = previousCall.flatMap { previous in
@@ -465,8 +475,13 @@ final class AppModel: ObservableObject {
                 }
                 audio.stopCallTone()
                 await liveActivity.markOffline(appIsActive: appIsActive)
+                // 连续失败说明链路或模块代理已经变了：丢掉缓存的 USB
+                // 网卡与路径监控，让下一次轮询从全新的 NWPathMonitor 重新解析，
+                // 避免旧接口对象把 App 永久钉在离线状态（旧行为要重启设备才恢复）。
+                api.resetLocalConnectionState()
+                refreshModuleLinkState()
                 // 后台轮询失败只更新离线状态；否则用户关闭弹窗后一秒又会被同一错误轰炸。
-                connectionMessage = "模块控制连接失败：\(error.localizedDescription)"
+                connectionMessage = moduleLinkState.pollFailureDescription
             }
         }
 

@@ -704,9 +704,76 @@ struct PhoneSplitListColumn<Content: View>: View {
     var body: some View {
         VStack(spacing: 0) { content }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            // 浅色下左列淡灰、深色下左列深灰（secondarySystemBackground），
-            // 与右列的系统白 / 纯黑形成对比。
-            .background(Color(uiColor: .secondarySystemBackground).ignoresSafeArea())
+            // 左列比右列更深一档（systemGray5：浅色 #E5E5EA / 深色 #2C2C2E），
+            // 与右列的系统白 / 纯黑形成系统设置 App 那种层次。
+            .background(Color(uiColor: .systemGray5).ignoresSafeArea())
+    }
+}
+
+/// 四个板块（通话 / 联系人 / 信息 / 设置）共用的双栏容器。
+///
+/// 左列宽度由用户拖动中间的分栏手柄调节，并写入同一个 `AppStorage` 键，
+/// 因此四个板块始终共用同一宽度。手柄静止时完全不可见（列表之间没有分割线），
+/// 悬停或拖动时才浮出一条细指示线。
+struct PhoneSplitContainer<Left: View, Right: View>: View {
+    @Binding var leftWidth: Double
+    @ViewBuilder var left: Left
+    @ViewBuilder var right: Right
+
+    private let minWidth: CGFloat = 280
+    private let maxWidth: CGFloat = 560
+    /// 手柄命中区宽度：比可见指示线宽，便于用手指或触控板抓住。
+    private let handleWidth: CGFloat = 16
+
+    @GestureState private var dragOffset: CGFloat = 0
+    @State private var isHoveringHandle = false
+
+    var body: some View {
+        GeometryReader { proxy in
+            // 右列至少保留 360pt，窗口变窄时左列自动收紧上限。
+            let limit = max(minWidth, min(maxWidth, proxy.size.width - 360))
+            let width = min(max(CGFloat(leftWidth) + dragOffset, minWidth), limit)
+            ZStack(alignment: .topLeading) {
+                HStack(spacing: 0) {
+                    left
+                        .frame(width: width)
+                        .frame(maxHeight: .infinity)
+                    right
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                handle(limit: limit)
+                    .offset(x: width - handleWidth / 2)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private func handle(limit: CGFloat) -> some View {
+        ZStack {
+            // 透明命中区：静止时看不到任何分割线。
+            Color.clear.contentShape(Rectangle())
+            Capsule(style: .continuous)
+                .fill(Color(uiColor: .separator))
+                .frame(width: 2)
+                .opacity(isHoveringHandle || dragOffset != 0 ? 1 : 0)
+        }
+        .frame(width: handleWidth)
+        .frame(maxHeight: .infinity)
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.15)) { isHoveringHandle = hovering }
+        }
+        .gesture(
+            DragGesture(minimumDistance: 1)
+                .updating($dragOffset) { value, state, _ in
+                    state = value.translation.width
+                }
+                .onEnded { value in
+                    let target = CGFloat(leftWidth) + value.translation.width
+                    leftWidth = Double(min(max(target, minWidth), limit))
+                }
+        )
+        .accessibilityLabel(L10n.t("调整分栏宽度"))
     }
 }
 
@@ -764,6 +831,8 @@ struct CallsView: View {
     @State private var showingKeypad = false
     @State private var isEditing = false
     @State private var checkedIDs = Set<String>()
+    /// 四个板块共用左列宽度：拖动中间手柄后写入同一个 AppStorage 键。
+    @AppStorage("djonehub.split.left-width") private var splitLeftWidth: Double = 360
 
     private var isRegular: Bool { horizontalSizeClass == .regular }
 
@@ -856,7 +925,7 @@ struct CallsView: View {
 
     private var regularBody: some View {
         // 左列系统灰底（列表）、右列系统白底（详情），与系统设置 App 的分栏一致。
-        HStack(spacing: 0) {
+        PhoneSplitContainer(leftWidth: $splitLeftWidth) {
             PhoneSplitListColumn {
                 PhoneSearchField(placeholder: L10n.t("搜索"), text: $search)
                     .padding(.horizontal, 16)
@@ -869,8 +938,7 @@ struct CallsView: View {
                 .scrollContentBackground(.hidden)
                 .scrollDismissesKeyboard(.interactively)
             }
-            .frame(width: 380)
-
+        } right: {
             PhoneSplitDetailColumn {
                 if let call = selectedCall {
                     CallDetailPane(call: call, onMessage: onMessage, onCall: dialNumber)
@@ -1365,6 +1433,8 @@ struct ContactsView: View {
     @State private var showingNewContact = false
     @State private var isEditing = false
     @State private var checkedIDs = Set<String>()
+    /// 四个板块共用左列宽度：拖动中间手柄后写入同一个 AppStorage 键。
+    @AppStorage("djonehub.split.left-width") private var splitLeftWidth: Double = 360
 
     private var isRegular: Bool { horizontalSizeClass == .regular }
     private var contacts: [ContactStore.Contact] { model.contacts.contacts }
@@ -1455,7 +1525,7 @@ struct ContactsView: View {
 
     private var regularBody: some View {
         // 左列系统灰底（列表）、右列系统白底（详情），与系统设置 App 的分栏一致。
-        HStack(spacing: 0) {
+        PhoneSplitContainer(leftWidth: $splitLeftWidth) {
             PhoneSplitListColumn {
                 PhoneSearchField(placeholder: L10n.t("搜索"), text: $search)
                     .padding(.horizontal, 16)
@@ -1468,8 +1538,7 @@ struct ContactsView: View {
                 .scrollContentBackground(.hidden)
                 .scrollDismissesKeyboard(.interactively)
             }
-            .frame(width: 380)
-
+        } right: {
             PhoneSplitDetailColumn {
                 if let contact = selectedContact {
                     ContactDetailPane(
@@ -1947,6 +2016,8 @@ struct MessagesView: View {
     @State private var composeRecipient = ""
     @State private var isEditing = false
     @State private var checkedIDs = Set<String>()
+    /// 四个板块共用左列宽度：拖动中间手柄后写入同一个 AppStorage 键。
+    @AppStorage("djonehub.split.left-width") private var splitLeftWidth: Double = 360
 
     private var isRegular: Bool { horizontalSizeClass == .regular }
 
@@ -1990,7 +2061,7 @@ struct MessagesView: View {
     // MARK: iPad 双列
 
     private var regularBody: some View {
-        HStack(spacing: 0) {
+        PhoneSplitContainer(leftWidth: $splitLeftWidth) {
             NavigationStack {
                 PhoneSplitListColumn {
                     PhoneSearchField(placeholder: L10n.t("搜索"), text: $search)
@@ -2010,8 +2081,7 @@ struct MessagesView: View {
                 .toolbar { listToolbar(showsCompose: false) }
                 .immersiveBars()
             }
-            .frame(width: 380)
-
+        } right: {
             PhoneSplitDetailColumn {
                 if let handle = selection {
                     NavigationStack {
