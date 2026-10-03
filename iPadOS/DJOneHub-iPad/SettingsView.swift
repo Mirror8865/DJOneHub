@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 enum GPSRefreshPolicy {
     static func shouldRequest(isEnabled: Bool) -> Bool { isEnabled }
@@ -471,6 +472,20 @@ struct SettingsView: View {
                 }
                 .disabled(!backgroundStandbyEnabled)
             LabeledContent(L10n.t("保活状态"), value: model.backgroundStandby.statusText)
+            LabeledContent(L10n.t("定位授权"), value: model.backgroundStandby.locationAuthorizationText)
+            // 只有「始终允许」能让系统不点亮状态栏定位图标；
+            // 不是就直接给一个去系统设置里改的入口。
+            if !model.backgroundStandby.hasAlwaysAuthorization {
+                Button {
+                    if let url = URL(string: UIApplication.openSettingsURLString) {
+                        UIApplication.shared.open(url)
+                    }
+                } label: {
+                    LabeledContent(L10n.t("打开系统设置"), value: L10n.t("改为“始终允许”"))
+                        .foregroundStyle(Color.primary)
+                }
+                .disabled(!backgroundStandbyEnabled)
+            }
             LabeledContent(
                 L10n.t("被回收后恢复"),
                 value: model.backgroundStandby.supportsTerminatedRelaunch
@@ -480,7 +495,8 @@ struct SettingsView: View {
         } header: {
             Text(L10n.t("后台与保活"))
         } footer: {
-            Text("不使用静音音频后台播放。开启后并授权“始终允许”定位，App 就能在后台与锁屏时继续收发通知，并登记显著位置变化监控与后台刷新任务；进程被系统回收时，系统会用这几条通道把它重新拉起并补发遗漏的来电与短信通知。状态栏不会再出现常驻的“定位服务”指示：App 不创建系统后台定位会话，也不显示后台定位指示条。“定位持续保活”关闭后不再跑持续定位，只保留系统唤醒通道，提醒可能延迟到下一次系统唤醒。若你在应用切换器里手动上滑杀掉 App，iOS 会暂停这些调度，需要重新打开 App 才能恢复。")       }
+            Text("不使用静音音频后台播放：改用官方的后台定位服务会话维持进程，后台与锁屏时能继续收发通知，并登记显著位置变化、地理围栏与后台刷新任务；进程被系统回收时，系统会用这几条通道把它重新拉起并补发遗漏的来电与短信通知。状态栏定位图标由系统决定：只有在“设置 › 隐私与安全性 › 定位 › DJOneHub”里改成“始终允许”，状态栏才不会出现定位图标；只拿到“使用期间”时系统会强制点亮它，App 关不掉。“定位持续保活”关闭后不再跑持续定位，只保留系统唤醒通道，提醒可能延迟到下一次系统唤醒。")
+        }
         Section {
             Toggle("短信通知", isOn: $smsNotificationsEnabled)
                 .tint(Color(uiColor: .systemGreen))

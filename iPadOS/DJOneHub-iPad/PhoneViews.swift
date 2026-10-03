@@ -702,38 +702,27 @@ struct GlassAvatar: View {
 
 /// 分栏版式左列：系统灰底（列表区），与系统 App 的双栏左列一致。
 struct PhoneSplitListColumn<Content: View>: View {
-    /// 会话自定义壁纸：设了就用它做左列底板（先模糊，再叠系统材质）。
+    /// 会话自定义壁纸：设了本列就压一层系统材质（模糊身后那张壁纸）。
     var wallpaper: UIImage? = nil
-    var wallpaperCanvas: CGSize = .zero
-    var wallpaperOriginX: CGFloat = 0
     @ViewBuilder var content: Content
 
     var body: some View {
         VStack(spacing: 0) { content }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background {
-                ZStack {
-                    // 壁纸必须画在本列自己的内容里：
-                    // `NavigationStack` 会盖一层不透明底色，画在分栏容器底下根本看不到。
-                    if let wallpaper {
-                        PhoneWallpaperBackdrop(
-                            image: wallpaper,
-                            canvas: wallpaperCanvas,
-                            originX: wallpaperOriginX,
-                            blurRadius: 24
-                        )
-                    }
-                    if wallpaper != nil {
-                        // 左侧列表的液态玻璃底板：系统材质叠在模糊壁纸上，
-                        // 列表滚动时内容从材质里透出来（与系统「信息」侧栏一致）。
-                        Rectangle()
-                            .fill(.ultraThinMaterial)
-                            .ignoresSafeArea()
-                    } else {
-                        // 左列比右列更深一档（systemGray5：浅色 #E5E5EA / 深色 #2C2C2E），
-                        // 与右列的系统白 / 纯黑形成系统设置 App 那种层次。
-                        Color(uiColor: .systemGray5).ignoresSafeArea()
-                    }
+                // 会话壁纸由根视图那一层（`ChatWallpaperRootLayer`）
+                // 统一铺满整窗（状态栏 / 顶栏 / 底部条都在它下面）。
+                // 本列只负责压一层系统材质：材质会把身后那张壁纸磨砂掉，
+                // 于是左列自然成为「模糊壁纸侧栏」，与右列共用同一张图；
+                // 画在本列里还能让磨砂边界跟着拖动实时走，不会滞后。
+                if wallpaper != nil {
+                    Rectangle()
+                        .fill(.ultraThinMaterial)
+                        .ignoresSafeArea()
+                } else {
+                    // 左列比右列更深一档（systemGray5：浅色 #E5E5EA / 深色 #2C2C2E），
+                    // 与右列的系统白 / 纯黑形成系统设置 App 那种层次。
+                    Color(uiColor: .systemGray5).ignoresSafeArea()
                 }
             }
     }
@@ -758,41 +747,27 @@ enum PhoneSplitLayout {
     }
 }
 
-/// 会话自定义壁纸（iOS 26「信息」的会话背景）。
+/// 根视图层的会话壁纸：整窗铺满（含状态栏 / 顶部导航栏 / 底部导航栏）。
 ///
-/// 壁纸按「整窗画布 + 本列起点偏移」绘制：左右两列用同一个 `canvas`
-/// 和各自的 `originX`，得到的就是同一张图上相邻的两块裁切，所以中间没有接缝。
-/// 壁纸必须画在每一列自己的内容里（而不是分栏容器底下），
-/// 因为两列的 `NavigationStack` 会盖不透明底色，画在外面根本看不到。
-struct PhoneWallpaperBackdrop: View {
+/// 只有**根视图**这一层能铺满整窗：会话页自己无论怎么
+/// `.ignoresSafeArea()`，都够不到标签内容区之外的那几条带子——上下留白就是这么来的。
+/// 这里用一次 `scaledToFill` 把同一张图铺满整窗，天然没有接缝，
+/// 也不再需要按列做坐标换算。
+struct ChatWallpaperRootLayer: View {
     let image: UIImage
-    /// 整窗尺寸（全屏沉浸的画布）。
-    let canvas: CGSize
-    /// 本列在窗口中的 x 起点：左列为 0，右列为左列宽度。
-    let originX: CGFloat
-    /// 左列需要先模糊，避开细节、形成液态玻璃底板。
-    var blurRadius: CGFloat = 0
 
     var body: some View {
         GeometryReader { proxy in
-            // 画布取「整窗尺寸」与「本列实际尺寸」的较大值：两者只要有一个偏小
-            // （安全区、标签栏高度在不同机型 / 分栏宽度下并不一致），
-            // 长图按画布高度排版就会在上下（或左右）露出底色。
-            // 取 max 之后无论哪边更大，壁纸都一定盖满整屏。
-            let fillWidth = max(canvas.width, proxy.size.width)
-            let fillHeight = max(canvas.height, proxy.size.height)
             Image(uiImage: image)
                 .resizable()
                 .scaledToFill()
-                .frame(width: fillWidth, height: fillHeight)
-                .offset(x: -originX)
-                .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
-                .blur(radius: blurRadius)
+                .frame(width: proxy.size.width, height: proxy.size.height)
                 .clipped()
         }
         .ignoresSafeArea()
-        .clipped()
         .overlay(Color.black.opacity(0.16))
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }
 
@@ -2231,28 +2206,12 @@ struct MessagesView: View {
     // MARK: iPad 双列
 
     private var regularBody: some View {
-        GeometryReader { window in
-            // `PhoneSplitLayout` 与 `PhoneSplitContainer` 用同一套规则算左列宽度，
-            // 这样右列的壁纸起点才能与左列对齐（同一张图的连续裁切）。
+        GeometryReader { _ in
             let backdrop = conversationBackdrop
-            let leftWidth = PhoneSplitLayout.leftWidth(
-                stored: splitLeftWidth,
-                containerWidth: window.size.width
-            )
             ZStack {
-                // 兜底：整窗再铺一层。两列的 NavigationStack 会盖住中间部分，
-                // 但状态栏 / 标签栏那两条带子只有它能盖到。
-                if let backdrop {
-                    PhoneWallpaperBackdrop(image: backdrop, canvas: window.size, originX: 0)
-                }
-
                 PhoneSplitContainer(leftWidth: $splitLeftWidth) {
                     NavigationStack {
-                        PhoneSplitListColumn(
-                            wallpaper: backdrop,
-                            wallpaperCanvas: window.size,
-                            wallpaperOriginX: 0
-                        ) {
+                        PhoneSplitListColumn(wallpaper: backdrop) {
                             PhoneSearchField(placeholder: L10n.t("搜索"), text: $search)
                                 .padding(.horizontal, 16)
                                 .padding(.top, 4)
@@ -2276,12 +2235,7 @@ struct MessagesView: View {
                     PhoneSplitDetailColumn(isTranslucent: backdrop != nil) {
                         if let handle = selection {
                             NavigationStack {
-                                ChatPane(
-                                    handle: handle,
-                                    wallpaper: backdrop,
-                                    wallpaperCanvas: window.size,
-                                    wallpaperOriginX: leftWidth
-                                ) {
+                                ChatPane(handle: handle) {
                                     composeRecipient = ""
                                     showingCompose = true
                                 }
@@ -2550,11 +2504,6 @@ private struct ConversationRow: View {
 struct ChatPane: View {
     @EnvironmentObject private var model: AppModel
     let handle: String
-    /// 分栏版式由父视图传入整窗壁纸与画布，保证与左列是同一张图的连续裁切；
-    /// 单栏（iPhone）不传，由 `ChatPane` 自己按整屏绘制。
-    var wallpaper: UIImage? = nil
-    var wallpaperCanvas: CGSize = .zero
-    var wallpaperOriginX: CGFloat = 0
     let onCompose: () -> Void
 
     @State private var draft = ""
@@ -2567,15 +2516,9 @@ struct ChatPane: View {
     /// 不受后面那些带默认值的 `@State` 存储属性影响。
     init(
         handle: String,
-        wallpaper: UIImage? = nil,
-        wallpaperCanvas: CGSize = .zero,
-        wallpaperOriginX: CGFloat = 0,
         onCompose: @escaping () -> Void
     ) {
         self.handle = handle
-        self.wallpaper = wallpaper
-        self.wallpaperCanvas = wallpaperCanvas
-        self.wallpaperOriginX = wallpaperOriginX
         self.onCompose = onCompose
     }
 
@@ -2653,41 +2596,40 @@ struct ChatPane: View {
         }
         .immersiveBars()
         // 让通知层知道用户当前正开在哪个会话里：只有这个会话的新短信不再打扰。
-        .onAppear { model.openConversationHandle = handle }
+        .onAppear {
+            model.openConversationHandle = handle
+            publishActiveWallpaper()
+        }
         .onDisappear {
             if model.openConversationHandle == handle { model.openConversationHandle = nil }
+            chatBackgrounds.setActiveWallpaper(nil, handle: handle)
         }
         .onChange(of: handle) { newValue in
             model.openConversationHandle = newValue
+            publishActiveWallpaper()
+        }
+        .onChange(of: chatBackgrounds.revision) { _ in
+            publishActiveWallpaper()
         }
         .navigationDestination(isPresented: $showingContactInfo) {
             ChatContactInfoPanel(handle: handle)
         }
     }
 
-    /// 会话背景：设了背景照片就铺满整屏（并压一层极淡的暗化，保证气泡与文字
-    /// 在任何照片上都有足够对比度）；没设就保持系统背景色，与系统「信息」默认会话一致。
+    /// 把当前会话背景发布给根视图：分栏与单栏都由根视图那一层统一铺满整窗
+    /// （状态栏 / 顶部导航栏 / 底部导航栏都在标签内容区之外），左列再压一层系统材质做磨砂。
+    private func publishActiveWallpaper() {
+        chatBackgrounds.setActiveWallpaper(chatBackgrounds.image(for: handle), handle: handle)
+    }
+
+    /// 会话背景：设了背景照片时本视图保持**透明**——壁纸由根视图
+    /// 那一层统一铺满整窗（含状态栏 / 顶部导航栏 / 底部导航栏），
+    /// 这里再各画一层只会上下留白、两侧明暗不一致。
+    /// 没设就保持系统背景色，与系统「信息」默认会话一致。
     @ViewBuilder
     private var conversationBackground: some View {
-        if let wallpaper, wallpaperCanvas != .zero {
-            // 分栏版式：与左列共用同一张图（各自计算入口偏移，得到相邻的两块裁切），
-            // 这层同样 `.ignoresSafeArea()`，所以它连状态栏、顶部导航栏、底部导航栏
-            // 那几条带子一起盖住（分栏两侧各画一半正好拼成整张图）。
-            PhoneWallpaperBackdrop(
-                image: wallpaper,
-                canvas: wallpaperCanvas,
-                originX: wallpaperOriginX
-            )
-        } else if let image = chatBackgrounds.image(for: handle) {
-            GeometryReader { proxy in
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: proxy.size.width, height: proxy.size.height)
-                    .clipped()
-                    .overlay(Color.black.opacity(0.16))
-            }
-            .ignoresSafeArea()
+        if chatBackgrounds.image(for: handle) != nil {
+            Color.clear
         } else {
             Color(uiColor: .systemBackground).ignoresSafeArea()
         }
@@ -2840,7 +2782,29 @@ final class ChatBackgroundStore: ObservableObject {
     static let shared = ChatBackgroundStore()
     /// 背景变更计数：@Published 让正在显示的会话立刻换成新背景。
     @Published private(set) var revision = 0
+    /// 当前正在展示的会话壁纸，由根视图的 `ChatWallpaperRootLayer` 负责铺满整窗。
+    ///
+    /// 为什么要把它放到根视图：分栏版式下壁纸必须盖住
+    /// 状态栏 / 顶部导航栏 / 底部导航栏——那几条带子在标签内容区之外，
+    /// 会话页自己怎么 `.ignoresSafeArea()` 都够不到，只有根视图做得到。
+    @Published private(set) var activeWallpaper: UIImage?
+    /// 发布壁纸的会话句柄：切换会话时新旧两个 `ChatPane` 的
+    /// onAppear / onDisappear 顺序不固定，用它阻止旧会话把新会话刚发布的壁纸清掉。
+    private var activeWallpaperHandle: String?
     private var cache: [String: UIImage] = [:]
+
+    /// 会话页把「现在要不要铺背景」发布给根视图；`handle` 用于新旧会话去重。
+    func setActiveWallpaper(_ image: UIImage?, handle: String) {
+        guard let image else {
+            guard activeWallpaperHandle == handle else { return }
+            activeWallpaperHandle = nil
+            activeWallpaper = nil
+            return
+        }
+        if activeWallpaperHandle == handle, let current = activeWallpaper, current === image { return }
+        activeWallpaperHandle = handle
+        activeWallpaper = image
+    }
 
     private lazy var directory: URL = {
         let base = FileManager.default
@@ -2868,6 +2832,11 @@ final class ChatBackgroundStore: ObservableObject {
         } else {
             cache[handle] = nil
             try? FileManager.default.removeItem(at: target)
+            // 正在展示的就是这个会话时，根视图那层壁纸也要一起撤掉。
+            if activeWallpaperHandle == handle {
+                activeWallpaperHandle = nil
+                activeWallpaper = nil
+            }
         }
         revision &+= 1
     }

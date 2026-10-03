@@ -141,10 +141,19 @@ final class DJOneHubNotificationDelegate: NSObject, UIApplicationDelegate, UNUse
 /// 定位精度降到公里级、只当作「进程存活心跳」使用：不读取坐标、不上传、不落盘，
 /// 借的是系统对定位类 App 的后台调度能力，而不是位置本身。
 ///
-/// 状态栏指示：全程把 `showsBackgroundLocationIndicator` 设为 `false`，并且**不**创建
-/// `CLBackgroundActivitySession`。那个会话会让系统在状态栏常驻「定位服务」指示，
-/// 而且这个指示由系统强制展示、App 无法关闭（v38 之前正是它在点亮图标）。
-/// 后台复活改由显著位置变化 / 访问事件 / 地理围栏 / 后台刷新任务四条系统通道承担。
+/// 状态栏「定位服务」指示（Core Location 官方文档原文）：
+/// - `showsBackgroundLocationIndicator` **只对拿到「始终允许」的 App 生效**；
+///   本 App 全程设为 `false`，所以「始终允许」下状态栏干净。
+/// - 只拿到「使用期间」时，系统**强制**在后台使用定位时改变状态栏外观，
+///   App 无法关闭——这就是旧版本里「定位图标点亮」的真正原因。
+///
+/// 后台投递（官方文档「handling-location-updates-in-the-background」原文）：
+/// 要在后台继续收到定位更新，**必须**持有服务会话：
+/// iOS 18+ 用 `CLServiceSession`（只声明授权需求，不接管状态栏指示），
+/// iOS 17 回退到 `CLBackgroundActivitySession`。
+/// 少了它，App 一进后台就被挂起，轮询停止——
+/// 这正是「切后台 / 锁屏就收不到通知」的根因。
+/// 另有显著位置变化 / 访问事件 / 地理围栏 / 后台刷新任务四条唤醒通道兜底。
 @MainActor
 final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
     private let manager = CLLocationManager()
@@ -159,6 +168,12 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
     private var monitoringVisits = false
     /// 地理围栏监控：进出围栏同样能拉起已被系统回收的进程，作为第三条复活通道。
     private var monitoredRegion: CLCircularRegion?
+    /// iOS 18+ 的官方定位服务会话：只声明「这个工作流需要始终允许」，
+    /// 不接管状态栏指示，却能让系统把定位更新持续投递到后台。
+    /// 用 `Any?` 存储：本 App 最低支持 iOS 16.1，不能在存储属性上直接引用新系统类型。
+    private var serviceSession: Any?
+    /// iOS 17 的后台活动会话（回退路径）。
+    private var backgroundActivitySession: Any?
     /// 后台唤醒去重时间戳：定位回调很密集，避免每一次回调都重建轮询。
     private var lastBackgroundWake = Date.distantPast
     /// 「定位持续保活」开关。开启时用持续定位把进程留在运行态（最可靠）；
@@ -170,6 +185,19 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
     /// 是否授予了「始终允许」；只有它才能让定位更新在后台持续投递。
     var hasAlwaysAuthorization: Bool {
         manager.authorizationStatus == .authorizedAlways
+    }
+
+    /// 设置页展示用的定位授权文案。
+    ///
+    /// 「使用期间」下系统会**强制**显示状态栏定位图标且 App 关不掉，
+    /// 所以这里把差异直接写在文案里，引导用户改成「始终允许」。
+    var locationAuthorizationText: String {
+        switch manager.authorizationStatus {
+        case .authorizedAlways: return "始终允许"
+        case .authorizedWhenInUse: return "使用期间（状态栏会被强制显示定位图标）"
+        case .denied, .restricted: return "已拒绝"
+        default: return "未授权"
+        }
     }
 
     /// 显著位置变化监控是否已生效：生效后即使用户杀掉后台，系统仍可能在位置显著变化时重新拉起 App。
@@ -184,13 +212,15 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
         if !locationHeartbeatEnabled { return "低功耗保活（仅系统唤醒，状态栏无指示）" }
         switch manager.authorizationStatus {
         case .authorizedAlways:
-            return heartbeatActive ? "保活运行中（后台与锁屏有效）" : "正在启动"
+            return heartbeatActive
+                ? "保活运行中（后台与锁屏有效，状态栏无指示）"
+                : "正在启动"
         case .authorizedWhenInUse:
             // 只拿到「使用期间」时系统会优先回收进程，保活随时可能失效，
             // 所以这里明确提示去升级授权。
             return heartbeatActive
-                ? "保活运行中；建议在“设置 › 隐私与安全性 › 定位”里改为“始终允许”"
-                : "需要在“设置 › 隐私与安全性 › 定位”里改为“始终允许”"
+                ? "保活运行中；「使用期间」会被系统强制显示定位图标，请改为“始终允许”"
+                : "请在“设置 › 隐私与安全性 › 定位”里改为“始终允许”"
         case .notDetermined:
             return "等待定位授权"
         case .denied, .restricted:
@@ -203,9 +233,11 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
     override init() {
         super.init()
         manager.delegate = self
-        // 公里级精度 + 不过滤距离：即使原地不动也能持续收到回调，作为进程存活心跳。
-        manager.desiredAccuracy = kCLLocationAccuracyKilometer
-        manager.distanceFilter = kCLDistanceFilterNone
+        // 3 公里级精度 + 100m 过滤：它只是「进程存活心跳」，
+        // 精度越粗、过滤越大，真实 GPS 开机时间越短，越省电；
+        // 后台不会因此被挂起——保持进程存活的是下面那个服务会话。
+        manager.desiredAccuracy = kCLLocationAccuracyThreeKilometers
+        manager.distanceFilter = 100
         manager.pausesLocationUpdatesAutomatically = false
         manager.activityType = .other
         // 只有 Info.plist 声明了 location 后台能力，系统才允许后台持续投递定位更新。
@@ -283,10 +315,11 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
         }
         switch manager.authorizationStatus {
         case .authorizedAlways, .authorizedWhenInUse:
-            // 「使用期间」+ 后台活动会话同样能持续收到后台定位回调，
-            // 所以两种授权都直接把心跳跑起来，不再等用户升级到「始终允许」。
             guard !heartbeatActive else { return }
             heartbeatActive = true
+            // 顺序很关键：先在前台把服务会话建好，
+            // 系统才会把接下来的定位更新平滑延续到后台。
+            startBackgroundSessionsIfNeeded()
             manager.startUpdatingLocation()
         case .notDetermined:
             requestAuthorizationIfNeeded()
@@ -336,6 +369,52 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
     private func stopHeartbeat() {
         heartbeatActive = false
         manager.stopUpdatingLocation()
+        stopBackgroundSessions()
+    }
+
+    /// 建立「后台定位投递」所需的服务会话——
+    /// 这是官方文档要求的唯一途径，也是旧版本漏掉的一步。
+    ///
+    /// - iOS 18+ ：`CLServiceSession(authorization: .always)` 只做授权与投递编排，
+    ///   **不接管状态栏指示**，所以「始终允许」下状态栏没有定位图标。
+    /// - 只拿到「使用期间」时，后台投递还需要补一个
+    ///   `CLBackgroundActivitySession`；那种授权下系统会强制点亮定位指示，
+    ///   这是系统规定，App 关不掉。
+    /// - iOS 17：回退到 `CLBackgroundActivitySession`。
+    private func startBackgroundSessionsIfNeeded() {
+        if #available(iOS 18.0, *) {
+            if serviceSession == nil {
+                serviceSession = CLServiceSession(authorization: .always)
+            }
+            if manager.authorizationStatus == .authorizedWhenInUse {
+                startBackgroundActivitySessionIfNeeded()
+            } else {
+                stopBackgroundActivitySession()
+            }
+        } else if #available(iOS 17.0, *) {
+            startBackgroundActivitySessionIfNeeded()
+        }
+    }
+
+    @available(iOS 17.0, *)
+    private func startBackgroundActivitySessionIfNeeded() {
+        guard backgroundActivitySession == nil else { return }
+        backgroundActivitySession = CLBackgroundActivitySession()
+    }
+
+    private func stopBackgroundActivitySession() {
+        if #available(iOS 17.0, *) {
+            (backgroundActivitySession as? CLBackgroundActivitySession)?.invalidate()
+        }
+        backgroundActivitySession = nil
+    }
+
+    private func stopBackgroundSessions() {
+        stopBackgroundActivitySession()
+        if #available(iOS 18.0, *) {
+            (serviceSession as? CLServiceSession)?.invalidate()
+        }
+        serviceSession = nil
     }
 
     /// 显著位置变化监控：这是系统允许的「进程被回收后仍能被拉起」通道。
@@ -404,7 +483,10 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
 
     /// 围栏 / 访问事件统一走后台复活路径。
     private func handleTerminatedRelaunchEvent() {
-        heartbeatActive = true
+        // 进程刚被系统拉起，定位更新还没恢复：
+        // 这里必须真的去 startUpdatingLocation，不能只把标志位写真——
+        // 否则 startIfAuthorized() 会被它自己的 guard 挡住，心跳再也点不亮。
+        startIfAuthorized()
         refreshRegionIfNeeded()
         guard UIApplication.shared.applicationState != .active else { return }
         appIsBackground = true
@@ -437,15 +519,23 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
     nonisolated func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         Task { @MainActor [weak self] in
             guard let self else { return }
-            if self.manager.authorizationStatus == .authorizedAlways {
+            switch self.manager.authorizationStatus {
+            case .authorizedAlways:
                 self.heartbeatActive = false
                 // 拿到「始终允许」后才补登记访问 / 围栏监控（这两者都要求 always 授权）。
                 self.startVisitMonitoring()
                 self.startRegionMonitoring()
                 self.startIfAuthorized()
-            } else if self.manager.authorizationStatus == .denied
-                        || self.manager.authorizationStatus == .restricted {
+            case .authorizedWhenInUse:
+                // 用户刚选「使用期间」：立刻把心跳跑起来，
+                // 并补上后台活动会话，先保证后台能推通知。
                 self.heartbeatActive = false
+                self.startIfAuthorized()
+            case .denied, .restricted:
+                self.heartbeatActive = false
+                self.stopBackgroundSessions()
+            default:
+                break
             }
         }
     }
