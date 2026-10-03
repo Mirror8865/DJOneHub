@@ -204,16 +204,20 @@ final class AppModel: ObservableObject {
     private let maxCallHistoryCount = 500
     private let maxMessageCount = 2_000
     /// 已见过的呼入短信 ID 集合；后台刷新时只对集合外的新短信发通知，避免重复提醒。
-    private var seenIncomingSMSIDs: Set<String> = []
-    /// Notification dedup keys (see `smsNotificationKey(for:)`), persisted on disk.
     ///
-    /// Persisted because a process reclaimed and relaunched in the background starts
-    /// with an empty in-memory set, and would then re-announce every SMS the module
-    /// still caches. Keyed on sender plus body prefix so that one long SMS delivered
-    /// as several fragments and the same SMS delivered already joined share one key.
-    private var notifiedSMSKeys: Set<String> = []
-    private let notifiedSMSKeysKey = "djonehub.notified-sms-keys"
-    private let maxNotifiedSMSKeys = 600
+    /// 去重键必须是**单条短信自己的身份**（`SMSMessage.id`）。曾经用过
+    /// 「发件人 + 正文长度 + 正文前 12 字」这种粗粒度键：同一个服务号发来的
+    /// 两条同模板短信（验证码就是最典型的例子）算出的键完全相同，第二条会被
+    /// 判成「已经提醒过」而静默丢掉——锁屏收到验证码却一条提醒都没有。
+    /// `SMSMessage.id` 逐条不同，而 PDU 拼接与文本模式拼接给同一条短信算出的是
+    /// 同一个 id，所以既能分清两条不同的短信，也不会把一条长短信提醒两遍。
+    private var seenIncomingSMSIDs: Set<String> = []
+    /// 上面那个集合的落盘副本：进程被系统回收后在后台重启时内存集合是空的，
+    /// 没有这份基线就会把模块缓存里还在的短信全部重弹一遍。
+    private let seenIncomingSMSIDsKey = "djonehub.seen-incoming-sms-ids"
+    /// 基线上限。必须大于本机历史条数（`maxMessageCount`），否则每次前台回来
+    /// 重建基线都可能把集合清空一次，反而造成整屏重弹。
+    private let maxSeenIncomingSMSIDs = 2_500
 
     /// 已经提醒过的未接来电 id：模块每轮都回传完整历史，不去重会反复弹。
     private var notifiedMissedCallIDs: Set<String> = []
@@ -234,7 +238,7 @@ final class AppModel: ObservableObject {
         self.api = api
         deletedCallIDs = Set(UserDefaults.standard.stringArray(forKey: deletedCallIDsKey) ?? [])
         deletedMessageIDs = Set(UserDefaults.standard.stringArray(forKey: deletedMessageIDsKey) ?? [])
-        notifiedSMSKeys = Set(UserDefaults.standard.stringArray(forKey: notifiedSMSKeysKey) ?? [])
+        seenIncomingSMSIDs = Set(UserDefaults.standard.stringArray(forKey: seenIncomingSMSIDsKey) ?? [])
         AppModel.shared = self
         callKit.handler = self
         // 背景启动时 SwiftUI 不会走 onAppear，这里延后一拍自行恢复轮询与保活。
@@ -507,8 +511,11 @@ final class AppModel: ObservableObject {
         // wake only read the module list and never triggered that fetch, so a
         // background wake saw nothing new and every reminder waited until the app was
         // opened again.
-        await refreshMessages(silently: true)
-        var summary = "\u{5DF2}\u{626B}\u{63CF}"
+        // `refreshMessages` returns how many reminders it actually posted, so the
+        // settings status line can tell "the wake ran and found nothing" apart from
+        // "the wake ran and delivered".
+        var posted = await refreshMessages(silently: true)
+        var suffix = ""
         // A missed call only ever shows up as a history record (missed == true,
         // active == nil), so it never travels through the activeCall path.
         if let status = try? await api.callStatus() {
@@ -516,11 +523,11 @@ final class AppModel: ObservableObject {
             if callHistory != history { callHistory = history }
             notifyMissedCalls(in: history)
         } else {
-            summary += " \u{00B7} \u{6765}\u{7535}\u{53D6}\u{6570}\u{5931}\u{8D25}"
+            suffix += " \u{00B7} \u{6765}\u{7535}\u{53D6}\u{6570}\u{5931}\u{8D25}"
         }
         // Second chance: the module list can still hold a message the refresh above did
         // not deliver (a transient AT or link failure while backgrounded). Post it
-        // directly; the shared notifiedSMSKeys set keeps this from double announcing.
+        // directly; the shared seenIncomingSMSIDs set keeps this from double announcing.
         var fetched: [SMSMessage]?
         var fetchFailed = false
         for attempt in 0..<2 {
@@ -536,11 +543,8 @@ final class AppModel: ObservableObject {
             let incoming = joiningFragments(remote.filter { !$0.isOutgoing })
             let smsNotificationsEnabled =
                 UserDefaults.standard.object(forKey: smsNotificationKey) as? Bool ?? true
-            let fresh = incoming.filter {
-                !notifiedSMSKeys.contains(Self.smsNotificationKey(for: $0))
-            }
+            let fresh = incoming.filter { !seenIncomingSMSIDs.contains($0.id) }
             let grouped = coalescedForNotification(fresh)
-            var posted = 0
             if smsNotificationsEnabled {
                 for message in grouped where !isViewingConversation(message.sender) {
                     smsNotifier.post(
@@ -552,12 +556,12 @@ final class AppModel: ObservableObject {
             }
             rememberNotifiedSMS(incoming)
             rememberNotifiedSMS(grouped)
-            summary = posted > 0
-                ? "\u{65B0}\u{77ED}\u{4FE1} \(posted)"
-                : "\u{65E0}\u{65B0}\u{77ED}\u{4FE1}"
         } else if fetchFailed {
-            summary += " \u{00B7} \u{53D6}\u{6570}\u{5931}\u{8D25}"
+            suffix += " \u{00B7} \u{53D6}\u{6570}\u{5931}\u{8D25}"
         }
+        let summary = posted > 0
+            ? "\u{65B0}\u{77ED}\u{4FE1} \(posted)" + suffix
+            : "\u{5DF2}\u{626B}\u{63CF}\u{00B7}\u{65E0}\u{65B0}\u{77ED}\u{4FE1}" + suffix
         recordBackgroundSweep(summary)
     }
 
@@ -1241,12 +1245,13 @@ final class AppModel: ObservableObject {
     /// UDH 已被基带丢掉，只作为 AT 忙或模块未就绪时的兜底。
     ///
     /// - Parameter forceModuleScan: 走兜底通道时是否让模块立刻全量读取一次。
-    func refreshMessages(silently: Bool = false, forceModuleScan: Bool = true) async {
+    @discardableResult
+    func refreshMessages(silently: Bool = false, forceModuleScan: Bool = true) async -> Int {
         // 同一个 AT 口不能并发跑两轮 PDU 读取：分段会互相插队，收到一半的长短信
         // 会被当成新消息投递，正是「消息反复裂开 / 通知多条」的放大器。
         // AppModel 是 @MainActor，这个布尔闸门天然无竞争；重叠调用直接返回，
         // 由已经在跑的那一轮负责落盘与通知。
-        guard !messagesRefreshInFlight else { return }
+        guard !messagesRefreshInFlight else { return 0 }
         messagesRefreshInFlight = true
         defer { messagesRefreshInFlight = false }
         var fetched = await fetchIncomingMessagesViaPDU()
@@ -1262,9 +1267,9 @@ final class AppModel: ObservableObject {
             let mergedMessages = await mergeIncomingMessages(fetched.messages)
             if messages != mergedMessages { messages = mergedMessages }
             if !silently { errorMessage = nil }
-            handleIncomingSMSNotifications(mergedMessages)
+            let posted = handleIncomingSMSNotifications(mergedMessages)
             await acknowledgeDeliveredRecords(moduleIDs: fetched.moduleIDs, consumed: fetched.consumed)
-            return
+            return posted
         }
         do {
             if forceModuleScan { try await api.refreshSMS() }
@@ -1272,9 +1277,10 @@ final class AppModel: ObservableObject {
             let mergedMessages = mergeDisplayOnly(remoteMessages)
             if messages != mergedMessages { messages = mergedMessages }
             if !silently { errorMessage = nil }
-            handleIncomingSMSNotifications(mergedMessages)
+            return handleIncomingSMSNotifications(mergedMessages)
         } catch {
             if !silently { errorMessage = error.localizedDescription }
+            return 0
         }
     }
 
@@ -1385,7 +1391,6 @@ final class AppModel: ObservableObject {
         let incoming = receivedMessages(from: messages)
         // The baseline must use the same keys as the notifier, otherwise every segment of
         // one long SMS would count as a separate message and be announced again.
-        seenIncomingSMSIDs.formUnion(incoming.map(\.id))
         rememberNotifiedSMS(incoming)
     }
 
@@ -1400,14 +1405,18 @@ final class AppModel: ObservableObject {
     /// Foreground merges new SMS into the seen set; an unseen incoming SMS is announced
     /// with a local notification first and marked afterwards, so the same message is
     /// never announced twice.
-    private func handleIncomingSMSNotifications(_ merged: [SMSMessage]) {
+    @discardableResult
+    private func handleIncomingSMSNotifications(_ merged: [SMSMessage]) -> Int {
         let incoming = receivedMessages(from: merged)
         let smsNotificationsEnabled =
             UserDefaults.standard.object(forKey: smsNotificationKey) as? Bool ?? true
-        let freshMessages = incoming.filter {
-            !notifiedSMSKeys.contains(Self.smsNotificationKey(for: $0))
-        }
+        // Freshness is decided per record identity. The previous coarse key
+        // (sender + body length + first twelve characters) made two same-template SMS
+        // from one sender collapse into one, so the second one — a second verification
+        // code is the everyday case — was silently dropped and nothing was announced.
+        let freshMessages = incoming.filter { !seenIncomingSMSIDs.contains($0.id) }
         let grouped = coalescedForNotification(freshMessages)
+        var posted = 0
         if smsNotificationsEnabled {
             // Only the conversation the user is currently reading is skipped. Skipping
             // everything while the app is active is what made a second message from the
@@ -1417,32 +1426,29 @@ final class AppModel: ObservableObject {
                     message: message,
                     displayName: contacts.displayName(for: message.sender)
                 )
+                posted += 1
             }
         }
+        seenIncomingSMSIDs.formUnion(incoming.map(\.id))
         rememberNotifiedSMS(incoming)
         // The coalesced form carries the whole body, so remember it too: the PDU channel
         // assembles the same message moments later and must not announce it again.
         rememberNotifiedSMS(grouped)
+        return posted
     }
 
-    /// Notification dedup key: sender, body length and body prefix.
+    /// 通知基线写入：记的是每条短信自己的 id（`SMSMessage.id`），并落盘。
     ///
-    /// One long SMS, whether it arrives as several fragments or already assembled, has
-    /// the same total length and the same opening characters, so both forms collapse
-    /// into a single reminder; two genuinely different messages differ in length or in
-    /// their first characters.
-    private static func smsNotificationKey(for message: SMSMessage) -> String {
-        "\(message.sender)\u{1}\(message.content.utf16.count)\u{1}\(message.content.prefix(12))"
-    }
-
+    /// 落盘是为了让「进程被系统回收后在后台重启」这条路径也有基线：只在内存里记
+    /// 的话，重启后集合是空的，模块缓存里还在的短信会被整批重弹。
     private func rememberNotifiedSMS(_ records: [SMSMessage]) {
         let incoming = records.filter { !$0.isOutgoing }
         guard !incoming.isEmpty else { return }
-        let before = notifiedSMSKeys.count
-        for message in incoming { notifiedSMSKeys.insert(Self.smsNotificationKey(for: message)) }
-        if notifiedSMSKeys.count > maxNotifiedSMSKeys { notifiedSMSKeys.removeAll() }
-        guard notifiedSMSKeys.count != before else { return }
-        UserDefaults.standard.set(Array(notifiedSMSKeys), forKey: notifiedSMSKeysKey)
+        let before = seenIncomingSMSIDs.count
+        for message in incoming { seenIncomingSMSIDs.insert(message.id) }
+        if seenIncomingSMSIDs.count > maxSeenIncomingSMSIDs { seenIncomingSMSIDs.removeAll() }
+        guard seenIncomingSMSIDs.count != before else { return }
+        UserDefaults.standard.set(Array(seenIncomingSMSIDs), forKey: seenIncomingSMSIDsKey)
     }
 
     /// Collapse records that arrive from one sender within the same second into a single
