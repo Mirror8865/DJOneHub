@@ -408,7 +408,11 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
             stopBackgroundActivitySession()
             return
         }
-        startBackgroundActivitySessionIfNeeded()
+        // `CLBackgroundActivitySession` 是 iOS 17 才有的类型，而本 App 最低支持 16.1，
+        // 所以必须做可用性检查；16.x 上没有它，只能靠显著位置变化 / 访问 / 围栏兜底。
+        if #available(iOS 17.0, *) {
+            startBackgroundActivitySessionIfNeeded()
+        }
     }
 
     @available(iOS 17.0, *)
