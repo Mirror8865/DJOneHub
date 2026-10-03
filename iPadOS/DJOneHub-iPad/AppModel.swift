@@ -661,9 +661,9 @@ final class AppModel: ObservableObject {
             // 即使模块状态没有发生变化，下一轮也必须能够重建网络 PCM。
             if status.active?.state == "active" {
                 await startCallAudioIfReady()
-            } else if status.active == nil, previousCall != nil {
+            } else if status.active == nil, let finishedCall = previousCall {
                 // 电话已经结束（含响铃结束变成未接来电）：先收掉锁屏上那条还在响的通知。
-                incomingNotifier.clearNotifications(for: previousCall.id)
+                incomingNotifier.clearNotifications(for: finishedCall.id)
                 audio.deactivate()
                 await registerAudioHost(false)
                 guard !Task.isCancelled, generation == pollingGeneration else { return }
@@ -732,6 +732,13 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 设置 tab 是否当前可见。顶层 tab 的选择写在 UserDefaults 里，
+    /// 这里直接读它，不需要额外的状态同步链路。
+    private var settingsTabIsVisible: Bool {
+        (UserDefaults.standard.string(forKey: "djonehub.selected-tab") ?? PhoneTab.calls.rawValue)
+            == PhoneTab.settings.rawValue
+    }
+
     /// 蜂窝状态和版本不必跟随每秒通话轮询；独立刷新避免慢 AT 状态接口拖住来电检测。
     private func scheduleModuleMetadataRefresh(generation: Int) {
         guard moduleMetadataTask == nil, Date() >= nextModuleMetadataRefresh else { return }
@@ -748,15 +755,17 @@ final class AppModel: ObservableObject {
         defer { moduleMetadataTask = nil }
         async let radioRequest = try? api.modemStatus()
         async let versionRequest = try? api.moduleUpdateStatus()
-        // 复用十秒模块元数据刷新，不为长按弹窗新增独立轮询或后台耗电。
-        async let powerRequest = try? api.systemPower()
-        let (radio, versionStatus, power) = await (radioRequest, versionRequest, powerRequest)
+        let (radio, versionStatus) = await (radioRequest, versionRequest)
         guard !Task.isCancelled, generation == pollingGeneration, isOnline else { return }
         if let radio { modemStatus = radio }
         if let version = versionStatus?.installedVersion, !version.isEmpty {
             agentVersion = version
         }
-        if let power { systemPower = power }
+        // 功率 / 温度要扫整棵 sysfs（几十个传感器与电源节点），是这一路里最重的
+        // 只读 IO；它只在设置页可见，离开设置页就不再让模块为此被唤醒。
+        if settingsTabIsVisible, let power = try? await api.systemPower() {
+            systemPower = power
+        }
         await liveActivity.update(
             call: activeCall,
             callerName: activeCall.map { contacts.displayName(for: $0.number) },
