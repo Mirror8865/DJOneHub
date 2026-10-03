@@ -1562,6 +1562,11 @@ struct ContactsView: View {
     private var isRegular: Bool { horizontalSizeClass == .regular }
     private var contacts: [ContactStore.Contact] { model.contacts.contacts }
 
+    /// 通讯录变化的本地重绘标记：`ContactStore` 是 AppModel 里嵌套的
+    /// ObservableObject，只观察 model 的视图不会因为通讯录本身变化而重绘，
+    /// 「新建联系人后列表不实时刷新」就是这个原因。见 body 里的 `onReceive`。
+    @State private var contactsRevision = 0
+
     private var filtered: [ContactStore.Contact] {
         guard !search.isEmpty else { return contacts }
         return contacts.filter { contact in
@@ -1611,6 +1616,9 @@ struct ContactsView: View {
             }
         }
         .task { await model.contacts.loadIfNeeded() }
+        // 订阅通讯录存储自身的变更通知：新建 / 编辑 / 删除联系人后，
+        // 左侧列表与右侧详情立刻重绘，不用再切换列表或点别的联系人去「带」出刷新。
+        .onReceive(model.contacts.objectWillChange) { _ in contactsRevision &+= 1 }
         .sheet(isPresented: $showingNewContact) {
             ContactNativeNew(contactStore: CNContactStore()) {
                 Task { await model.contacts.requestAccessAndLoad() }

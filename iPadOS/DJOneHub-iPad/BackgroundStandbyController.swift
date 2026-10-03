@@ -224,12 +224,21 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
         case .authorizedAlways:
             guard heartbeatActive else { return "正在启动" }
             // 把「最近一次定位心跳」显示出来：只有它新鲜，后台保活才真的成立。
-            // 这一行是判断「保活到底有没有在跑」的唯一可靠依据。
+            // 「后台心跳」是后台期间收到的系统回调时间，它会一直留在这里：
+            // 切后台或锁屏待一会儿再回来，若它停在你离开 App 的那一刻，说明后台
+            // 投递真的断了；若它一直在往后走，保活就是活的。
             let age = max(0, Int(Date().timeIntervalSince(lastDeliveryAt)))
             let beat = lastDeliveryAt == Date.distantPast ? "等待首次定位心跳" : "定位心跳 \(age) 秒前"
-            return locationHeartbeatEnabled
-                ? "保活运行中（\(beat) · 状态栏无指示）"
-                : "低功耗保活运行中（\(beat) · 状态栏无指示）"
+            let backgroundBeat: String
+            if let last = UserDefaults.standard.object(
+                forKey: "djonehub.standby.last-background-beat"
+            ) as? Date {
+                let minutes = max(0, Int(Date().timeIntervalSince(last) / 60))
+                backgroundBeat = " · 后台心跳 \(minutes) 分钟前"
+            } else {
+                backgroundBeat = ""
+            }
+            return "保活运行中（\(beat)\(backgroundBeat) · 状态栏无指示）"
         case .authorizedWhenInUse:
             // 只拿到「使用期间」时系统会优先回收进程，保活随时可能失效，
             // 所以这里明确提示去升级授权。
@@ -275,12 +284,17 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
         startIfAuthorized()
     }
 
-    /// 精度：开启 = 公里级（基站 / Wi-Fi，不点亮 GPS），关闭 = 三公里级（更省电）。
-    /// 距离过滤保持「不过滤」，保证原地不动也持续有回调可当心跳。
+    /// 精度档位：**后台永远是公里级**——保活只发生在后台，任何省电档位都不能把
+    /// 投递链路饿死（三公里级在静止时几乎不再产生回调，进程随即被系统挂起，
+    /// 这就是「切后台 / 锁屏收不到通知」的一种成因）。
+    /// 只有前台允许按设置降档：关闭「定位保活」= 前台用三公里级省电。
+    /// 距离过滤保持「不过滤」、`pausesLocationUpdatesAutomatically` 保持 false，
+    /// 保证原地不动也持续有回调可当心跳。
     private func applyAccuracy() {
-        manager.desiredAccuracy = locationHeartbeatEnabled
-            ? kCLLocationAccuracyKilometer
-            : kCLLocationAccuracyThreeKilometers
+        let relaxInForeground = !appIsBackground && !locationHeartbeatEnabled
+        manager.desiredAccuracy = relaxInForeground
+            ? kCLLocationAccuracyThreeKilometers
+            : kCLLocationAccuracyKilometer
     }
 
     func setEnabled(_ enabled: Bool) {
@@ -307,15 +321,18 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
 
     func setApplicationIsBackground(_ isBackground: Bool) {
         appIsBackground = isBackground
-        // 定位会话常驻：不是在进入后台的那一刻才启动。
-        // 系统对「已经在前台运行中的定位会话」会平滑续到后台；对「后台才临时启动」
-        // 的会话则常常延迟投递甚至直接拒绝，那正是「切后台/锁屏就收不到通知」的根因。
         restartTask?.cancel()
         restartTask = nil
-        // 进入后台**不**重启定位：官方文档要求「在前台开始更新」，系统才会把
-        // 保活配置延续到后台。这里只要心跳还活着就不动它，避免把已经生效的
-        // 保活配置从后台重新协商一次（那反而容易协商不上）。
-        // 心跳真的断了的情况由 `watchdogTick()` 兜住。
+        applyAccuracy()
+        // 进入后台**不**动定位：官方文档说明「在前台开始定位更新」时 Core Location
+        // 才会把系统配置成持续保活本进程；已经在跑就让它继续跑，绝不从后台重新
+        // 协商（后台重建投递链路经常协商不上，这正是 v44 之后保活后退的根因）。
+        // 回到前台则相反：主动 stop + start 重新登记一次，把一份「在前台开始」的
+        // 干净定位请求交给系统（前台操作安全，后台绝不做）。
+        if !isBackground, !suspendedForCall, enabled {
+            heartbeatActive = false
+            manager.stopUpdatingLocation()
+        }
         startIfAuthorized()
     }
 
@@ -340,11 +357,18 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
         guard enabled, !suspendedForCall else { return }
         switch manager.authorizationStatus {
         case .authorizedAlways, .authorizedWhenInUse:
-            guard !heartbeatActive else { return }
+            guard !heartbeatActive else {
+                // 已经在跑：再调一次 startUpdatingLocation() 是幂等的，但能让系统
+                // 重新确认这次后台定位请求（进程被回收后又被系统拉起、或系统丢掉
+                // 了旧请求时，就靠这一步把投递链路接回来）。
+                manager.startUpdatingLocation()
+                return
+            }
             heartbeatActive = true
-            // 前台建立投递链路（官方要求）：后台/被回收后再拉起时同样要重新
-            // 调用一次，系统才会恢复投递队列。
             applyAccuracy()
+            // 「使用期间」授权必须由 App 在前台创建后台活动会话：官方文档说它是
+            // when-in-use App 在后台继续收到更新的通道；「始终允许」不需要它，
+            // 创建了只会点亮状态栏定位指示（而且 App 关不掉）。
             startWhenInUseBackgroundSessionIfNeeded()
             lastDeliveryAt = Date()
             manager.startUpdatingLocation()
@@ -541,11 +565,11 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
             startIfAuthorized()
             return
         }
-        // 5 分钟没有任何定位回调 = 投递链路已断，重建。
+        // 5 分钟没有任何定位回调：**只补一次 startUpdatingLocation()**，绝不 stop + start。
+        // 从后台重新协商定位会话会被系统延迟投递甚至直接拒绝，那正是「切后台 /
+        // 锁屏收不到通知」的老根因；而重复 start 是幂等的，只会让请求更稳。
         guard Date().timeIntervalSince(lastDeliveryAt) > 300 else { return }
-        heartbeatActive = false
-        manager.stopUpdatingLocation()
-        startIfAuthorized()
+        manager.startUpdatingLocation()
     }
 
     private func dispatchBackgroundWake() {
@@ -608,6 +632,13 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
             self.refreshRegionIfNeeded()
             guard UIApplication.shared.applicationState != .active else { return }
             self.appIsBackground = true
+            // 后台回调的时间单独落盘：它是「后台保活到底有没有在跑」的凭据，
+            // 回到前台后设置页的「保活状态」里会显示「后台心跳 N 分钟前」。
+            UserDefaults.standard.set(
+                self.lastDeliveryAt,
+                forKey: "djonehub.standby.last-background-beat"
+            )
+            self.applyAccuracy()
             self.dispatchBackgroundWake()
         }
     }
