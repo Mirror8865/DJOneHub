@@ -525,9 +525,9 @@ final class AppModel: ObservableObject {
             // channel assembles the same message moments later and must not announce
             // it again.
             rememberNotifiedSMS(grouped)
-            summary = posted > 0 ? "\u65b0\u77ed\u4fe1 \(posted)" : "\u65e0\u65b0\u77ed\u4fe1"
+            summary = posted > 0 ? "\u{65B0}\u{77ED}\u{4FE1} \(posted)" : "\u{65E0}\u{65B0}\u{77ED}\u{4FE1}"
         } catch {
-            summary = "\u53d6\u6570\u5931\u8d25\uff1a\(error.localizedDescription)"
+            summary = "\u{53D6}\u{6570}\u{5931}\u{8D25}\u{FF1A}\(error.localizedDescription)"
         }
         // A missed call only ever shows up as a history record (missed == true,
         // active == nil), so it never travels through the activeCall path.
