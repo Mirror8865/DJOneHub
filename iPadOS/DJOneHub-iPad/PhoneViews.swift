@@ -702,7 +702,7 @@ struct GlassAvatar: View {
 
 /// 分栏版式左列：系统灰底（列表区），与系统 App 的双栏左列一致。
 struct PhoneSplitListColumn<Content: View>: View {
-    /// 会话自定义壁纸：设了就用它做左列底板（先模糊，再叠系统材质）。
+    /// 会话自定义壁纸：设了就在本列叠一层系统材质（磨砂），壁纸本身由上层整屏绘制。
     var wallpaper: UIImage? = nil
     var wallpaperCanvas: CGSize = .zero
     var wallpaperOriginX: CGFloat = 0
@@ -712,26 +712,18 @@ struct PhoneSplitListColumn<Content: View>: View {
         VStack(spacing: 0) { content }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background {
-                ZStack {
-                    if let wallpaper {
-                        PhoneWallpaperBackdrop(
-                            image: wallpaper,
-                            canvas: wallpaperCanvas,
-                            originX: wallpaperOriginX,
-                            blurRadius: 24
-                        )
-                    }
-                    if wallpaper != nil {
-                        // 左侧列表的液态玻璃底板：系统材质叠在模糊壁纸上，
-                        // 列表滚动时内容从材质里透出来（与系统「信息」侧栏一致）。
-                        Rectangle()
-                            .fill(.ultraThinMaterial)
-                            .ignoresSafeArea()
-                    } else {
-                        // 左列比右列更深一档（systemGray5：浅色 #E5E5EA / 深色 #2C2C2E），
-                        // 与右列的系统白 / 纯黑形成系统设置 App 那种层次。
-                        Color(uiColor: .systemGray5).ignoresSafeArea()
-                    }
+                if wallpaper != nil {
+                    // 会话壁纸由信息板块整屏铺在分栏容器底下（见 `MessagesView.regularBody`），
+                    // 这里只叠一层系统材质做「磨砂」：材质会实时采样身后的壁纸，
+                    // 因此左列与右列仍然是同一张图的连续裁切，且顶栏 / 状态栏区域也能透出来。
+                    // 不再在本列二次绘制壁纸——两列各画一份会在分栏线上露出接缝。
+                    Rectangle()
+                        .fill(.ultraThinMaterial)
+                        .ignoresSafeArea()
+                } else {
+                    // 左列比右列更深一档（systemGray5：浅色 #E5E5EA / 深色 #2C2C2E），
+                    // 与右列的系统白 / 纯黑形成系统设置 App 那种层次。
+                    Color(uiColor: .systemGray5).ignoresSafeArea()
                 }
             }
     }
@@ -788,7 +780,7 @@ struct PhoneWallpaperBackdrop: View {
                 .blur(radius: blurRadius)
                 .clipped()
         }
-        .ignoresSafeArea(edges: .vertical)
+        .ignoresSafeArea()
         .clipped()
         .overlay(Color.black.opacity(0.16))
     }
@@ -1813,39 +1805,6 @@ struct ContactsView: View {
     }
 }
 
-/// 联系人详情背景：直接取系统通讯录里这张**联系人照片**，
-/// 放大裁切铺满整屏（含状态栏区域）当「海报底」，与系统联系人卡片用照片铺底的观感一致；
-/// 没有照片就回退到调用方给的渐变底。联系人详情与短信人详情共用同一套版式。
-///
-/// 系统通讯录的**联系人海报**（`CNContactPoster`）没有公开 API，第三方 App 既读不到也写不进，
-/// 所以这里用的是同一张联系人照片：在系统「联系人 / 电话」里换完头像，
-/// App 重新读取通讯录后本页立刻同步。
-/// 照片被放大会糊，因此先放大再轻微模糊、再压一层暗化，白色姓名与液态玻璃控件始终可读。
-struct ContactBackdrop<Fallback: View>: View {
-    /// 系统联系人的照片数据（`CNContactThumbnailImageDataKey`）。
-    let photo: Data?
-    @ViewBuilder var fallback: Fallback
-
-    var body: some View {
-        if let photo, let image = UIImage(data: photo) {
-            GeometryReader { proxy in
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: proxy.size.width, height: proxy.size.height)
-                    // 先放大再模糊：模糊会在四边渐隐，放大后边缘正好被裁掉，不会露白。
-                    .scaleEffect(1.25)
-                    .blur(radius: 20)
-                    .clipped()
-                    .overlay(Color.black.opacity(0.34))
-            }
-            .ignoresSafeArea()
-        } else {
-            fallback
-        }
-    }
-}
-
 /// 联系人列表分组模型。
 private struct ContactSection: Identifiable {
     let id: String
@@ -1953,11 +1912,11 @@ struct ContactDetailPane: View {
         }
     }
 
-    /// 背景：系统联系人照片铺满整屏；没有照片回退到按联系人派生的渐变底。
+    /// 背景：按联系人派生的「海报渐变」铺满整屏，与系统联系人卡片的置身观感一致。
     private var backdrop: some View {
-        ContactBackdrop(photo: contact.photoData) {
-            ContactPalette.gradient(for: contact.id).ignoresSafeArea()
-        }
+        // 自定义海报底：用按联系人稳定派生的渐变当「海报颜色」铺满整屏（含顶栏与状态栏），
+        // 不再用照片放大 + 模糊 + 暗化（那种观感与系统联系人卡片不一致）。
+        ContactPalette.gradient(for: contact.id).ignoresSafeArea()
     }
 
     /// 系统联系人卡片改完（或取消）后重新读取通讯录，本页显示的字段立即同步。
@@ -2700,13 +2659,10 @@ struct ChatPane: View {
     /// 在任何照片上都有足够对比度）；没设就保持系统背景色，与系统「信息」默认会话一致。
     @ViewBuilder
     private var conversationBackground: some View {
-        if let wallpaper, wallpaperCanvas != .zero {
-            // 分栏版式：与左列共用同一张图的连续裁切（请看 `PhoneWallpaperBackdrop`）。
-            PhoneWallpaperBackdrop(
-                image: wallpaper,
-                canvas: wallpaperCanvas,
-                originX: wallpaperOriginX
-            )
+        if wallpaper != nil {
+            // 分栏版式：整屏壁纸已经由信息板块铺在分栏容器底下（含顶栏与状态栏），
+            // 本列必须保持透明，让同一张图连续透出来；再画一层反而会在第二次裁切处露白。
+            Color.clear
         } else if let image = chatBackgrounds.image(for: handle) {
             GeometryReader { proxy in
                 Image(uiImage: image)
@@ -3060,9 +3016,7 @@ struct ChatContactInfoPanel: View {
 
     var body: some View {
         ZStack {
-            ContactBackdrop(photo: photoData) {
-                ContactPalette.gradient(for: handle).ignoresSafeArea()
-            }
+            ContactPalette.gradient(for: handle).ignoresSafeArea()
 
             ScrollView {
                 VStack(spacing: 16) {
