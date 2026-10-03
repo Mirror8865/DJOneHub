@@ -2144,6 +2144,8 @@ struct MessagesView: View {
     @State private var composeRecipient = ""
     @State private var isEditing = false
     @State private var checkedIDs = Set<String>()
+    /// 单栏（iPhone / iPad 窄分栏）导航路径：只用来同步会话壁纸。
+    @State private var compactPath: [String] = []
     /// 四个板块共用左列宽度：拖动中间手柄后写入同一个 AppStorage 键。
     @AppStorage("djonehub.split.left-width") private var splitLeftWidth: Double = 360
 
@@ -2248,13 +2250,21 @@ struct MessagesView: View {
             }
             // 选中态即时切换：详情区不做任何渐变 / 过渡动画。
             .animation(nil, value: selection)
+            // 选中的会话同时决定根视图那一层会话壁纸。这个同步必须由「信息」板块
+            // 自己负责，而不是交给会话页：打开联系人信息面板后会话页不再重建视图，
+            // 由它发布壁纸就会「换完背景没反应」。
+            .onAppear { chatBackgrounds.presentedHandle = selection }
+            .onChange(of: selection) { newValue in
+                chatBackgrounds.presentedHandle = newValue
+            }
         }
     }
 
     // MARK: iPhone 单栏
 
     private var compactBody: some View {
-        NavigationStack {
+        // 显式路径：单栏下「正在看哪个会话」由它决定，退出聊天要把会话壁纸撤掉。
+        NavigationStack(path: $compactPath) {
             List {
                 PhoneSearchField(placeholder: L10n.t("搜索"), text: $search)
                     .listRowSeparator(.hidden)
@@ -2275,6 +2285,11 @@ struct MessagesView: View {
                     showingCompose = true
                 }
             }
+        }
+        // 单栏路径变化即「进入 / 退出聊天」：进入铺该会话壁纸，退出撤掉。
+        .onAppear { chatBackgrounds.presentedHandle = compactPath.last }
+        .onChange(of: compactPath) { path in
+            chatBackgrounds.presentedHandle = path.last
         }
     }
 
@@ -2598,28 +2613,21 @@ struct ChatPane: View {
         // 让通知层知道用户当前正开在哪个会话里：只有这个会话的新短信不再打扰。
         .onAppear {
             model.openConversationHandle = handle
-            publishActiveWallpaper()
+            chatBackgrounds.presentedHandle = handle
         }
         .onDisappear {
+            // 只回收「正在聊天」这个通知去重标记，壁纸不在这里撤：
+            // 打开联系人信息面板同样会走到 onDisappear，在这里撤壁纸正是
+            // 旧版本「在那个面板里换背景没反应」的原因。
             if model.openConversationHandle == handle { model.openConversationHandle = nil }
-            chatBackgrounds.setActiveWallpaper(nil, handle: handle)
         }
         .onChange(of: handle) { newValue in
             model.openConversationHandle = newValue
-            publishActiveWallpaper()
-        }
-        .onChange(of: chatBackgrounds.revision) { _ in
-            publishActiveWallpaper()
+            chatBackgrounds.presentedHandle = newValue
         }
         .navigationDestination(isPresented: $showingContactInfo) {
             ChatContactInfoPanel(handle: handle)
         }
-    }
-
-    /// 把当前会话背景发布给根视图：分栏与单栏都由根视图那一层统一铺满整窗
-    /// （状态栏 / 顶部导航栏 / 底部导航栏都在标签内容区之外），左列再压一层系统材质做磨砂。
-    private func publishActiveWallpaper() {
-        chatBackgrounds.setActiveWallpaper(chatBackgrounds.image(for: handle), handle: handle)
     }
 
     /// 会话背景：设了背景照片时本视图保持**透明**——壁纸由根视图
@@ -2782,29 +2790,25 @@ final class ChatBackgroundStore: ObservableObject {
     static let shared = ChatBackgroundStore()
     /// 背景变更计数：@Published 让正在显示的会话立刻换成新背景。
     @Published private(set) var revision = 0
-    /// 当前正在展示的会话壁纸，由根视图的 `ChatWallpaperRootLayer` 负责铺满整窗。
+    /// 当前正在展示的会话（由「信息」板块写入）。根视图据此决定铺哪张壁纸。
     ///
-    /// 为什么要把它放到根视图：分栏版式下壁纸必须盖住
+    /// 壁纸不再由会话页「发布」：会话页在打开联系人信息面板后可能不再重建视图，
+    /// 那种情形下发布调用根本不会发生，背景就会「换完没反应」。
+    /// 现在只记录「正在看哪个会话」，壁纸从已存图片实时推导：
+    /// 图片一变（`revision` 触发一次对象变更通知），根视图那层立刻就是新图。
+    @Published var presentedHandle: String?
+
+    /// 根视图 `ChatWallpaperRootLayer` 要铺的那张图，由 `presentedHandle` 推导。
+    ///
+    /// 为什么要放到根视图：分栏版式下壁纸必须盖住
     /// 状态栏 / 顶部导航栏 / 底部导航栏——那几条带子在标签内容区之外，
     /// 会话页自己怎么 `.ignoresSafeArea()` 都够不到，只有根视图做得到。
-    @Published private(set) var activeWallpaper: UIImage?
-    /// 发布壁纸的会话句柄：切换会话时新旧两个 `ChatPane` 的
-    /// onAppear / onDisappear 顺序不固定，用它阻止旧会话把新会话刚发布的壁纸清掉。
-    private var activeWallpaperHandle: String?
-    private var cache: [String: UIImage] = [:]
-
-    /// 会话页把「现在要不要铺背景」发布给根视图；`handle` 用于新旧会话去重。
-    func setActiveWallpaper(_ image: UIImage?, handle: String) {
-        guard let image else {
-            guard activeWallpaperHandle == handle else { return }
-            activeWallpaperHandle = nil
-            activeWallpaper = nil
-            return
-        }
-        if activeWallpaperHandle == handle, let current = activeWallpaper, current === image { return }
-        activeWallpaperHandle = handle
-        activeWallpaper = image
+    var activeWallpaper: UIImage? {
+        guard let handle = presentedHandle else { return nil }
+        return image(for: handle)
     }
+
+    private var cache: [String: UIImage] = [:]
 
     private lazy var directory: URL = {
         let base = FileManager.default
@@ -2832,11 +2836,8 @@ final class ChatBackgroundStore: ObservableObject {
         } else {
             cache[handle] = nil
             try? FileManager.default.removeItem(at: target)
-            // 正在展示的就是这个会话时，根视图那层壁纸也要一起撤掉。
-            if activeWallpaperHandle == handle {
-                activeWallpaperHandle = nil
-                activeWallpaper = nil
-            }
+            // 壁纸是从 `presentedHandle` 实时推导的：清掉缓存并删除磁盘文件后，
+            // 下面的 `revision` 变化就会让根视图那一层跟着撤掉，不必再写状态。
         }
         revision &+= 1
     }

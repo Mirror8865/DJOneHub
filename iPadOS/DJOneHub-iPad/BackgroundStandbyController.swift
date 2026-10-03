@@ -233,11 +233,13 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
     override init() {
         super.init()
         manager.delegate = self
-        // 3 公里级精度 + 100m 过滤：它只是「进程存活心跳」，
-        // 精度越粗、过滤越大，真实 GPS 开机时间越短，越省电；
-        // 后台不会因此被挂起——保持进程存活的是下面那个服务会话。
-        manager.desiredAccuracy = kCLLocationAccuracyThreeKilometers
-        manager.distanceFilter = 100
+        // 公里级精度：走基站 / Wi-Fi 定位，基本不点亮 GPS，这是省电的那一半。
+        // 但距离过滤**必须是「不过滤」**：iPad 常放在桌上不动，任何大于 0 的过滤
+        // 都会让系统停止投递定位更新，进程随即被挂起、轮询停止——
+        // 表现就是「切后台 / 锁屏后收不到短信与来电通知，只有重新打开 App 才补齐」。
+        // 省电只能靠降精度，绝不能靠丢更新；丢更新等于丢保活。
+        manager.desiredAccuracy = kCLLocationAccuracyKilometer
+        manager.distanceFilter = kCLDistanceFilterNone
         manager.pausesLocationUpdatesAutomatically = false
         manager.activityType = .other
         // 只有 Info.plist 声明了 location 后台能力，系统才允许后台持续投递定位更新。
@@ -285,6 +287,12 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
         // 的会话则常常延迟投递甚至直接拒绝，那正是「切后台/锁屏就收不到通知」的根因。
         restartTask?.cancel()
         restartTask = nil
+        if isBackground {
+            // 每次进入后台都强制重新确认一次投递链路：服务会话若在后台被系统
+            // 回收，不会再有任何回调。只有重新 startUpdatingLocation() 才能把它
+            // 接回来；重复调用本身是幂等的，代价可忽略。
+            heartbeatActive = false
+        }
         startIfAuthorized()
     }
 
@@ -654,7 +662,21 @@ final class IncomingCallNotifier {
 
     func requestAuthorization() {
         IncomingCallNotification.registerCategory()
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
+    }
+
+    /// 每次回到前台补一次通知授权确认。
+    ///
+    /// 本地通知只在「已授权」时才会真正弹出来。若安装时那一次授权弹窗被划掉
+    /// （或系统还没来得及弹），`add(request)` 会静默丢弃——表现就是
+    /// 「锁屏一条提醒都没有」。这里只在 `notDetermined` 时再申请一次，
+    /// 已授权 / 已拒绝都不做任何事，不会打扰用户。
+    func ensureAuthorization() {
+        let center = UNUserNotificationCenter.current()
+        center.getNotificationSettings { settings in
+            guard settings.authorizationStatus == .notDetermined else { return }
+            center.requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
+        }
     }
 
     func update(call: CallRecord?, callerName: String?, appIsActive: Bool) {

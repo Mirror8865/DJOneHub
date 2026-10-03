@@ -283,6 +283,8 @@ final class AppModel: ObservableObject {
         captureSMSSnapshot()
         // 用户可能在系统设置里改过权限，回到前台重读一次。
         Task { await refreshPermissionStates() }
+        // 通知权限只在首次申请；被划掉过就永远收不到提醒，回前台补一次。
+        incomingNotifier.ensureAuthorization()
         // 系统「联系人 / 电话」里换过的头像要立刻同步进 App（详情页背景铺的就是它）：
         // 每次回到前台重读一次通讯录；未授权时直接跳过，不弹任何错误。
         if contacts.isAuthorized {
