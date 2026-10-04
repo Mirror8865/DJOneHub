@@ -22,6 +22,7 @@ type systemPowerReading struct {
 	Path            string   `json:"path"`
 	VoltageV        *float64 `json:"voltage_v,omitempty"`
 	CurrentA        *float64 `json:"current_a,omitempty"`
+	CurrentLimitA   *float64 `json:"current_limit_a,omitempty"`
 	PowerW          *float64 `json:"power_w,omitempty"`
 	TemperatureC    *float64 `json:"temperature_c,omitempty"`
 	CapacityPercent *int     `json:"capacity_percent,omitempty"`
@@ -49,6 +50,8 @@ func readSystemPower(root string) systemPowerStatus {
 		}
 		reading.VoltageV = readPositiveScaledFloat(filepath.Join(path, "voltage_now"), 1_000_000)
 		reading.CurrentA = readPositiveScaledFloat(filepath.Join(path, "current_now"), 1_000_000)
+		// current_max 是供电口的限流上限（µA），不是实时电流；单独上报，绝不据此算功率。
+		reading.CurrentLimitA = readPositiveScaledFloat(filepath.Join(path, "current_max"), 1_000_000)
 		reading.PowerW = readPositiveScaledFloat(filepath.Join(path, "power_now"), 1_000_000)
 		if reading.PowerW == nil && reading.VoltageV != nil && reading.CurrentA != nil {
 			power := *reading.VoltageV * *reading.CurrentA
@@ -65,29 +68,23 @@ func readSystemPower(root string) systemPowerStatus {
 		}
 	}
 
-	// QDC507 的 qpnp-vadc 接口直接提供经校准的 Result 微单位数值。
+	// QDC507 的 qpnp-vadc 接口直接提供经校准的 Result 微单位数值，但读到的都是
+	// **电压轨采样**：vbat_sns 与 vph_pwr 都是约 4.04 V 的电池/系统轨电压，两者数值
+	// 几乎完全相同。模块没有电流采样（power_supply/usb 下只有 current_max 限值，
+	// 没有 current_now），所以这里只上报电压。早先版本把 vph_pwr 当成功率、再用
+	// vbat_sns 反推电流，于是 App 上出现了「4.04 W / ~1 A」两个并不存在的读数；
+	// USB 2.0 口的限流上限只有 500 mA，硬件上也不可能到 4 W。
 	for _, devicePath := range globUnderRoot(root, "sys/devices/qpnp-vadc-*") {
-		batteryPath := filepath.Join(devicePath, "vbat_sns")
-		batteryVoltage := parseQPNPVADCResult(readText(batteryPath))
-		if batteryVoltage != nil {
+		for _, channel := range []string{"vbat_sns", "vph_pwr"} {
+			channelPath := filepath.Join(devicePath, channel)
+			voltage := parseQPNPVADCResult(readText(channelPath))
+			if voltage == nil {
+				continue
+			}
 			readings = append(readings, systemPowerReading{
-				Kind: "adc", Name: "vbat_sns", Path: rootedDisplayPath(root, batteryPath), VoltageV: batteryVoltage,
+				Kind: "adc", Name: channel, Path: rootedDisplayPath(root, channelPath), VoltageV: voltage,
 			})
 		}
-
-		powerPath := filepath.Join(devicePath, "vph_pwr")
-		power := parseQPNPVADCResult(readText(powerPath))
-		if power == nil {
-			continue
-		}
-		reading := systemPowerReading{
-			Kind: "adc", Name: "vph_pwr", Path: rootedDisplayPath(root, powerPath), PowerW: power,
-		}
-		if batteryVoltage != nil && *batteryVoltage > 0 {
-			current := *power / *batteryVoltage
-			reading.CurrentA = &current
-		}
-		readings = append(readings, reading)
 	}
 
 	for _, path := range globUnderRoot(root, "sys/class/thermal/thermal_zone*") {
@@ -219,5 +216,6 @@ func readInt(path string) *int {
 
 func hasPowerMetric(reading systemPowerReading) bool {
 	return reading.VoltageV != nil || reading.CurrentA != nil || reading.PowerW != nil ||
-		reading.TemperatureC != nil || reading.CapacityPercent != nil || reading.Online != nil || reading.Status != ""
+		reading.CurrentLimitA != nil || reading.TemperatureC != nil || reading.CapacityPercent != nil ||
+		reading.Online != nil || reading.Status != ""
 }

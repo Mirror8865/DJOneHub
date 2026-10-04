@@ -26,7 +26,10 @@ const (
 	// 0.3.25：省电版轮询节奏——通话空闲期 AT+CLCC 降到 2 秒一拍，模块状态 30 秒、
 	// 短信兜底缓存 12 秒，并且短信整段扫描前先用一条 AT+CPMS? 判断存储有没有变化；
 	// AT 读取也从 10ms 空转轮询改成 select(2) 阻塞等待。
-	agentVersion = "0.3.25"
+	// 0.3.26：功率读数不再造假——vph_pwr 与 vbat_sns 都是电压轨（约 4.04 V），
+	// 以前把 vph_pwr 当成功率、再由两个几乎相同的电压反推电流，App 上的
+	// 「4.04 W / ~1 A」是伪读数；现在只上报电压，并单独暴露 USB 口 current_max 限值。
+	agentVersion = "0.3.26"
 	// 监听所有本机接口以容忍 ECM 地址晚于 init 服务出现；请求层仍只放行 USB 私网与环回。
 	listenAddress = "0.0.0.0:7575"
 	// DATA11 桥与原厂 DATA1 完全分离，禁止重新使用 ql_manager_server 占用的 /dev/smd7。

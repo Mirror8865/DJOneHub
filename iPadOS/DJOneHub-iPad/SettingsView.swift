@@ -607,9 +607,8 @@ struct SettingsView: View {
     private var powerSection: some View {
         Section {
             LabeledContent("模块温度", value: primaryTemperature.map { String(format: "%.0f°C", $0) } ?? "--")
-            LabeledContent("当前功率", value: primaryPower.map { String(format: "%.1f W", $0) } ?? "--")
-            LabeledContent("电压", value: primaryVoltage.map { String(format: "%.2f V", $0) } ?? "--")
-            LabeledContent("电流", value: primaryCurrent.map { String(format: "%.2f A", $0) } ?? "--")
+            LabeledContent("模块电压", value: primaryVoltage.map { String(format: "%.2f V", $0) } ?? "--")
+            LabeledContent("供电上限", value: supplyCurrentLimitText)
             LabeledContent("供电状态", value: modulePowerOnline ? "已连接" : "--")
         } header: {
             Text(L10n.t("功率与温度"))
@@ -626,10 +625,12 @@ struct SettingsView: View {
     }
 
     /// 无论模块是否插入都保留同一张卡，避免读取结果返回时设置页面跳动。
+    /// 模块没有电流采样，只能读到电压轨；这里把这件事写清楚，避免再出现「4 W」这种伪造读数。
     private var powerCardSubtitle: String {
         guard let systemPower else { return "等待模块连接" }
         guard systemPower.supported, !systemPower.readings.isEmpty else { return "暂不支持读取" }
-        return primaryTemperature.map { String(format: "最高 %.0f°C", $0) } ?? "正在读取"
+        guard let temperature = primaryTemperature else { return "正在读取" }
+        return String(format: "最高 %.0f°C · 模块无电流采样，只能读到电压", temperature)
     }
 
     private func dismissPowerDetails() {
@@ -653,12 +654,15 @@ struct SettingsView: View {
         systemPower?.readings.compactMap(\.voltageV).first
     }
 
-    private var primaryCurrent: Double? {
-        systemPower?.readings.compactMap(\.currentA).first
+    /// USB 供电口的限流上限（A）。这是接口能力，不是实时电流，更不是功率。
+    private var supplyCurrentLimit: Double? {
+        systemPower?.readings.compactMap(\.currentLimitA).first
     }
 
-    private var primaryPower: Double? {
-        systemPower?.readings.compactMap(\.powerW).first
+    /// 供电上限文案：限流值 + 由 5 V VBUS 推出的功率天花板。
+    private var supplyCurrentLimitText: String {
+        guard let limit = supplyCurrentLimit else { return "--" }
+        return String(format: "%.0f mA · 最高 %.1f W", limit * 1_000, limit * 5)
     }
 
     private var modulePowerOnline: Bool {
@@ -1106,14 +1110,17 @@ private struct PowerDetailsPopover: View {
         NavigationStack {
             List {
                 // 固定字段模板始终存在，数据回来后原位更新，避免面板突然改变结构。
-                Section(L10n.t("供电与温度")) {
+                Section {
                     powerRow("最高温度", maximumTemperature.map { String(format: "%.0f°C", $0) } ?? "--")
-                    powerRow("电压", voltage.map { String(format: "%.2f V", $0) } ?? "--")
-                    powerRow("电流", current.map { String(format: "%.2f A", $0) } ?? "--")
-                    powerRow("功率", power.map { String(format: "%.1f W", $0) } ?? "--")
+                    powerRow("模块电压", voltage.map { String(format: "%.2f V", $0) } ?? "--")
+                    powerRow("供电上限", currentLimitText)
                     powerRow("电量", capacity.map { "\($0)%" } ?? "--")
                     powerRow("外部供电", online.map { $0 ? "已连接" : "未连接" } ?? "--")
                     powerRow("系统状态", statusText ?? "--")
+                } header: {
+                    Text(L10n.t("供电与温度"))
+                } footer: {
+                    Text(L10n.t("模块没有电流采样，只能读到电压轨，因此无法测量实时功率；USB 2.0 供电口限流 500 mA，模块功耗上限只有 2.5 W。"))
                 }
                 Section {
                     if readings.isEmpty {
@@ -1147,6 +1154,7 @@ private struct PowerDetailsPopover: View {
         if let value = reading.voltageV { values.append(String(format: "%.2fV", value)) }
         if let value = reading.currentA { values.append(String(format: "%.2fA", value)) }
         if let value = reading.powerW { values.append(String(format: "%.1fW", value)) }
+        if let value = reading.currentLimitA { values.append(String(format: "上限%.0fmA", value * 1_000)) }
         if let value = reading.capacityPercent { values.append("\(value)%") }
         if let value = reading.online { values.append(value ? "在线" : "离线") }
         if let value = reading.status, !value.isEmpty { values.append(value) }
@@ -1160,8 +1168,11 @@ private struct PowerDetailsPopover: View {
 
     private var maximumTemperature: Double? { readings.compactMap(\.temperatureC).max() }
     private var voltage: Double? { readings.compactMap(\.voltageV).first }
-    private var current: Double? { readings.compactMap(\.currentA).first }
-    private var power: Double? { readings.compactMap(\.powerW).first }
+    private var currentLimit: Double? { readings.compactMap(\.currentLimitA).first }
+    private var currentLimitText: String {
+        guard let limit = currentLimit else { return "--" }
+        return String(format: "%.0f mA · 最高 %.1f W", limit * 1_000, limit * 5)
+    }
     private var capacity: Int? { readings.compactMap(\.capacityPercent).first }
     private var online: Bool? { readings.compactMap(\.online).first }
     private var statusText: String? { readings.compactMap(\.status).first(where: { !$0.isEmpty }) }

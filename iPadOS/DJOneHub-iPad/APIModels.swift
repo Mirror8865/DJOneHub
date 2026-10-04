@@ -740,6 +740,7 @@ struct SystemPowerReading: Codable, Sendable, Identifiable {
     let path: String
     let voltageV: Double?
     let currentA: Double?
+    let currentLimitA: Double?
     let powerW: Double?
     let temperatureC: Double?
     let capacityPercent: Int?
@@ -752,6 +753,7 @@ struct SystemPowerReading: Codable, Sendable, Identifiable {
         case kind, name, path, online, status
         case voltageV = "voltage_v"
         case currentA = "current_a"
+        case currentLimitA = "current_limit_a"
         case powerW = "power_w"
         case temperatureC = "temperature_c"
         case capacityPercent = "capacity_percent"
