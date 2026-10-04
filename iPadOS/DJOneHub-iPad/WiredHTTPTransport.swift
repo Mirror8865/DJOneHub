@@ -829,7 +829,11 @@ private enum WiredHTTPError: LocalizedError {
 
 /// 诊断探测的节流规则；独立为纯函数，防止前台生命周期与模块轮询重复触发公网请求。
 enum NetworkDiagnosticProbePolicy {
-    static let minimumInterval: TimeInterval = 10
+    /// 公网探测要连 5 个外部 HTTPS 站点 + 1 个模块绑定 HTTP：每一次 DNS、TCP 与 TLS
+    /// 握手都会把 4G 基带从空闲叫醒，是「待机耗电」里最不值得的一项开销。
+    /// 链路抖动时原来 10 秒就能重跑一轮，等于让基带持续工作；诊断数据本身是给人
+    /// 事后看的，压到 5 分钟一次完全够用。
+    static let minimumInterval: TimeInterval = 300
 
     static func shouldStart(now: Date, lastStartedAt: Date?, isRunning: Bool) -> Bool {
         guard !isRunning else { return false }

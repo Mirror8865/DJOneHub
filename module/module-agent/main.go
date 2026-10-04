@@ -23,7 +23,10 @@ const (
 	// 0.3.22：Agent 日志加 512 KB 上限，避免 15 MB 的 /data 卷被日志写满。
 	// 0.3.23：短信 PDU 列表改由模块侧一次请求读完（整段 AT 序列独占 AT 口），
 	// App 不再自己拼 CMGF/CPMS/CMGL 三条请求，后台取数只需一个往返。
-	agentVersion = "0.3.24"
+	// 0.3.25：省电版轮询节奏——通话空闲期 AT+CLCC 降到 2 秒一拍，模块状态 30 秒、
+	// 短信兜底缓存 12 秒，并且短信整段扫描前先用一条 AT+CPMS? 判断存储有没有变化；
+	// AT 读取也从 10ms 空转轮询改成 select(2) 阻塞等待。
+	agentVersion = "0.3.25"
 	// 监听所有本机接口以容忍 ECM 地址晚于 init 服务出现；请求层仍只放行 USB 私网与环回。
 	listenAddress = "0.0.0.0:7575"
 	// DATA11 桥与原厂 DATA1 完全分离，禁止重新使用 ql_manager_server 占用的 /dev/smd7。
@@ -54,6 +57,10 @@ type agent struct {
 	// 上一次读取静态身份字段（固件串 / ICCID / IMSI / IMEI）的时间。
 	// 这些字段整机运行期间几乎不变，却在每次轮询里占掉大半 AT 指令。
 	modemIdentityAt time.Time
+	// 上一次 AT+CPMS? 读到的 SM/ME 已用条数，以及上一次整段扫描的时间。
+	// 条数没变就跳过整段短信扫描（见 sms.go 的 smsScanNeeded）。
+	smsUsedCounts map[string]int
+	smsScannedAt  time.Time
 	gps             gpsTracker
 	muted           bool
 	isRecording     bool
@@ -287,27 +294,60 @@ func (a *agent) pollLoop() {
 	// Agent 重启后恢复用户选择的关闭数据策略，但保留 IMS 与语音注册。
 	a.enforceCellularPolicy()
 	// 通话状态必须保持 1 秒一拍：CallKit 振铃完全依赖这里把 AT+CLCC 的变化推出去。
-	callTicker := time.NewTicker(time.Second)
-	// 模块状态（信号 / 注册 / 运营商 / 网络模式）变化很慢，8 秒一拍足够；
-	// 静态身份字段已经降到每十分钟才重读一次（见 modem.go）。
-	modemTicker := time.NewTicker(8 * time.Second)
-	smsTicker := time.NewTicker(8 * time.Second)
-	defer callTicker.Stop()
-	defer modemTicker.Stop()
-	defer smsTicker.Stop()
+	// 没有进行中的通话时降到 idleCallPollInterval——AT+CLCC 每秒一次只是白白把
+	// 基带 CPU 从低功耗态叫醒；有通话（或在响铃/拨号阶段）立刻回到 1 秒。
+	callTimer := time.NewTimer(time.Second)
+	// 模块状态（信号 / 注册 / 运营商 / 网络模式）变化很慢，只服务设置页与实时活动，
+	// 30 秒一拍足够；静态身份字段另有每十分钟一次的独立节奏（见 modem.go）。
+	// 首轮提前到 3 秒，避免节奏放慢后首次进入设置页只能看到空状态。
+	modemTimer := time.NewTimer(3 * time.Second)
+	// 文本模式缓存只是 PDU 通道读不到时的兜底；12 秒刷新一次，
+	// 且真正整段扫描还要先过 AT+CPMS? 的廉价闸门（见 sms.go）。
+	smsTimer := time.NewTimer(5 * time.Second)
+	defer callTimer.Stop()
+	defer modemTimer.Stop()
+	defer smsTimer.Stop()
 	for {
 		select {
-		case <-callTicker.C:
+		case <-callTimer.C:
 			a.refreshCalls()
 			// 通话过程中语音桥可能因内核设备短暂不可用而退出；只要通话仍在，下一轮主动恢复媒体链路。
 			a.maintainVoiceRoute()
-		case <-modemTicker.C:
+			callTimer.Reset(a.nextCallPollDelay())
+		case <-modemTimer.C:
 			a.refreshModem()
 			a.enforceCellularPolicy()
-		case <-smsTicker.C:
-			a.refreshSMS()
+			modemTimer.Reset(modemPollInterval)
+		case <-smsTimer.C:
+			a.refreshSMS(false)
+			smsTimer.Reset(smsPollInterval)
 		}
 	}
+}
+
+const (
+	// 空闲（没有进行中的通话）时 AT+CLCC 的轮询间隔。
+	// 来电仍能在一个周期内被发现，但基带每秒被唤醒一次的开销被减半。
+	idleCallPollInterval = 2 * time.Second
+	// 模块状态轮询间隔：只服务设置页与实时活动，变化很慢。
+	modemPollInterval = 30 * time.Second
+	// 短信文本模式兜底缓存的刷新间隔；整段扫描另受 AT+CPMS? 闸门约束。
+	smsPollInterval = 12 * time.Second
+)
+
+// hasActiveCall 决定通话轮询节奏；只读锁，开销可忽略。
+func (a *agent) hasActiveCall() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.calls.Active != nil
+}
+
+// nextCallPollDelay 有通话时 1 秒一拍（CallKit 振铃依赖它），空闲时降档省电。
+func (a *agent) nextCallPollDelay() time.Duration {
+	if a.hasActiveCall() {
+		return time.Second
+	}
+	return idleCallPollInterval
 }
 
 func (a *agent) health(response http.ResponseWriter, request *http.Request) {

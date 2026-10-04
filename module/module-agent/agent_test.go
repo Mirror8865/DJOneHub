@@ -547,6 +547,23 @@ func TestVoiceClientConnectTimeoutAllowsSlowFirstAudioStartup(t *testing.T) {
 	}
 }
 
+func TestParseCPMSUsedCountsTracksBothStorages(t *testing.T) {
+	response := "+CPMS: \"SM\",3,50,\"ME\",0,50,\"SM\",3,50"
+	used := parseCPMSUsedCounts(response)
+	if used["SM"] != 3 || used["ME"] != 0 || len(used) != 2 {
+		t.Fatalf("used=%v，期望 SM=3 ME=0", used)
+	}
+	if !sameSMSUsedCounts(used, map[string]int{"SM": 3, "ME": 0}) {
+		t.Fatal("同样的条数快照应当被判为未变化")
+	}
+	if sameSMSUsedCounts(used, map[string]int{"SM": 4, "ME": 0}) {
+		t.Fatal("SM 条数增加必须被判为有变化")
+	}
+	if sameSMSUsedCounts(nil, map[string]int{"SM": 0, "ME": 0}) {
+		t.Fatal("空快照必须视为有变化，否则第一次轮询会跳过整段扫描")
+	}
+}
+
 func TestParseSMSSlot(t *testing.T) {
 	tests := []struct {
 		slot   string

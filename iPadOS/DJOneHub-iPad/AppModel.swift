@@ -619,22 +619,23 @@ final class AppModel: ObservableObject {
     }
 
     /// 模块在线时与其 1 秒 AT 轮询对齐；离线后退避，避免断开模块时持续唤醒手机和 USB 栈。
+    ///
+    /// 省电原则：`/api/calls/status` 每次都要走一趟 USB ECM 与模块 HTTP 服务，
+    /// 虽然不唤醒基带，但会唤醒模块 CPU、USB 控制器和 iPad 的网络栈。空闲期没有
+    /// 任何时间敏感的事要做——来电由长轮询事件桥在状态变化时立刻推回 CallKit，
+    /// 通话中（`activeCall != nil`）仍然保持 1 秒，所以空闲期可以显著放慢。
     private var nextPollingDelay: TimeInterval {
         if consecutivePollFailures > 0 {
             return min(3, pow(2, Double(consecutivePollFailures - 1)))
         }
-        // 后台空闲期放慢轮询：来电由长轮询事件桥在状态变化时立刻推回，不需要
-        // 用 1 秒一次的 AT 轮询兜底；每一条 AT 指令都会唤醒模块 CPU，这本身就是
-        // 模块发热与耗电的主要来源之一。通话中或前台仍然保持 1 秒。
+        // 后台空闲：5 秒一拍（系统省电模式 8 秒）。漏接来电最多晚 5 秒出现在通话
+        // 历史里；来电本身仍由事件桥即时唤醒系统通话界面。
         if !appIsActive, activeCall == nil {
-            // 后台轮询同时承担「发现模块侧新来电」的职责，8 秒一拍会让锁屏来电
-            // 晚到十几秒；压到 4 秒（省电模式）后依然远低于前台频率。
-            return lowPowerModeEnabled ? 4 : 3
+            return lowPowerModeEnabled ? 8 : 5
         }
-        // 前台空闲时也放慢：来电 / 新短信由长轮询事件桥与短信刷新单独负责，
-        // 不需要每秒一条 AT 状态请求。通话中必须保持 1 秒以跟上状态变化。
+        // 前台空闲：3 秒一拍（省电模式 5 秒）。用户盯着界面时保持响应感。
         if activeCall == nil {
-            return lowPowerModeEnabled ? 4 : 2
+            return lowPowerModeEnabled ? 5 : 3
         }
         return 1
     }
@@ -856,9 +857,11 @@ final class AppModel: ObservableObject {
             // 读取放在独立任务里异步跑：同一个 AT 端口还承担 1 秒一次的通话轮询，
             // 同步等待会把来电检测拖慢，甚至错过 CallKit 上报窗口。
             let active = appIsActive
-            // 后台也要及时收短信：原来 15 秒一拍，锁屏经常比模块晚十几秒才弹；
-            // 现在压到 6 秒。PDU 读取仍走串行闸门，不会和通话轮询抢 AT 口。
-            nextMessagesRefresh = Date().addingTimeInterval(active ? 4 : 6)
+            // 后台也要及时收短信，但整段 PDU 读取是模块侧最重的周期性 AT 工作
+            // （切模式 + 选存储区 + 整存储区 CMGL），所以前台 5 秒、后台 8 秒。
+            // 后台另有 15 秒一次的唤醒补扫兜底，锁屏提醒不会因此漏掉；
+            // PDU 读取仍走串行闸门，不会和通话轮询抢 AT 口。
+            nextMessagesRefresh = Date().addingTimeInterval(active ? 5 : 8)
             if messagesRefreshTask == nil {
                 messagesRefreshTask = Task { [weak self] in
                     await self?.refreshMessages(silently: true)
@@ -891,9 +894,9 @@ final class AppModel: ObservableObject {
         guard periodicMetadataIsObservable else { return }
         guard moduleMetadataTask == nil, Date() >= nextModuleMetadataRefresh else { return }
         // 这一路要读蜂窝状态、版本和整块 sysfs 功率/温度（模块侧最重的周期性 IO）。
-        // 它只在设置页被看到，放慢到 15/60 秒对界面没有可感知影响，
-        // 却能把模块被唤醒读写 sysfs 的次数降到原来的三分之一以下。
-        nextModuleMetadataRefresh = Date().addingTimeInterval(appIsActive ? 15 : 60)
+        // 它只在设置页被看到，放慢到 30/120 秒对界面没有可感知影响，
+        // 却能把模块被唤醒读写 sysfs 的次数再降一半。
+        nextModuleMetadataRefresh = Date().addingTimeInterval(appIsActive ? 30 : 120)
         moduleMetadataTask = Task { [weak self] in
             await self?.refreshModuleMetadata(generation: generation)
         }

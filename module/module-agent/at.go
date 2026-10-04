@@ -182,11 +182,29 @@ func (p *atPort) writeAll(payload []byte, timeout time.Duration) error {
 	return nil
 }
 
+// waitReadable 用 select(2) 阻塞等待读事件，返回是否等到了一个可读事件。
+//
+// 原来的实现是每 10ms 一次 syscall.Read 的空转轮询：每条 AT 指令的等待窗口里
+// 会无谓唤醒 CPU 几次到几十次，基带与 CPU 因此很难进入低功耗态。
+// 内核支持 poll 时这里会精确在数据到达时唤醒；老内核或非常规字符设备
+// 返回 false，调用方退回 10ms 轮询，行为与原来完全一致。
+func (p *atPort) waitReadable(timeout time.Duration) bool {
+	if p.file == nil || timeout <= 0 {
+		return false
+	}
+	fd := int(p.file.Fd())
+	var readSet syscall.FdSet
+	readSet.Bits[fd/64] |= 1 << (uint(fd) % 64)
+	timeval := syscall.NsecToTimeval(timeout.Nanoseconds())
+	_, err := syscall.Select(fd+1, &readSet, nil, nil, &timeval)
+	return err == nil
+}
+
 func (p *atPort) readUntil(timeout time.Duration, complete func([]byte) bool) ([]byte, error) {
 	deadline := time.Now().Add(timeout)
 	buffer := make([]byte, 0, 4096)
 	temporary := make([]byte, 1024)
-	for time.Now().Before(deadline) {
+	for {
 		count, err := syscall.Read(int(p.file.Fd()), temporary)
 		if count > 0 {
 			buffer = append(buffer, temporary[:count]...)
@@ -196,13 +214,21 @@ func (p *atPort) readUntil(timeout time.Duration, complete func([]byte) bool) ([
 			if complete(buffer) {
 				return buffer, nil
 			}
+			// 同一批数据里可能还有后续行，先把缓冲区里的内容读完再回去等。
+			continue
 		}
 		if err != nil && !errors.Is(err, syscall.EAGAIN) && !errors.Is(err, syscall.EWOULDBLOCK) {
 			return buffer, fmt.Errorf("读取 AT 响应失败: %w", err)
 		}
-		time.Sleep(10 * time.Millisecond)
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return buffer, errors.New("等待 AT 响应超时")
+		}
+		// 阻塞等内核通知「可读」，取代 10ms 一轮的空转。
+		if !p.waitReadable(remaining) {
+			time.Sleep(10 * time.Millisecond)
+		}
 	}
-	return buffer, errors.New("等待 AT 响应超时")
 }
 
 // drain 清走上次命令残留和异步 URC；呼叫与短信状态由专门轮询恢复。

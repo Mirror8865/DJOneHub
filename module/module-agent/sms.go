@@ -33,7 +33,14 @@ var verificationCodePattern = regexp.MustCompile(`(?:^|[^0-9])([0-9]{4,8})(?:[^0
 // 交付 ID 自带「存储区 + 槽位 + 正文摘要」，槽位被复用时摘要不同的新短信不会误伤。
 const maxDeliveredSMSIDs = 512
 
-func (a *agent) refreshSMS() {
+func (a *agent) refreshSMS(force bool) {
+	// 便宜闸门：先只发一条 AT+CPMS? 拿两个存储区的已用条数。条数没变说明基带存储
+	// 没有新短信（App 读完会把已交付的记录删掉，used 只会减少），这时跳过
+	// 「切模式 + 选存储区 + CMGL 整段扫描」这几条最重的 AT——SIM 存储区尤其慢。
+	used, probed := a.readSMSUsedCounts()
+	if !force && !a.smsScanNeeded(used, probed) {
+		return
+	}
 	items, err := a.readAllSMS()
 	if err != nil {
 		a.mu.Lock()
@@ -62,7 +69,81 @@ func (a *agent) refreshSMS() {
 	})
 	a.messages = combined
 	a.smsError = ""
+	a.smsScannedAt = time.Now()
+	if probed {
+		a.smsUsedCounts = used
+	} else {
+		// 读不到条数时留空，下一轮强制整段扫描。
+		a.smsUsedCounts = nil
+	}
 	a.mu.Unlock()
+}
+
+// smsStorageGateInterval 兜底：即使 AT+CPMS? 的条数没变，也要在这个间隔内整段扫一次。
+// 覆盖「同一窗口里既来了新短信、又删掉了旧记录」这种 used 不变的极端情况。
+const smsStorageGateInterval = 30 * time.Second
+
+// smsScanNeeded 用一条 AT+CPMS? 判断要不要做整段短信扫描。
+// 存储条数没变就不扫；读不到条数时失败开放（返回 true），宁可多扫一次也不能漏短信。
+func (a *agent) smsScanNeeded(used map[string]int, probed bool) bool {
+	a.mu.RLock()
+	scannedAt := a.smsScannedAt
+	previous := a.smsUsedCounts
+	a.mu.RUnlock()
+	if time.Since(scannedAt) > smsStorageGateInterval {
+		return true
+	}
+	if !probed {
+		return true
+	}
+	return !sameSMSUsedCounts(previous, used)
+}
+
+// readSMSUsedCounts 只发一条 AT+CPMS?，读出各存储区的已用条数。
+func (a *agent) readSMSUsedCounts() (map[string]int, bool) {
+	response, err := a.at.command("AT+CPMS?", 3*time.Second)
+	if err != nil {
+		return nil, false
+	}
+	used := parseCPMSUsedCounts(response)
+	if len(used) == 0 {
+		return nil, false
+	}
+	return used, true
+}
+
+// parseCPMSUsedCounts 解析 "+CPMS: \"SM\",3,50,\"ME\",0,50,\"SM\",3,50"。
+// 三元组是 <存储区>,<已用>,<总数>，所以按 3 步长取前两个字段。
+func parseCPMSUsedCounts(response string) map[string]int {
+	used := map[string]int{}
+	for _, line := range strings.Split(strings.ReplaceAll(response, "\r", ""), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "+CPMS:") {
+			continue
+		}
+		fields := splitCSV(strings.TrimSpace(strings.TrimPrefix(line, "+CPMS:")))
+		for index := 0; index+1 < len(fields); index += 3 {
+			name := strings.ToUpper(strings.Trim(strings.TrimSpace(fields[index]), `"`))
+			if name == "" {
+				continue
+			}
+			used[name] = parseInt(fields[index+1])
+		}
+	}
+	return used
+}
+
+// sameSMSUsedCounts 两个存储区快照是否完全一致；空快照一律视为「不一致」。
+func sameSMSUsedCounts(left, right map[string]int) bool {
+	if len(left) == 0 || len(left) != len(right) {
+		return false
+	}
+	for name, value := range right {
+		if left[name] != value {
+			return false
+		}
+	}
+	return true
 }
 
 // containsStoredSMS 防止 8 秒轮询把同一条模块存储记录重复加入交付队列。
