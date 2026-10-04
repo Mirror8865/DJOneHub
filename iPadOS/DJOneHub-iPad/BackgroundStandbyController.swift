@@ -2,6 +2,7 @@ import AVFoundation
 import BackgroundTasks
 import CoreLocation
 import Foundation
+import MediaPlayer
 import UIKit
 import UserNotifications
 
@@ -195,6 +196,9 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
     /// 轮询停摆——正是「保活失效、只有打开 App 才收到通知」的原因。
     /// 持续定位是保活的地基，不能再被任何开关关掉，所以降级成精度档位。
     private var locationHeartbeatEnabled = true
+    /// 静音音频保活：把一段全零音频循环播放，用系统 audio 后台能力把进程留在运行态。
+    /// 它是「进程持续存活」的主通道；定位与后台任务只负责「被回收后重新拉起」。
+    private let audioKeepAlive = StandbyAudioKeepAlive()
 
     /// 是否授予了「始终允许」；只有它才能让定位更新在后台持续投递。
     var hasAlwaysAuthorization: Bool {
@@ -223,59 +227,48 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
     var statusText: String {
         guard enabled else { return "已关闭" }
         if suspendedForCall { return "通话中已暂停" }
+        // 主通道：静音音频是否真的在播。它断了就等于进程随时会被系统挂起。
+        let audio = audioKeepAlive.isPlaying ? "静音音频保活运行中" : "静音音频未在播放"
+        // 兜底通道：定位与后台唤醒。被系统回收后只有它们能把进程叫回来。
+        let fallback: String
         switch manager.authorizationStatus {
         case .authorizedAlways:
-            guard heartbeatActive else { return "正在启动" }
-            // 把「最近一次定位心跳」显示出来：只有它新鲜，后台保活才真的成立。
-            // 「后台心跳」是后台期间收到的系统回调时间，它会一直留在这里：
-            // 切后台或锁屏待一会儿再回来，若它停在你离开 App 的那一刻，说明后台
-            // 投递真的断了；若它一直在往后走，保活就是活的。
             let age = max(0, Int(Date().timeIntervalSince(lastDeliveryAt)))
             let beat = lastDeliveryAt == Date.distantPast ? "等待首次定位心跳" : "定位心跳 \(age) 秒前"
-            let backgroundBeat: String
-            if let last = UserDefaults.standard.object(
-                forKey: "djonehub.standby.last-background-beat"
-            ) as? Date {
-                let minutes = max(0, Int(Date().timeIntervalSince(last) / 60))
-                backgroundBeat = " · 后台心跳 \(minutes) 分钟前"
-            } else {
-                backgroundBeat = ""
-            }
-            let wakeCount = UserDefaults.standard.integer(forKey: "djonehub.standby.wake-count")
-            let wakeAge: String
-            if let lastWake = UserDefaults.standard.object(
-                forKey: "djonehub.standby.last-wake"
-            ) as? Date {
-                wakeAge = "\(max(0, Int(Date().timeIntervalSince(lastWake) / 60))) 分钟前"
-            } else {
-                wakeAge = "尚未"
-            }
-            // 后台补发的结果：「取数成功但没新短信」与「取数失败」
-            // 是两回事，分开显示才能一眼看出后台通知为什么没弹。
-            let sweep: String
-            if let lastSweep = UserDefaults.standard.object(
-                forKey: "djonehub.standby.last-sweep"
-            ) as? Date {
-                let result = UserDefaults.standard.string(forKey: "djonehub.standby.last-sweep-result") ?? ""
-                let age = max(0, Int(Date().timeIntervalSince(lastSweep)))
-                sweep = " · 后台取数 \(age) 秒前" + (result.isEmpty ? "" : "（\(result)）")
-            } else {
-                sweep = ""
-            }
-            return "保活运行中（\(beat)\(backgroundBeat) · 后台唤醒 \(wakeCount) 次（\(wakeAge)）\(sweep) · 状态栏无指示）"
+            fallback = heartbeatActive ? "定位兜底已就绪（\(beat)）" : "定位兜底正在启动"
         case .authorizedWhenInUse:
-            // 只拿到「使用期间」时系统会优先回收进程，保活随时可能失效，
-            // 所以这里明确提示去升级授权。
-            return heartbeatActive
-                ? "保活运行中；「使用期间」会被系统强制显示定位图标，请改为“始终允许”"
+            fallback = heartbeatActive
+                ? "定位仅“使用期间”，状态栏会被系统强制显示图标，建议改为“始终允许”"
                 : "请在“设置 › 隐私与安全性 › 定位”里改为“始终允许”"
         case .notDetermined:
-            return "等待定位授权"
+            fallback = "等待定位授权（兜底通道）"
         case .denied, .restricted:
-            return "定位权限被拒绝，保活无法生效"
+            fallback = "定位权限被拒绝，被回收后无法自动拉起"
         @unknown default:
-            return "状态未知"
+            fallback = "定位状态未知"
         }
+        let wakeCount = UserDefaults.standard.integer(forKey: "djonehub.standby.wake-count")
+        let wakeAge: String
+        if let lastWake = UserDefaults.standard.object(
+            forKey: "djonehub.standby.last-wake"
+        ) as? Date {
+            wakeAge = "\(max(0, Int(Date().timeIntervalSince(lastWake) / 60))) 分钟前"
+        } else {
+            wakeAge = "尚未"
+        }
+        // 后台补发的结果：「取数成功但没新短信」与「取数失败」
+        // 是两回事，分开显示才能一眼看出后台通知为什么没弹。
+        let sweep: String
+        if let lastSweep = UserDefaults.standard.object(
+            forKey: "djonehub.standby.last-sweep"
+        ) as? Date {
+            let result = UserDefaults.standard.string(forKey: "djonehub.standby.last-sweep-result") ?? ""
+            let age = max(0, Int(Date().timeIntervalSince(lastSweep)))
+            sweep = " · 后台取数 \(age) 秒前" + (result.isEmpty ? "" : "（\(result)）")
+        } else {
+            sweep = ""
+        }
+        return "\(audio) · \(fallback) · 后台唤醒 \(wakeCount) 次（\(wakeAge)）\(sweep)"
     }
 
     override init() {
@@ -332,11 +325,15 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
             startRegionMonitoring()
             startIfAuthorized()
             startWatchdog()
+            // 音频保活是「进程持续存活」的主通道：在**前台**就把会话建立好，
+            // 等切后台时它已经在播，不靠后台重新协商（后台起播更容易失败）。
+            audioKeepAlive.start()
         } else {
             restartTask?.cancel()
             restartTask = nil
             stopWatchdog()
             stopHeartbeat()
+            audioKeepAlive.stop()
             stopSignificantChangeMonitoring()
             stopVisitMonitoring()
             stopRegionMonitoring()
@@ -357,24 +354,43 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
             heartbeatActive = false
             manager.stopUpdatingLocation()
         }
+        // 前后台切换都补一次静音音频：断了就重建，没断就是幂等空操作。
+        if enabled, !suspendedForCall {
+            audioKeepAlive.refresh()
+        }
         startIfAuthorized()
     }
 
     /// 回到前台、被系统中断或通话结束后重新确认定位心跳仍在运行。
     func ensureRunning() {
         guard enabled, !suspendedForCall else { return }
+        // 静音音频是持续存活的主通道，和定位心跳一起恢复。
+        audioKeepAlive.resume()
         startIfAuthorized()
     }
 
-    /// 通话期间由后台音频模式维持进程，定位心跳可以停掉省电。
+    /// 通话期间整条保活链路让位：静音音频把会话完整交给 CallKit，定位心跳停掉省电。
     func suspendForCall() {
         suspendedForCall = true
+        audioKeepAlive.suspend()
         stopHeartbeat()
     }
 
     func resumeAfterCall() {
         suspendedForCall = false
         ensureRunning()
+    }
+
+    /// 音频会话被别的模块释放（来电铃声收尾等）后立刻重建静音音频，
+    /// 不等看门狗的下一拍——那一拍之间进程可能已经被系统挂起。
+    func rearmAudioKeepAlive() {
+        guard enabled, !suspendedForCall else { return }
+        audioKeepAlive.refresh()
+    }
+
+    /// 把「当前是否有通话占用音频」的实时判断注入静音音频保活。
+    func setAudioKeepAliveCallPredicate(_ predicate: @escaping () -> Bool) {
+        audioKeepAlive.isCallActive = predicate
     }
 
     private func startIfAuthorized() {
@@ -879,8 +895,215 @@ final class IncomingCallNotifier {
     }
 }
 
+/// 静音音频保活：把一段全零音频循环播放，用系统 audio 后台能力把进程留在运行态。
+///
+/// 它解决的是「进程持续存活」；定位与后台任务解决的是「被回收后重新拉起」：
+/// 音频挡得住系统在后台挂起进程，但用户手动划掉 App 时救不回来；定位/后台任务
+/// 救得回被回收的进程，却挡不住挂起。两条腿一起走，锁屏期间的短信与来电提醒才稳。
+///
+/// 三个必须守住的边界：
+/// 1. **锁屏与控制中心不出现播放控件**：会话声明为可混音（`.mixWithOthers`），系统就
+///    不会把本 App 认成「正在播放的 App」；同时清空 `nowPlayingInfo`、把
+///    `playbackState` 写成 `.stopped`，也不注册任何 `MPRemoteCommandCenter` 动作，
+///    锁屏媒体卡片不会出现。
+/// 2. **不打断其他视频与音乐**：可混音会话只做叠加，不抢路由、不 ducking；
+///    别的 App 开始时它照样是「正在播放的 App」，我们只是安静地混在里面。
+/// 3. **通话优先**：通话期间整条链路让位给 CallKit 的 `.playAndRecord`（`suspend()`），
+///    通话结束、铃声收尾后由看门狗自动重建，绝不与通话抢音频会话。
+@MainActor
+final class StandbyAudioKeepAlive {
+    /// 是否应该保持播放（保活开关打开、且当前不在通话中）。
+    private var shouldRun = false
+    private var player: AVAudioPlayer?
+    private var watchdog: Task<Void, Never>?
+    private var observers: [NSObjectProtocol] = []
+
+    /// 上层注入的实时状态：当前有通话或通话提示音正在占用音频会话。
+    /// 有它就让位——但**不锁死**：谓词变回 false 后看门狗会自己把播放接回来，
+    /// 不会出现「某次通话没收到结束通知就永久不保活」的死锁。
+    var isCallActive: (() -> Bool)?
+
+    var isPlaying: Bool { player?.isPlaying == true }
+
+    init() {
+        let session = AVAudioSession.sharedInstance()
+        // 系统中断（来电、闹钟、其他 App 的不可混音会话）结束后按系统建议恢复。
+        observers.append(NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: session,
+            queue: .main
+        ) { [weak self] note in
+            Task { @MainActor [weak self] in self?.handleInterruption(note) }
+        })
+        // 媒体服务被系统重置时所有音频对象都会失效，整体重建一次。
+        observers.append(NotificationCenter.default.addObserver(
+            forName: AVAudioSession.mediaServicesWereResetNotification,
+            object: session,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.player = nil
+                self?.refresh()
+            }
+        })
+    }
+
+    deinit {
+        observers.forEach { NotificationCenter.default.removeObserver($0) }
+    }
+
+    /// 保活开关打开：立刻起播并启动自愈看门狗。
+    func start() {
+        shouldRun = true
+        refresh()
+        startWatchdog()
+    }
+
+    /// 保活开关关闭：停播并把会话交还系统。
+    func stop() {
+        shouldRun = false
+        stopWatchdog()
+        let wasPlaying = player?.isPlaying == true
+        player?.stop()
+        player = nil
+        guard wasPlaying else { return }
+        // 会话可能已经被通话方接管（.playAndRecord），那种情况绝不能由我们关闭。
+        if AVAudioSession.sharedInstance().category == .playback {
+            try? AVAudioSession.sharedInstance().setActive(
+                false,
+                options: .notifyOthersOnDeactivation
+            )
+        }
+    }
+
+    /// 通话开始：停播但**不动会话**，把音频会话完整让给 CallKit。
+    func suspend() {
+        shouldRun = false
+        stopWatchdog()
+        player?.stop()
+        player = nil
+    }
+
+    /// 通话真正结束：把会话交还媒体类别并重新起播。
+    func resume() {
+        shouldRun = true
+        resetSessionToMediaIfNeeded()
+        refresh()
+        startWatchdog()
+    }
+
+    /// 幂等重建：确实没在播时才重新配置，避免打断正在播放的铃声/提示音。
+    func refresh() {
+        guard shouldRun else { return }
+        // 通话优先：有电话或通话提示音在跑时绝不抢音频会话。
+        if isCallActive?() == true { return }
+        if let player, player.isPlaying { return }
+        let session = AVAudioSession.sharedInstance()
+        // 通话（.playAndRecord / .record）或语音模式的会话一律不碰：
+        // 这时把类别改回媒体会直接打断通话，必须等 resume() 明确交还。
+        if session.category == .playAndRecord || session.category == .record { return }
+        if session.mode == .voiceChat || session.mode == .videoChat { return }
+        do {
+            // 可混音：既不影响其他 App，也不会被系统当成「正在播放的 App」。
+            try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+            try session.setActive(true)
+            let player = try AVAudioPlayer(data: Self.silentWAVData)
+            player.numberOfLoops = -1   // 无限循环
+            player.volume = 0           // 双保险：即使解码出残余也听不见
+            player.prepareToPlay()
+            guard player.play() else { throw StandbyAudioError.playbackFailed }
+            self.player = player
+            Self.hideNowPlaying()
+        } catch {
+            // 会话被别的不可混音 App 占着时激活会失败；交给看门狗下一拍重试，
+            // 绝不在这里反复重试拖慢通话链路。
+            self.player = nil
+        }
+    }
+
+    /// 通话结束后会话常常还停在 .playAndRecord/.voiceChat，先显式交还媒体类别，
+    /// 否则看门狗会被 refresh() 自己的安全检查一直挡住。
+    private func resetSessionToMediaIfNeeded() {
+        let session = AVAudioSession.sharedInstance()
+        guard session.category == .playAndRecord
+                || session.category == .record
+                || session.mode == .voiceChat
+                || session.mode == .videoChat else { return }
+        try? session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+    }
+
+    private func handleInterruption(_ note: Notification) {
+        guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
+        switch type {
+        case .began:
+            // 系统已经把播放暂停了；保留 shouldRun，等结束后重建。
+            player = nil
+        case .ended:
+            guard shouldRun else { return }
+            refresh()
+        @unknown default:
+            break
+        }
+    }
+
+    private func startWatchdog() {
+        guard watchdog == nil else { return }
+        watchdog = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(12))
+                guard !Task.isCancelled else { return }
+                self?.refresh()
+            }
+        }
+    }
+
+    private func stopWatchdog() {
+        watchdog?.cancel()
+        watchdog = nil
+    }
+
+    /// 清掉媒体卡片：没有元数据、也没有播放状态，锁屏与控制中心就不会出现本 App。
+    private static func hideNowPlaying() {
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+        if #available(iOS 13.0, *) {
+            MPNowPlayingInfoCenter.default().playbackState = .stopped
+        }
+    }
+
+    /// 1 秒 8 kHz 单声道 16 bit 的全零 WAV，循环播放：体积 16 KB，解码开销可忽略。
+    private static let silentWAVData: Data = {
+        let sampleRate = 8_000
+        let channels = 1
+        let bitsPerSample = 16
+        let frames = sampleRate
+        let byteRate = sampleRate * channels * bitsPerSample / 8
+        let blockAlign = channels * bitsPerSample / 8
+        let dataSize = frames * blockAlign
+        var data = Data()
+        func put(_ text: String) { data.append(contentsOf: Array(text.utf8)) }
+        func put(_ value: UInt32) {
+            withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) }
+        }
+        func put(_ value: UInt16) {
+            withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) }
+        }
+        put("RIFF"); put(UInt32(36 + dataSize)); put("WAVE")
+        put("fmt "); put(UInt32(16)); put(UInt16(1))
+        put(UInt16(channels)); put(UInt32(sampleRate))
+        put(UInt32(byteRate)); put(UInt16(blockAlign)); put(UInt16(bitsPerSample))
+        put("data"); put(UInt32(dataSize))
+        data.append(Data(repeating: 0, count: dataSize))
+        return data
+    }()
+}
+
+private enum StandbyAudioError: Error {
+    case playbackFailed
+}
+
 /// 后台刷新任务：App 被系统回收后，系统仍会按自己的节奏把进程唤醒一次。
-/// 保活定位负责「持续活着」，这个任务负责「被回收后还能被叫醒」，两者互补。
+/// 静音音频负责「持续活着」，定位与这个任务负责「被回收后还能被叫醒」，三者互补。
 enum StandbyBackgroundScheduler {
     static let refreshTaskIdentifier = "com.djonehub.standby.refresh"
     /// 后台处理任务给的时间窗比 App 刷新长得多，用来把被回收后的补发做完整。

@@ -36,6 +36,9 @@ final class AudioSessionController: ObservableObject {
     @Published private(set) var speakerEnabled = false
     @Published var errorMessage: String?
     var onSpeakerStateChanged: ((Bool) -> Void)?
+    /// 本类把音频会话交还系统（铃声播完、通话结束）之后回调。
+    /// 静音音频保活靠它立刻重建：晚一步进程就可能已经被系统挂起。
+    var onSessionReleased: (() -> Void)?
 
     private let moduleHost = NWEndpoint.Host("192.168.225.1")
     private let modulePort = NWEndpoint.Port(rawValue: 7_580)!
@@ -255,7 +258,11 @@ final class AudioSessionController: ObservableObject {
             false,
             options: .notifyOthersOnDeactivation
         )
+        onSessionReleased?()
     }
+
+    /// 通话铃声 / 呼出等待音是否正在播放。静音音频保活据此让位，不和提示音抢会话。
+    var callTonePlaying: Bool { callTonePlayer != nil || currentCallTone != nil }
 
     /// 切换当前通话的输出路由；关闭扬声器时交还给系统选择听筒或已连接的蓝牙设备。
     func setSpeakerEnabled(_ enabled: Bool) throws {
@@ -322,6 +329,7 @@ final class AudioSessionController: ObservableObject {
                     false,
                     options: .notifyOthersOnDeactivation
                 )
+                onSessionReleased?()
             }
         } catch {
             errorMessage = error.localizedDescription

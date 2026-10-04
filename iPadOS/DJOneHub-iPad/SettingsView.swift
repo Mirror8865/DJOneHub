@@ -455,7 +455,8 @@ struct SettingsView: View {
     }
 
     /// 后台与保活：保活开关 + 通知开关，全部是系统设置式行。
-    /// 保活不使用静音音频后台播放，改用「始终允许」的后台定位维持进程。
+    /// 保活主通道是静音音频（不显示媒体控件、不影响其他音视频）；
+    /// 定位与后台任务只作为「进程被回收后重新拉起」的兜底通道。
     @ViewBuilder
     private var notificationSection: some View {
         Section {
@@ -465,14 +466,14 @@ struct SettingsView: View {
                 .onChange(of: backgroundStandbyEnabled) { enabled in
                     model.setBackgroundStandbyEnabled(enabled)
                 }
-            Toggle(L10n.t("定位保活（状态栏无指示）"), isOn: $standbyLocationEnabled)
+            Toggle(L10n.t("定位兜底（状态栏无指示）"), isOn: $standbyLocationEnabled)
                 .tint(Color(uiColor: .systemGreen))
                 .onChange(of: standbyLocationEnabled) { enabled in
                     model.setStandbyLocationEnabled(enabled)
                 }
                 .disabled(!backgroundStandbyEnabled)
             LabeledContent(L10n.t("保活状态"), value: model.backgroundStandby.statusText)
-            LabeledContent(L10n.t("定位授权"), value: model.backgroundStandby.locationAuthorizationText)
+            LabeledContent(L10n.t("兜底定位授权"), value: model.backgroundStandby.locationAuthorizationText)
             // 只有「始终允许」能让系统不点亮状态栏定位图标；
             // 不是就直接给一个去系统设置里改的入口。
             if !model.backgroundStandby.hasAlwaysAuthorization {
@@ -495,7 +496,7 @@ struct SettingsView: View {
         } header: {
             Text(L10n.t("后台与保活"))
         } footer: {
-            Text("不使用静音音频后台播放：改用持续定位心跳维持进程（公里级精度，不读取坐标、不上传、不落盘）：官方文档说明「在前台开始定位更新」后，Core Location 会把系统配置成持续保活本进程以接收后台定位更新，所以后台与锁屏期间轮询不会停，来电与短信通知照常弹出；同时登记显著位置变化、访问事件、地理围栏与后台刷新任务四条唤醒通道，进程被系统回收时由它们把它重新拉起并补发遗漏的提醒；进程被系统回收时，系统会用这几条通道把它重新拉起并补发遗漏的来电与短信通知。状态栏定位图标由系统决定：只有在“设置 › 隐私与安全性 › 定位 › DJOneHub”里改成“始终允许”，状态栏才不会出现定位图标；只拿到“使用期间”时系统会强制点亮它，App 关不掉。“定位保活”关闭只是把前台精度降到三公里级省电，后台仍然保持公里级持续定位，保活不会中断。")
+            Text("保活主通道是静音音频：App 在前台启动一段全零音频循环播放，锁屏或切到后台后系统因为它持续占用音频会话而不会挂起进程，来电与短信轮询照常运行、通知即时弹出。这段音频用可混音（mixWithOthers）会话播放，只叠加不抢占，不会打断其他视频与音乐；不提供任何媒体信息、不注册媒体控件，所以锁屏和控制中心不会出现播放卡片。通话期间它自动让位给系统 CallKit，通话结束立即恢复。定位（“始终允许”时状态栏不显示定位图标）与后台刷新任务只作为兜底：进程被系统回收时把 App 重新拉起、补发遗漏的来电与短信通知。“定位兜底”关闭只是把前台精度降到三公里级省电，后台兜底仍然有效。")
         }
         Section {
             Toggle("短信通知", isOn: $smsNotificationsEnabled)

@@ -254,6 +254,19 @@ final class AppModel: ObservableObject {
         audio.onSpeakerStateChanged = { [weak self] enabled in
             self?.isSpeakerEnabled = enabled
         }
+        // 铃声播完、通话结束这类「本类主动交还会话」的时刻，立刻把静音音频保活接回来：
+        // 等看门狗下一拍（12 秒）之间进程就可能被系统挂起，那正是保活失效的成因。
+        audio.onSessionReleased = { [weak self] in
+            self?.backgroundStandby.rearmAudioKeepAlive()
+        }
+        // 通话优先：有电话（含响铃）或通话提示音时，静音音频保活一律让位。
+        // 这是实时判断而非一次性开关，所以通话结束后它会自动恢复播放。
+        backgroundStandby.setAudioKeepAliveCallPredicate { [weak self] in
+            guard let self else { return true }
+            if self.audio.callTonePlaying { return true }
+            guard let call = self.activeCall else { return false }
+            return ["dialing", "alerting", "incoming", "waiting", "active"].contains(call.state)
+        }
     }
 
     func start() {
