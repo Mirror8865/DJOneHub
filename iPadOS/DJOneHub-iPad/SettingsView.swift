@@ -110,7 +110,6 @@ struct SettingsView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @AppStorage("djonehub.background-standby-enabled") private var backgroundStandbyEnabled = true
-    @AppStorage("djonehub.standby-location-enabled") private var standbyLocationEnabled = true
     @AppStorage("djonehub.low-power-mode-enabled") private var lowPowerModeEnabled = true
     @AppStorage("djonehub.live-activity-enabled") private var liveActivityEnabled = true
     @AppStorage("djonehub.sms-notifications-enabled") private var smsNotificationsEnabled = true
@@ -461,8 +460,8 @@ struct SettingsView: View {
     }
 
     /// 后台与保活：保活开关 + 通知开关，全部是系统设置式行。
-    /// 保活主通道是静音音频（不显示媒体控件、不影响其他音视频）；
-    /// 定位与后台任务只作为「进程被回收后重新拉起」的兜底通道。
+    /// 保活只用静音音频（不显示媒体控件、不影响其他音视频）；
+    /// 进程被系统回收后由后台刷新任务重新拉起。
     @ViewBuilder
     private var notificationSection: some View {
         Section {
@@ -472,37 +471,11 @@ struct SettingsView: View {
                 .onChange(of: backgroundStandbyEnabled) { enabled in
                     model.setBackgroundStandbyEnabled(enabled)
                 }
-            Toggle(L10n.t("定位兜底（状态栏无指示）"), isOn: $standbyLocationEnabled)
-                .tint(Color(uiColor: .systemGreen))
-                .onChange(of: standbyLocationEnabled) { enabled in
-                    model.setStandbyLocationEnabled(enabled)
-                }
-                .disabled(!backgroundStandbyEnabled)
             LabeledContent(L10n.t("保活状态"), value: model.backgroundStandby.statusText)
-            LabeledContent(L10n.t("兜底定位授权"), value: model.backgroundStandby.locationAuthorizationText)
-            // 只有「始终允许」能让系统不点亮状态栏定位图标；
-            // 不是就直接给一个去系统设置里改的入口。
-            if !model.backgroundStandby.hasAlwaysAuthorization {
-                Button {
-                    if let url = URL(string: UIApplication.openSettingsURLString) {
-                        UIApplication.shared.open(url)
-                    }
-                } label: {
-                    LabeledContent(L10n.t("打开系统设置"), value: L10n.t("改为“始终允许”"))
-                        .foregroundStyle(Color.primary)
-                }
-                .disabled(!backgroundStandbyEnabled)
-            }
-            LabeledContent(
-                L10n.t("被回收后恢复"),
-                value: model.backgroundStandby.supportsTerminatedRelaunch
-                    ? L10n.t("已启用系统级唤醒")
-                    : L10n.t("等待“始终允许”定位授权")
-            )
         } header: {
             Text(L10n.t("后台与保活"))
         } footer: {
-            Text("保活主通道是静音音频：App 在前台启动一段全零音频循环播放，锁屏或切到后台后系统因为它持续占用音频会话而不会挂起进程，来电与短信轮询照常运行、通知即时弹出。这段音频用可混音（mixWithOthers）会话播放，只叠加不抢占，不会打断其他视频与音乐；不提供任何媒体信息、不注册媒体控件，所以锁屏和控制中心不会出现播放卡片。通话期间它自动让位给系统 CallKit，通话结束立即恢复。定位（“始终允许”时状态栏不显示定位图标）与后台刷新任务只作为兜底：进程被系统回收时把 App 重新拉起、补发遗漏的来电与短信通知。“定位兜底”关闭只是把前台精度降到三公里级省电，后台兜底仍然有效。")
+            Text("保活只用静音音频：App 在前台启动一段全零音频循环播放，锁屏或切到后台后系统因为它持续占用音频会话而不会挂起进程，来电与短信轮询照常运行、通知即时弹出。这段音频用可混音（mixWithOthers）会话播放，只叠加不抢占，不会打断其他视频与音乐；不提供任何媒体信息、不注册媒体控件，所以锁屏和控制中心不会出现播放卡片。通话期间它自动让位给系统 CallKit，通话结束立即恢复。进程被系统回收后，由后台刷新任务把它重新拉起并补发遗漏的来电与短信通知。")
         }
         Section {
             Toggle("短信通知", isOn: $smsNotificationsEnabled)

@@ -44,10 +44,6 @@
 	<array>
 		<string>_djonehub._tcp</string>
 	</array>
-	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-	<string>开启“后台保活”后，App 以静音音频维持后台运行；定位仅作为 App 被系统回收后的兜底唤醒通道，用于在熄屏或切到后台时仍能收到模块转发的来电与短信通知。App 不记录、不上传任何位置数据。</string>
-	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>用于开启“后台保活”，作为 App 被系统回收后的兜底唤醒通道，以便在后台仍能接收到来电与短信通知。</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>用于通过已连接的 QDC507 模块进行双向语音通话，以及搜索框的语音输入。</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
@@ -60,8 +56,6 @@
 		<string>audio</string>
 		<!-- CallKit 来电上报需要 VoIP 后台能力；通话媒体仍由 audio 模式承载。 -->
 		<string>voip</string>
-		<!-- 兜底通道：进程被系统回收后靠定位 / 后台任务重新拉起。 -->
-		<string>location</string>
 		<!-- 进程被系统回收后，靠后台刷新任务重新拉起并补发通知。 -->
 		<string>fetch</string>
 		<string>processing</string>

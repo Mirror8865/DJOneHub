@@ -1,6 +1,5 @@
 import AVFoundation
 import BackgroundTasks
-import CoreLocation
 import Foundation
 import MediaPlayer
 import UIKit
@@ -135,118 +134,36 @@ final class DJOneHubNotificationDelegate: NSObject, UIApplicationDelegate, UNUse
     }
 }
 
-/// 保活控制器：用「始终允许」的后台定位更新让 iOS 在熄屏与后台继续调度本进程，
-/// 从而持续轮询模块的来电与短信。刻意不使用静音音频后台播放：
-/// 既不需要长期占用音频硬件，也不会与通话的 voiceChat 会话争抢输出节点。
+/// 保活控制器：只用「静音音频后台播放」把进程留在运行态。
 ///
-/// 定位精度降到公里级、只当作「进程存活心跳」使用：不读取坐标、不上传、不落盘，
-/// 借的是系统对定位类 App 的后台调度能力，而不是位置本身。
+/// 音频保活的做法：在**前台**启动一段全零音频循环播放，锁屏 / 切后台后系统因为
+/// App 仍持有音频会话而不挂起进程，来电与短信轮询照常运行、通知即时弹出。
+/// 这段音频用可混音（`.mixWithOthers`）会话播放，只叠加不抢占；不提供媒体信息、
+/// 不注册媒体控件，所以锁屏与控制中心不会出现播放卡片。
 ///
-/// 状态栏「定位服务」指示（Core Location 官方文档原文）：
-/// - `showsBackgroundLocationIndicator` **只对拿到「始终允许」的 App 生效**；
-///   本 App 全程设为 `false`，所以「始终允许」下状态栏干净。
-/// - 只拿到「使用期间」时，系统**强制**在后台使用定位时改变状态栏外观，
-///   App 无法关闭——这就是旧版本里「定位图标点亮」的真正原因。
-///
-/// 后台保活的依据（Core Location 官方文档 `allowsBackgroundLocationUpdates` 原文）：
-/// 「当该属性为 true、且**在前台**开始定位更新时，Core Location 会把系统配置成
-/// 持续保活本进程以接收后台定位更新」——这是让 iOS 不挂起本 App 的唯一办法。
-/// 推论同样重要：**一条更新都不能丢**（`distanceFilter` 必须不过滤、
-/// `pausesLocationUpdatesAutomatically` 必须为 false）。一旦系统停止投递，
-/// 进程随即被挂起、轮询停摆，表现就是「切后台 / 锁屏收不到通知，只有重新打开
-/// App 才补齐」。所以持续定位是保活的地基，任何情况下都不能被动关掉。
-///
-/// 保活主链路只用 `CLLocationManager` 的持续定位，这一套在 v37–v47 实测有效：
-/// `allowsBackgroundLocationUpdates` + 前台启动的 `startUpdatingLocation()` +
-/// `distanceFilter` 不过滤 + `pausesLocationUpdatesAutomatically = false`。
-/// 后来叠加的 `CLServiceSession` 与 `CLLocationUpdate.liveUpdates()` 已撤掉：
-/// 授权档位不匹配时它们会让系统停掉后台投递，把本来能跑的保活拖垮。
-/// `CLBackgroundActivitySession` 只保留给「使用期间」授权的回退路径——
-/// 那种授权下它的指示由系统强制显示，App 关不掉。
-/// 另有显著位置变化 / 访问事件 / 地理围栏 / 后台刷新任务四条唤醒通道兜底。
+/// 已整体移除定位保活：不再申请定位权限、不再创建 `CLLocationManager`、
+/// 不再登记显著位置变化 / 访问 / 围栏，Info.plist 里的定位用途串与后台 location
+/// 能力也已删除，状态栏不会出现任何定位指示。进程被系统回收后只由后台刷新任务
+/// （`StandbyBackgroundScheduler`）负责把它叫回来补发通知。
 @MainActor
-final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
-    private let manager = CLLocationManager()
+final class BackgroundStandbyController: NSObject {
     private var enabled = false
     private var appIsBackground = false
     private var suspendedForCall = false
-    private var heartbeatActive = false
     private var restartTask: Task<Void, Never>?
-    /// 显著位置变化监控是否已登记；它决定 App 被系统回收后还能不能被自动拉起。
-    private var significantChangeMonitoring = false
-    /// 名称访问监控（CLVisit）：系统在进程被回收后仍可因一次访问事件把它重新拉起。
-    private var monitoringVisits = false
-    /// 地理围栏监控：进出围栏同样能拉起已被系统回收的进程，作为第三条复活通道。
-    private var monitoredRegion: CLCircularRegion?
-    /// 「使用期间」授权下的回退会话（iOS 17+）。
-    /// 它自带系统指示（状态栏常驻的定位 / 导航样式图标），App 关不掉；
-    /// 只有拿不到「始终允许」时才启用，因为那种授权档位下没有它系统不投递后台定位。
-    private var backgroundActivitySession: Any?
-    /// 最近一次收到定位回调的时刻。定位回调本身就是进程存活心跳，
-    /// 看门狗据此判断投递链路是否还活着（见 `watchdogTick()`）。
-    private var lastDeliveryAt = Date.distantPast
     /// 保活看门狗任务（见 `startWatchdog()`）。
     private var watchdogTask: Task<Void, Never>?
-    /// 后台唤醒去重时间戳：定位回调很密集，避免每一次回调都重建轮询。
-    private var lastBackgroundWake = Date.distantPast
-    /// 精度档位（设置页的「定位保活」开关）：**两档都持续投递定位**，
-    /// 只切换精度——开启 = 公里级（基站 / Wi-Fi，默认），关闭 = 三公里级（更省电）。
-    ///
-    /// 它以前是「总开关」：关掉后完全不做持续定位，于是进程一进后台就被系统挂起、
-    /// 轮询停摆——正是「保活失效、只有打开 App 才收到通知」的原因。
-    /// 持续定位是保活的地基，不能再被任何开关关掉，所以降级成精度档位。
-    private var locationHeartbeatEnabled = true
-    /// 静音音频保活：把一段全零音频循环播放，用系统 audio 后台能力把进程留在运行态。
-    /// 它是「进程持续存活」的主通道；定位与后台任务只负责「被回收后重新拉起」。
+
+    /// 静音音频是唯一的保活通道：它负责「进程持续存活」；
+    /// 后台刷新任务负责「被回收后重新拉起」。
     private let audioKeepAlive = StandbyAudioKeepAlive()
-
-    /// 是否授予了「始终允许」；只有它才能让定位更新在后台持续投递。
-    var hasAlwaysAuthorization: Bool {
-        manager.authorizationStatus == .authorizedAlways
-    }
-
-    /// 设置页展示用的定位授权文案。
-    ///
-    /// 「使用期间」下系统会**强制**显示状态栏定位图标且 App 关不掉，
-    /// 所以这里把差异直接写在文案里，引导用户改成「始终允许」。
-    var locationAuthorizationText: String {
-        switch manager.authorizationStatus {
-        case .authorizedAlways: return "始终允许"
-        case .authorizedWhenInUse: return "使用期间（状态栏会被强制显示定位图标）"
-        case .denied, .restricted: return "已拒绝"
-        default: return "未授权"
-        }
-    }
-
-    /// 显著位置变化监控是否已生效：生效后即使用户杀掉后台，系统仍可能在位置显著变化时重新拉起 App。
-    var supportsTerminatedRelaunch: Bool {
-        hasAlwaysAuthorization && (significantChangeMonitoring || monitoringVisits || monitoredRegion != nil)
-    }
 
     /// 保活是否真正在运行，设置页用它给出可读状态，避免用户以为开关无效。
     var statusText: String {
         guard enabled else { return "已关闭" }
         if suspendedForCall { return "通话中已暂停" }
-        // 主通道：静音音频是否真的在播。它断了就等于进程随时会被系统挂起。
+        // 唯一的保活通道：静音音频是否真的在播。它断了就等于进程随时会被系统挂起。
         let audio = audioKeepAlive.isPlaying ? "静音音频保活运行中" : "静音音频未在播放"
-        // 兜底通道：定位与后台唤醒。被系统回收后只有它们能把进程叫回来。
-        let fallback: String
-        switch manager.authorizationStatus {
-        case .authorizedAlways:
-            let age = max(0, Int(Date().timeIntervalSince(lastDeliveryAt)))
-            let beat = lastDeliveryAt == Date.distantPast ? "等待首次定位心跳" : "定位心跳 \(age) 秒前"
-            fallback = heartbeatActive ? "定位兜底已就绪（\(beat)）" : "定位兜底正在启动"
-        case .authorizedWhenInUse:
-            fallback = heartbeatActive
-                ? "定位仅“使用期间”，状态栏会被系统强制显示图标，建议改为“始终允许”"
-                : "请在“设置 › 隐私与安全性 › 定位”里改为“始终允许”"
-        case .notDetermined:
-            fallback = "等待定位授权（兜底通道）"
-        case .denied, .restricted:
-            fallback = "定位权限被拒绝，被回收后无法自动拉起"
-        @unknown default:
-            fallback = "定位状态未知"
-        }
         let wakeCount = UserDefaults.standard.integer(forKey: "djonehub.standby.wake-count")
         let wakeAge: String
         if let lastWake = UserDefaults.standard.object(
@@ -268,75 +185,21 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
         } else {
             sweep = ""
         }
-        return "\(audio) · \(fallback) · 后台唤醒 \(wakeCount) 次（\(wakeAge)）\(sweep)"
-    }
-
-    override init() {
-        super.init()
-        manager.delegate = self
-        // 公里级精度：走基站 / Wi-Fi 定位，基本不点亮 GPS，这是省电的那一半。
-        // 但距离过滤**必须是「不过滤」**：iPad 常放在桌上不动，任何大于 0 的过滤
-        // 都会让系统停止投递定位更新，进程随即被挂起、轮询停止——
-        // 表现就是「切后台 / 锁屏后收不到短信与来电通知，只有重新打开 App 才补齐」。
-        // 省电只能靠降精度，绝不能靠丢更新；丢更新等于丢保活。
-        manager.desiredAccuracy = kCLLocationAccuracyKilometer
-        manager.distanceFilter = kCLDistanceFilterNone
-        manager.pausesLocationUpdatesAutomatically = false
-        manager.activityType = .other
-        // 只有 Info.plist 声明了 location 后台能力，系统才允许后台持续投递定位更新。
-        // 缺失时直接开启会抛异常，因此这里按实际声明决定，保证 App 永不因保活崩溃。
-        let backgroundModes = Bundle.main.object(forInfoDictionaryKey: "UIBackgroundModes") as? [String]
-        manager.allowsBackgroundLocationUpdates = backgroundModes?.contains("location") ?? false
-        // 官方文档：该属性只对「始终允许」的 App 生效，是系统用来决定
-        // 「App 在后台使用定位时要不要改变状态栏外观」的唯一开关；
-        // 设为 false 即「始终允许」下状态栏不出现后台定位指示。
-        // 「使用期间」授权时由系统强制改变状态栏外观，App 关不掉。
-        manager.showsBackgroundLocationIndicator = false
-    }
-
-    /// 「定位保活」档位：只切换精度，**不会**关掉持续定位（见 `locationHeartbeatEnabled`）。
-    func setLocationHeartbeatEnabled(_ enabled: Bool) {
-        locationHeartbeatEnabled = enabled
-        applyAccuracy()
-        startIfAuthorized()
-    }
-
-    /// 精度档位：**后台永远是公里级**——保活只发生在后台，任何省电档位都不能把
-    /// 投递链路饿死（三公里级在静止时几乎不再产生回调，进程随即被系统挂起，
-    /// 这就是「切后台 / 锁屏收不到通知」的一种成因）。
-    /// 只有前台允许按设置降档：关闭「定位保活」= 前台用三公里级省电。
-    /// 距离过滤保持「不过滤」、`pausesLocationUpdatesAutomatically` 保持 false，
-    /// 保证原地不动也持续有回调可当心跳。
-    private func applyAccuracy() {
-        let relaxInForeground = !appIsBackground && !locationHeartbeatEnabled
-        manager.desiredAccuracy = relaxInForeground
-            ? kCLLocationAccuracyThreeKilometers
-            : kCLLocationAccuracyKilometer
+        return "\(audio) · 后台唤醒 \(wakeCount) 次（\(wakeAge)）\(sweep)"
     }
 
     func setEnabled(_ enabled: Bool) {
         self.enabled = enabled
         if enabled {
-            // 权限弹窗必须在前台出现，用户才能看到并授权；随后由进入后台触发心跳。
-            requestAuthorizationIfNeeded()
-            // 三条「被回收后仍能拉起进程」的通道全部登记：显著位置变化、访问事件、地理围栏。
-            startSignificantChangeMonitoring()
-            startVisitMonitoring()
-            startRegionMonitoring()
-            startIfAuthorized()
             startWatchdog()
-            // 音频保活是「进程持续存活」的主通道：在**前台**就把会话建立好，
+            // 音频保活是唯一的保活通道：在**前台**就把会话建立好，
             // 等切后台时它已经在播，不靠后台重新协商（后台起播更容易失败）。
             audioKeepAlive.start()
         } else {
             restartTask?.cancel()
             restartTask = nil
             stopWatchdog()
-            stopHeartbeat()
             audioKeepAlive.stop()
-            stopSignificantChangeMonitoring()
-            stopVisitMonitoring()
-            stopRegionMonitoring()
         }
     }
 
@@ -344,36 +207,21 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
         appIsBackground = isBackground
         restartTask?.cancel()
         restartTask = nil
-        applyAccuracy()
-        // 进入后台**不**动定位：官方文档说明「在前台开始定位更新」时 Core Location
-        // 才会把系统配置成持续保活本进程；已经在跑就让它继续跑，绝不从后台重新
-        // 协商（后台重建投递链路经常协商不上，这正是 v44 之后保活后退的根因）。
-        // 回到前台则相反：主动 stop + start 重新登记一次，把一份「在前台开始」的
-        // 干净定位请求交给系统（前台操作安全，后台绝不做）。
-        if !isBackground, !suspendedForCall, enabled {
-            heartbeatActive = false
-            manager.stopUpdatingLocation()
-        }
-        // 前后台切换都补一次静音音频：断了就重建，没断就是幂等空操作。
-        if enabled, !suspendedForCall {
-            audioKeepAlive.refresh()
-        }
-        startIfAuthorized()
+        guard enabled, !suspendedForCall else { return }
+        // 进出前后台都刷新一次：后台起播失败时由看门狗与重启任务兜底。
+        audioKeepAlive.refresh()
     }
 
-    /// 回到前台、被系统中断或通话结束后重新确认定位心跳仍在运行。
+    /// 回到前台、被系统中断或通话结束后重新确认静音音频仍在播放。
     func ensureRunning() {
         guard enabled, !suspendedForCall else { return }
-        // 静音音频是持续存活的主通道，和定位心跳一起恢复。
         audioKeepAlive.resume()
-        startIfAuthorized()
     }
 
-    /// 通话期间整条保活链路让位：静音音频把会话完整交给 CallKit，定位心跳停掉省电。
+    /// 通话期间整条保活链路让位：静音音频把会话完整交给 CallKit。
     func suspendForCall() {
         suspendedForCall = true
         audioKeepAlive.suspend()
-        stopHeartbeat()
     }
 
     func resumeAfterCall() {
@@ -393,190 +241,8 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
         audioKeepAlive.isCallActive = predicate
     }
 
-    private func startIfAuthorized() {
-        guard enabled, !suspendedForCall else { return }
-        switch manager.authorizationStatus {
-        case .authorizedAlways, .authorizedWhenInUse:
-            guard !heartbeatActive else {
-                // Already running: calling startUpdatingLocation() again is idempotent
-                // and re-confirms this background request to the system, which is what
-                // is needed after the process was relaunched or the old request dropped.
-                manager.startUpdatingLocation()
-                return
-            }
-            heartbeatActive = true
-            applyAccuracy()
-            // 「使用期间」授权必须由 App 在前台创建后台活动会话：官方文档说它是
-            // when-in-use App 在后台继续收到更新的通道；「始终允许」不需要它，
-            // 创建了只会点亮状态栏定位指示（而且 App 关不掉）。
-            startWhenInUseBackgroundSessionIfNeeded()
-            lastDeliveryAt = Date()
-            manager.startUpdatingLocation()
-        case .notDetermined:
-            requestAuthorizationIfNeeded()
-        case .denied, .restricted:
-            heartbeatActive = false
-        @unknown default:
-            heartbeatActive = false
-        }
-    }
-
-    /// 首次接入页展示用的定位授权状态；不触发系统弹窗。
-    /// 只拿到「使用期间」时仍算未完成，因为保活必须是「始终允许」。
-    var locationPermissionState: PermissionState {
-        switch manager.authorizationStatus {
-        case .authorizedAlways:
-            return .granted
-        case .denied, .restricted:
-            return .denied
-        default:
-            return .notDetermined
-        }
-    }
-
-    /// 首次接入页的「始终允许」按钮：再申请一次；已拒绝时系统不会再弹窗。
-    func requestAlwaysAuthorization() {
-        manager.requestAlwaysAuthorization()
-    }
-
-    /// 只有「始终允许」才能让定位更新穿透到后台；权限不足时补一次系统申请。
-    private func requestAuthorizationIfNeeded() {
-        let status = manager.authorizationStatus
-        guard status == .notDetermined || status == .authorizedWhenInUse else { return }
-        manager.requestAlwaysAuthorization()
-    }
-
-    /// 只拿到「使用期间」时再补一次「始终允许」申请。
-    ///
-    /// 系统只允许在前台弹这层升级面板，所以每次回到前台都补申请一次；
-    /// 升到「始终允许」后，后台唤醒通道与持续定位都能生效，进程最不容易被回收。
-    func requestAlwaysUpgradeIfNeeded() {
-        guard enabled else { return }
-        if manager.authorizationStatus == .authorizedWhenInUse {
-            manager.requestAlwaysAuthorization()
-        }
-    }
-
-    private func stopHeartbeat() {
-        heartbeatActive = false
-        manager.stopUpdatingLocation()
-        stopBackgroundSessions()
-    }
-
-    /// 「使用期间」授权下的回退：`CLBackgroundActivitySession` 是官方文档里
-    /// 给 when-in-use App 的后台投递途径（它自带一个系统指示，关不掉）。
-    /// 「始终允许」时不需要它——那种授权靠 `allowsBackgroundLocationUpdates`
-    /// 就已经被系统持续保活，而且状态栏干净。
-    private func startWhenInUseBackgroundSessionIfNeeded() {
-        guard manager.authorizationStatus == .authorizedWhenInUse else {
-            stopBackgroundActivitySession()
-            return
-        }
-        // `CLBackgroundActivitySession` 是 iOS 17 才有的类型，而本 App 最低支持 16.1，
-        // 所以必须做可用性检查；16.x 上没有它，只能靠显著位置变化 / 访问 / 围栏兜底。
-        if #available(iOS 17.0, *) {
-            startBackgroundActivitySessionIfNeeded()
-        }
-    }
-
-    @available(iOS 17.0, *)
-    private func startBackgroundActivitySessionIfNeeded() {
-        guard backgroundActivitySession == nil else { return }
-        backgroundActivitySession = CLBackgroundActivitySession()
-    }
-
-    private func stopBackgroundActivitySession() {
-        if #available(iOS 17.0, *) {
-            (backgroundActivitySession as? CLBackgroundActivitySession)?.invalidate()
-        }
-        backgroundActivitySession = nil
-    }
-
-    private func stopBackgroundSessions() {
-        stopBackgroundActivitySession()
-    }
-
-    /// 显著位置变化监控：这是系统允许的「进程被回收后仍能被拉起」通道。
-    /// 只要登记着，iOS 就会在基站 / Wi-Fi 发生显著切换时把 App 重新启动到后台，
-    /// 即使它此前已经被系统回收；耗电远低于持续开启高精度定位。
-    private func startSignificantChangeMonitoring() {
-        guard !significantChangeMonitoring else { return }
-        significantChangeMonitoring = true
-        manager.startMonitoringSignificantLocationChanges()
-    }
-
-    private func stopSignificantChangeMonitoring() {
-        guard significantChangeMonitoring else { return }
-        significantChangeMonitoring = false
-        manager.stopMonitoringSignificantLocationChanges()
-    }
-
-    /// 访问监控：用户到访一处地点后系统会把进程叫醒（即使它此前已被回收）。
-    private func startVisitMonitoring() {
-        guard !monitoringVisits else { return }
-        monitoringVisits = true
-        manager.startMonitoringVisits()
-    }
-
-    private func stopVisitMonitoring() {
-        guard monitoringVisits else { return }
-        monitoringVisits = false
-        manager.stopMonitoringVisits()
-    }
-
-    /// 地理围栏：在当前坐标附近登记一个 200m 围栏，进出事件都是系统级的复活机会。
-    /// 定位权限不足时 startMonitoring 不生效，等授权回调或下一次心跳再补登记。
-    private func startRegionMonitoring() {
-        guard monitoredRegion == nil else { return }
-        guard let location = manager.location else { return }
-        let region = CLCircularRegion(
-            center: location.coordinate,
-            radius: 200,
-            identifier: "djonehub.standby.region"
-        )
-        region.notifyOnEntry = true
-        region.notifyOnExit = true
-        monitoredRegion = region
-        manager.startMonitoring(for: region)
-    }
-
-    private func stopRegionMonitoring() {
-        guard let region = monitoredRegion else { return }
-        monitoredRegion = nil
-        manager.stopMonitoring(for: region)
-    }
-
-    /// 心跳把进程带到新位置后，围栏要跟着挪，否则一直等不到进出事件。
-    private func refreshRegionIfNeeded() {
-        guard enabled, hasAlwaysAuthorization else { return }
-        guard let region = monitoredRegion, let location = manager.location else {
-            startRegionMonitoring()
-            return
-        }
-        let center = CLLocation(latitude: region.center.latitude, longitude: region.center.longitude)
-        guard location.distance(from: center) > 100 else { return }
-        manager.stopMonitoring(for: region)
-        monitoredRegion = nil
-        startRegionMonitoring()
-    }
-
-    /// 围栏 / 访问事件统一走后台复活路径。
-    private func handleTerminatedRelaunchEvent() {
-        // 进程刚被系统拉起，定位更新还没恢复：
-        // 这里必须真的去 startUpdatingLocation，不能只把标志位写真——
-        // 否则 startIfAuthorized() 会被它自己的 guard 挡住，心跳再也点不亮。
-        startIfAuthorized()
-        refreshRegionIfNeeded()
-        guard UIApplication.shared.applicationState != .active else { return }
-        appIsBackground = true
-        dispatchBackgroundWake()
-    }
-
-    /// 后台被系统唤醒（定位事件 / 后台刷新任务）时，把 AppModel 拉回「正在轮询」的状态。
-    /// 去重是为了让密集的定位回调不至于反复重启轮询任务。
-    /// 保活看门狗：每 30 秒确认一次投递链路是不是还活着。
-    /// 定位回调本身就是心跳，所以「太久没有任何回调」等价于「保活已经断了」，
-    /// 此时立刻重建一次投递链路（stop + start 幂等，误判的代价只是一次重启）。
+    /// 保活看门狗：每 30 秒确认一次静音音频是不是还在播。
+    /// 音频断了就等于进程随时会被系统挂起，此时立刻重建播放。
     private func startWatchdog() {
         guard watchdogTask == nil else { return }
         watchdogTask = Task { @MainActor [weak self] in
@@ -595,47 +261,9 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
 
     private func watchdogTick() {
         guard enabled, !suspendedForCall else { return }
-        switch manager.authorizationStatus {
-        case .authorizedAlways, .authorizedWhenInUse:
-            break
-        default:
-            return
-        }
-        guard heartbeatActive else {
-            startIfAuthorized()
-            return
-        }
-        // 5 分钟没有任何定位回调：**只补一次 startUpdatingLocation()**，绝不 stop + start。
-        // 从后台重新协商定位会话会被系统延迟投递甚至直接拒绝，那正是「切后台 /
-        // 锁屏收不到通知」的老根因；而重复 start 是幂等的，只会让请求更稳。
-        // Reminders must not hang off the location stream alone. While the device sits
-        // still the delivery of location updates thins out, and a stream that went quiet
-        // for a few minutes left the chat and call reminders pending until the app was
-        // opened again. The watchdog therefore drives a sweep on its own; it shares the
-        // 15 second dedup with the location callbacks (see `dispatchBackgroundWake`).
-        if appIsBackground {
-            dispatchBackgroundWake()
-        }
-        guard Date().timeIntervalSince(lastDeliveryAt) > 300 else { return }
-        manager.startUpdatingLocation()
-    }
-
-    private func dispatchBackgroundWake() {
-        guard enabled, !suspendedForCall else { return }
-        // 去重窗口压到 15 秒：唤醒本身会立刻补一轮通知扫描，
-        // 窗口越长，来电 / 短信从「模块已收到」到「锁屏弹提醒」的延迟就越大。
-        guard Date().timeIntervalSince(lastBackgroundWake) > 15 else { return }
-        lastBackgroundWake = Date()
-        // 后台唤醒次数与最近一次时间落盘：设置页把它显示出来，
-        // 一眼就能区分「进程没被唤醒」（保活断了）与「唤醒了但取不到数据」（模块链路断了）。
-        UserDefaults.standard.set(lastBackgroundWake, forKey: "djonehub.standby.last-wake")
-        UserDefaults.standard.set(
-            UserDefaults.standard.integer(forKey: "djonehub.standby.wake-count") + 1,
-            forKey: "djonehub.standby.wake-count"
-        )
-        Task { @MainActor in
-            await AppModel.shared?.resumeForBackgroundWake()
-        }
+        guard !audioKeepAlive.isPlaying else { return }
+        audioKeepAlive.refresh()
+        scheduleRestart()
     }
 
     private func scheduleRestart() {
@@ -644,91 +272,7 @@ final class BackgroundStandbyController: NSObject, CLLocationManagerDelegate {
             try? await Task.sleep(for: .seconds(3))
             guard !Task.isCancelled else { return }
             self?.restartTask = nil
-            self?.startIfAuthorized()
-        }
-    }
-
-    nonisolated func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            switch self.manager.authorizationStatus {
-            case .authorizedAlways:
-                self.heartbeatActive = false
-                // 拿到「始终允许」后才补登记访问 / 围栏监控（这两者都要求 always 授权）。
-                self.startVisitMonitoring()
-                self.startRegionMonitoring()
-                self.startIfAuthorized()
-            case .authorizedWhenInUse:
-                // 用户刚选「使用期间」：立刻把心跳跑起来，
-                // 并补上后台活动会话，先保证后台能推通知。
-                self.heartbeatActive = false
-                self.startIfAuthorized()
-            case .denied, .restricted:
-                self.heartbeatActive = false
-                self.stopBackgroundSessions()
-            default:
-                break
-            }
-        }
-    }
-
-    /// 回调本身就是心跳；不读取坐标、不落盘、不上传任何位置数据。
-    /// App 被系统回收后再被定位事件拉起时，这里负责把它从空壳恢复成持续轮询的状态。
-    nonisolated func locationManager(
-        _ manager: CLLocationManager,
-        didUpdateLocations locations: [CLLocation]
-    ) {
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            self.heartbeatActive = true
-            // 回调时间就是心跳时间：看门狗据此判断投递链路是否还活着。
-            self.lastDeliveryAt = Date()
-            // 前台也会收到显著位置变化回调，只有确认不在前台时才按「后台复活」处理。
-            self.refreshRegionIfNeeded()
-            guard UIApplication.shared.applicationState != .active else { return }
-            self.appIsBackground = true
-            // 后台回调的时间单独落盘：它是「后台保活到底有没有在跑」的凭据，
-            // 回到前台后设置页的「保活状态」里会显示「后台心跳 N 分钟前」。
-            UserDefaults.standard.set(
-                self.lastDeliveryAt,
-                forKey: "djonehub.standby.last-background-beat"
-            )
-            self.applyAccuracy()
-            self.dispatchBackgroundWake()
-        }
-    }
-
-    /// 访问事件：进程被回收后系统因一次到访把它叫醒。
-    nonisolated func locationManager(_ manager: CLLocationManager, didVisit visit: CLVisit) {
-        Task { @MainActor [weak self] in
-            self?.handleTerminatedRelaunchEvent()
-        }
-    }
-
-    /// 进入围栏：第三条复活通道。
-    nonisolated func locationManager(_ manager: CLLocationManager, didEnterRegion region: CLRegion) {
-        Task { @MainActor [weak self] in
-            self?.handleTerminatedRelaunchEvent()
-        }
-    }
-
-    /// 离开围栏：顺手把围栏挪到新位置，保持后续还有事件可等。
-    nonisolated func locationManager(_ manager: CLLocationManager, didExitRegion region: CLRegion) {
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            if let monitored = self.monitoredRegion, monitored.identifier == region.identifier {
-                self.manager.stopMonitoring(for: monitored)
-                self.monitoredRegion = nil
-            }
-            self.handleTerminatedRelaunchEvent()
-        }
-    }
-
-    nonisolated func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            self.heartbeatActive = false
-            self.scheduleRestart()
+            self?.audioKeepAlive.refresh()
         }
     }
 }
@@ -897,8 +441,8 @@ final class IncomingCallNotifier {
 
 /// 静音音频保活：把一段全零音频循环播放，用系统 audio 后台能力把进程留在运行态。
 ///
-/// 它解决的是「进程持续存活」；定位与后台任务解决的是「被回收后重新拉起」：
-/// 音频挡得住系统在后台挂起进程，但用户手动划掉 App 时救不回来；定位/后台任务
+/// 它解决的是「进程持续存活」；后台刷新任务解决的是「被回收后重新拉起」：
+/// 音频挡得住系统在后台挂起进程，但用户手动划掉 App 时救不回来；后台任务
 /// 救得回被回收的进程，却挡不住挂起。两条腿一起走，锁屏期间的短信与来电提醒才稳。
 ///
 /// 三个必须守住的边界：
@@ -1103,7 +647,7 @@ private enum StandbyAudioError: Error {
 }
 
 /// 后台刷新任务：App 被系统回收后，系统仍会按自己的节奏把进程唤醒一次。
-/// 静音音频负责「持续活着」，定位与这个任务负责「被回收后还能被叫醒」，三者互补。
+/// 静音音频负责「持续活着」，这个任务负责「被回收后还能被叫醒」，两者互补。
 enum StandbyBackgroundScheduler {
     static let refreshTaskIdentifier = "com.djonehub.standby.refresh"
     /// 后台处理任务给的时间窗比 App 刷新长得多，用来把被回收后的补发做完整。
@@ -1174,6 +718,14 @@ enum StandbyBackgroundScheduler {
     private static func handle(_ task: BGTask) {
         // 先排下一次，保证本次即使被中断也不会丢掉后续唤醒机会。
         schedule()
+        // 唤醒次数与最近一次时间落盘：设置页把它显示出来，一眼就能区分
+        // 「进程没被唤醒」与「唤醒了但取不到数据」（模块链路断了）。
+        let defaults = UserDefaults.standard
+        defaults.set(Date(), forKey: "djonehub.standby.last-wake")
+        defaults.set(
+            defaults.integer(forKey: "djonehub.standby.wake-count") + 1,
+            forKey: "djonehub.standby.wake-count"
+        )
         let work = Task { @MainActor in
             await AppModel.shared?.resumeForBackgroundWake()
         }

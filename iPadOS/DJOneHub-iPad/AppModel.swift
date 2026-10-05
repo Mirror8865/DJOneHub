@@ -57,7 +57,6 @@ enum PermissionState: Equatable {
 /// 首次接入引导页列出的系统权限。
 enum AppPermission: String, CaseIterable, Identifiable {
     case microphone
-    case locationAlways
     case notifications
     case localNetwork
     case contacts
@@ -67,7 +66,6 @@ enum AppPermission: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .microphone: return L10n.t("麦克风")
-        case .locationAlways: return L10n.t("始终允许定位")
         case .notifications: return L10n.t("通知")
         case .localNetwork: return L10n.t("本地网络与设备")
         case .contacts: return L10n.t("通讯录")
@@ -78,8 +76,6 @@ enum AppPermission: String, CaseIterable, Identifiable {
         switch self {
         case .microphone:
             return L10n.t("通话语音需要麦克风")
-        case .locationAlways:
-            return L10n.t("保活与后台唤醒需要「始终允许」")
         case .notifications:
             return L10n.t("接收来电与短信提醒")
         case .localNetwork:
@@ -92,7 +88,6 @@ enum AppPermission: String, CaseIterable, Identifiable {
     var systemImage: String {
         switch self {
         case .microphone: return "mic.fill"
-        case .locationAlways: return "location.fill"
         case .notifications: return "bell.badge.fill"
         case .localNetwork: return "wifi.router.fill"
         case .contacts: return "person.crop.circle.fill"
@@ -152,7 +147,7 @@ final class AppModel: ObservableObject {
 
     /// 保活唤醒期间借用的执行时间租约（见 BackgroundExecutionLease）。
     private let backgroundWakeLease = BackgroundExecutionLease()
-    /// 系统可能在 SwiftUI 场景之外把 App 拉起（定位事件 / 后台任务），
+    /// 系统可能在 SwiftUI 场景之外把 App 拉起（后台任务），
     /// 需要一条静态引用让 AppDelegate 与保活控制器找回主状态中心。
     /// App 全程只有一个 AppModel（在 App.init 里创建），因此这里持有强引用不会造成泄漏，
     /// 反而能保证保活控制器不会因为主状态中心被释放而失联。
@@ -195,8 +190,6 @@ final class AppModel: ObservableObject {
         return info.version
     }()
     private let backgroundStandbyKey = "djonehub.background-standby-enabled"
-    /// 「定位持续保活」：关掉后状态栏不再常驻定位指示，只保留系统唤醒通道。
-    private let standbyLocationKey = "djonehub.standby-location-enabled"
     private let lowPowerModeKey = "djonehub.low-power-mode-enabled"
     private let liveActivityKey = "djonehub.live-activity-enabled"
     private let smsNotificationKey = "djonehub.sms-notifications-enabled"
@@ -282,9 +275,6 @@ final class AppModel: ObservableObject {
         lowPowerModeEnabled = storedLowPowerValue ?? true
         liveActivity.setEnabled(storedLiveActivityValue ?? true)
         backgroundStandby.setEnabled(storedValue ?? true)
-        backgroundStandby.setLocationHeartbeatEnabled(
-            UserDefaults.standard.object(forKey: standbyLocationKey) as? Bool ?? true
-        )
         // 先加载手机副本，再启动轮询，避免模块暂时离线时界面显示为空。
         restoreLocalHistory()
         captureSMSSnapshot()
@@ -300,9 +290,6 @@ final class AppModel: ObservableObject {
         Task { await NetworkDiagnosticRecorder.shared.recordLifecycle("active") }
         consecutivePollFailures = 0
         backgroundStandby.setApplicationIsBackground(false)
-        // 只拿到「使用期间」时，每次回到前台都补一次「始终允许」升级申请：
-        // 系统只允许在前台弹这层面板，错过一次就要等下一次进前台。
-        backgroundStandby.requestAlwaysUpgradeIfNeeded()
         guard hasStarted else {
             start()
             return
@@ -405,7 +392,6 @@ final class AppModel: ObservableObject {
     func refreshPermissionStates() async {
         var states: [AppPermission: PermissionState] = [:]
         states[.microphone] = audio.microphonePermissionState
-        states[.locationAlways] = backgroundStandby.locationPermissionState
         states[.contacts] = contacts.permissionState
         let settings = await UNUserNotificationCenter.current().notificationSettings()
         switch settings.authorizationStatus {
@@ -428,10 +414,6 @@ final class AppModel: ObservableObject {
         switch permission {
         case .microphone:
             _ = await audio.requestMicrophonePermission()
-        case .locationAlways:
-            backgroundStandby.requestAlwaysAuthorization()
-            // 授权面板是异步的，等一小会儿再回读状态。
-            try? await Task.sleep(for: .milliseconds(800))
         case .notifications:
             IncomingCallNotification.registerCategory()
             _ = try? await UNUserNotificationCenter.current()
@@ -449,9 +431,9 @@ final class AppModel: ObservableObject {
     /// 已授权的跳过；被永久拒绝的系统不会再弹窗，引导页会引导去系统设置。
     ///
     /// 系统同一时刻只允许在窗口上呈现一个授权面板。麦克风 / 通知的申请会一直
-    /// 挂起到用户做出选择，但定位（`requestAlwaysAuthorization`）与本地网络
-    /// （Bonjour 探测）是「发起即返回」，只等几百毫秒就轮到下一项——上一层面板
-    /// 还开着时提出的申请会被系统直接丢弃，连面板都不弹。通讯录排在列表最后，
+    /// 挂起到用户做出选择，但本地网络（Bonjour 探测）是「发起即返回」，只等
+    /// 几百毫秒就轮到下一项——上一层面板还开着时提出的申请会被系统直接丢弃，
+    /// 连面板都不弹。通讯录排在列表最后，
     /// 正是「首次进入时联系人权限不会自动弹出、必须手动去授权」的原因。
     func requestAllMissingPermissions() async {
         for permission in AppPermission.allCases where permissionState(for: permission) == .notDetermined {
@@ -465,10 +447,10 @@ final class AppModel: ObservableObject {
     /// 等到上一条系统面板收起再申请下一项，避免申请被系统丢弃。
     ///
     /// 状态可查询的权限（麦克风 / 通知 / 通讯录）等到状态不再是「未决定」为止；
-    /// 定位在「使用期间」授权下状态一直是未决定、本地网络根本没有公开的查询 API，
-    /// 这两项只能等一段固定时长，再留一点余量让系统把窗口让出来。
+    /// 本地网络根本没有公开的查询 API，只能等一段固定时长，再留一点余量让系统
+    /// 把窗口让出来。
     private func waitUntilPreviousPromptClears(_ permission: AppPermission) async {
-        let isQueryable = permission != .localNetwork && permission != .locationAlways
+        let isQueryable = permission != .localNetwork
         for _ in 0..<(isQueryable ? 40 : 8) {
             if isQueryable {
                 await refreshPermissionStates()
@@ -481,7 +463,7 @@ final class AppModel: ObservableObject {
 
     /// 确保通讯录授权面板被真正弹出来。
     ///
-    /// 启动时的系统面板（麦克风 / 定位 / 通知）都不会带上通讯录，以前只有引导页的
+    /// 启动时的系统面板（麦克风 / 通知）都不会带上通讯录，以前只有引导页的
     /// 「全部申请」按钮会申请它，所以首次进入 App 时联系人权限不会自动弹出，用户
     /// 必须手动去授权一次。首次接入流程现在直接调用这里补上这一项：申请后轮询到
     /// 用户真正做出选择为止；若面板被系统丢弃（上一层面板还没收起），稍后重试，
@@ -527,7 +509,7 @@ final class AppModel: ObservableObject {
             // 只在**确实取数失败过**的时候丢掉缓存的 USB 网卡对象。后台里
             // NWPathMonitor 不一定来得及送出新的路径，一旦把已经解析好的接口丢掉，
             // 后续请求会一直落在「按接口类型」的兜底路径上，后台取数全部落空——
-            // 表现就是「进程活着、定位心跳在走，但通知一直不弹」。
+            // 表现就是「进程活着，但通知一直不弹」。
             // 定时无条件重建（旧行为）正是把后台保活拖垮的那一半。
             if hadFailures {
                 api.resetLocalConnectionState()
@@ -612,13 +594,6 @@ final class AppModel: ObservableObject {
     func setBackgroundStandbyEnabled(_ enabled: Bool) {
         UserDefaults.standard.set(enabled, forKey: backgroundStandbyKey)
         backgroundStandby.setEnabled(enabled)
-    }
-
-    /// 切换「定位持续保活」。关闭后不再持续定位（状态栏没有常驻定位指示），
-    /// 只靠显著位置变化 / 访问 / 围栏 / 后台任务唤醒进程补发通知，及时性会下降。
-    func setStandbyLocationEnabled(_ enabled: Bool) {
-        UserDefaults.standard.set(enabled, forKey: standbyLocationKey)
-        backgroundStandby.setLocationHeartbeatEnabled(enabled)
     }
 
     func setLowPowerModeEnabled(_ enabled: Bool) {
