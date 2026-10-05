@@ -2553,6 +2553,9 @@ struct ChatPane: View {
     @State private var draft = ""
     @State private var showingContactInfo = false
     @State private var showingMoreActions = false
+    /// 顶层标签页选中项：会话页嵌在分栏里，切回「信息」板块时不一定每次
+    /// 都能收到 `onAppear`，用这个共享键当作「重新可见」的确定性信号。
+    @AppStorage("djonehub.selected-tab") private var selectedTabRaw = PhoneTab.calls.rawValue
     /// 会话背景（iOS 26「信息」的会话背景）：气泡的液态玻璃会折射背景内容。
     @StateObject private var chatBackgrounds = ChatBackgroundStore.shared
 
@@ -2612,7 +2615,11 @@ struct ChatPane: View {
                     }
                 }
                 .scrollDismissesKeyboard(.interactively)
-                .onAppear { scrollToLast(proxy, animated: false) }
+                .onAppear { anchorToBottomAfterLayout(proxy) }
+                .onChange(of: selectedTabRaw) { value in
+                    guard value == PhoneTab.messages.rawValue else { return }
+                    anchorToBottomAfterLayout(proxy)
+                }
                 .onChange(of: messages.count) { _ in scrollToLast(proxy, animated: true) }
             }
 
@@ -2798,6 +2805,14 @@ struct ChatPane: View {
         } else {
             proxy.scrollTo(last.id, anchor: .bottom)
         }
+    }
+
+    /// 切到别的板块再切回来时，`onAppear` 会在新布局落定之前触发；此刻立刻
+    /// `scrollTo` 会按旧的安全区 / 内容尺寸算出一个偏低的位置并把它锁住，
+    /// 表现为整个会话（头像 + 名字 + 气泡）一起往下挪一点，直到用户再点 /
+    /// 滑一下才被纠正。推迟到下一轮主线程布局之后再贴底即可避开这段错位。
+    private func anchorToBottomAfterLayout(_ proxy: ScrollViewProxy) {
+        DispatchQueue.main.async { scrollToLast(proxy, animated: false) }
     }
 
     /// 时间分隔：与日期同款，居中显示在消息窗口正中间。

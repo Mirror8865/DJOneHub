@@ -23,6 +23,7 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
     case esim
     case debugAT
     case service
+    case about
 
     var id: String { rawValue }
 
@@ -38,6 +39,7 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
         case .esim: return "eSIM 与卡片"
         case .debugAT: return "AT 调试"
         case .service: return "服务控制"
+        case .about: return "关于"
         }
     }
 
@@ -53,6 +55,7 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
         case .esim: return "simcard"
         case .debugAT: return "terminal"
         case .service: return "gearshape.2"
+        case .about: return "info.circle"
         }
     }
 
@@ -69,6 +72,7 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
         case .esim: return .purple
         case .debugAT: return .indigo
         case .service: return .pink
+        case .about: return .gray
         }
     }
 }
@@ -91,7 +95,7 @@ private enum SettingsGroup: String, CaseIterable, Identifiable {
 
     var sections: [SettingsSection] {
         switch self {
-        case .djonehub: return [.appearance, .notification]
+        case .djonehub: return [.appearance, .notification, .about]
         case .module: return [.status, .connection, .voice, .network, .power, .esim]
         case .advanced: return [.debugAT, .service]
         }
@@ -214,6 +218,7 @@ struct SettingsView: View {
             statusSection
             appearanceSection
             notificationSection
+            aboutSection
             connectionSection
             voiceSection
             networkSection
@@ -345,6 +350,7 @@ struct SettingsView: View {
         case .esim: esimSection
         case .debugAT: atSection
         case .service: serviceSection
+        case .about: aboutSection
         }
     }
 
@@ -519,6 +525,56 @@ struct SettingsView: View {
             Text(L10n.t("通知"))
         } footer: {
             Text("App 在后台时，新短信与来电会像来电一样弹出系统通知；灵动岛关闭后结束实时活动，普通通知仍然保留。省电模式降低后台空闲时的检测频率。")
+        }
+    }
+
+    /// 关于：列出原项目作者与仓库地址，并明确标注本包是「Mirror」的二次修改（二改）。
+    /// 让使用者知道来源、避免与原作者混淆或冒名，也方便原作者追溯与联系。
+    @ViewBuilder
+    private var aboutSection: some View {
+        Section {
+            LabeledContent(L10n.t("应用名称"), value: "DJOneHub")
+            LabeledContent("App 版本", value: appVersionText)
+        } header: {
+            Text(L10n.t("关于"))
+        }
+
+        Section {
+            LabeledContent(L10n.t("原作者"), value: "wzz04810-debug")
+            Link(destination: URL(string: "https://github.com/wzz04810-debug/DJOneHub")!) {
+                aboutLinkRow(title: L10n.t("原项目地址"), value: "github.com/wzz04810-debug/DJOneHub")
+            }
+        } header: {
+            Text(L10n.t("原始项目"))
+        } footer: {
+            Text(L10n.t("本项目与源码版权归原作者所有，本 App 仅在其基础上二次修改，不主张任何原创权利。"))
+        }
+
+        Section {
+            LabeledContent(L10n.t("二改作者"), value: "Mirror")
+            Link(destination: URL(string: "https://github.com/Mirror8865/DJOneHub")!) {
+                aboutLinkRow(title: L10n.t("二改版本地址"), value: "github.com/Mirror8865/DJOneHub")
+            }
+        } header: {
+            Text(L10n.t("本版本（二次修改）"))
+        } footer: {
+            Text(L10n.t("此版本由 Mirror 在原项目基础上二次修改，仅供学习与研究使用，禁止任何商业用途；如原作者认为不妥，请联系删除。"))
+        }
+    }
+
+    /// 关于页里的外链行：标题 + 灰色地址 + 右上箭头，整行为可点击的 Link 标签。
+    private func aboutLinkRow(title: String, value: String) -> some View {
+        HStack(spacing: 8) {
+            Text(title)
+                .foregroundStyle(Color.primary)
+            Spacer(minLength: 8)
+            Text(value)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Image(systemName: "arrow.up.right")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
         }
     }
 
