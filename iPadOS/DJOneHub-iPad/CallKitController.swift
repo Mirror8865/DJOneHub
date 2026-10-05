@@ -8,7 +8,9 @@ import UIKit
 protocol CallKitActionHandling: AnyObject {
     func callKitStart(number: String) async throws
     func callKitAnswer() async throws
-    func callKitEnd() async throws
+    /// 结束系统通话。带上模块侧通话 id 与「结束时是否仍在响铃」，
+    /// 让 App 侧能把「用户在系统界面拒接的来电」记成已拒绝，而不是未接来电。
+    func callKitEnd(backendID: String?, wasRinging: Bool) async throws
     func callKitSetMuted(_ muted: Bool) async
     func callKitPlayDTMF(_ digits: String) async throws
     /// CXStartCallAction 回调内、fulfill 之前必须完成的音频会话配置（CallKit 官方时序）。
@@ -402,7 +404,8 @@ final class CallKitController: NSObject {
     private func performEnd(_ action: CXEndCallAction) async {
         do {
             guard let handler else { throw CallKitBridgeError.handlerUnavailable }
-            try await handler.callKitEnd()
+            let wasRinging = ["incoming", "waiting"].contains(currentState ?? "")
+            try await handler.callKitEnd(backendID: currentBackendID, wasRinging: wasRinging)
             endActionFulfilled = true
             action.fulfill()
         } catch {

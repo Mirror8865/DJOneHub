@@ -99,6 +99,12 @@ enum AppPermission: String, CaseIterable, Identifiable {
 @MainActor
 final class AppModel: ObservableObject {
     @Published var activeCall: CallRecord?
+    /// 用户刚拨出、模块还没在 CLCC 里报出来的呼出通话。
+    ///
+    /// 模块要先执行 ATD、再把通话写进 CLCC，轮询才会返回 active，App 内通话页
+    /// 因此会晚上一两拍才出现（表现为「点完拨号卡一会儿」）。这里先铺一条本机
+    /// 占位记录把通话页立刻点亮，真实的模块记录一到就被替换掉。
+    @Published var pendingOutgoingCall: CallRecord?
     /// 用户在本机确认挂断/拒接后立刻记录的通话 ID。
     /// 模块状态轮询通常要慢一拍，这个标记让 App 内通话页马上退出，
     /// 不再出现「电话已经挂了但界面卡在通话页」的情况。
@@ -219,6 +225,13 @@ final class AppModel: ObservableObject {
     /// 模块对所有「未接通就结束的来电」都记 `missed`，包括用户主动拒接的那通；
     /// 用它把用户自己处理过的通话从「未接来电」提醒里排除掉。
     private var handledCallIDs: Set<String> = []
+    /// 用户主动拒接的来电 id（含在锁屏通知上直接拒接的）。
+    ///
+    /// 模块把「没接通就结束的来电」一律写成未接来电，没有字段能区分「对方没等到
+    /// 我接」和「我明确拒接」。拒绝是一次明确的用户动作，本机据此把它按「已拒绝」
+    /// 呈现，并排除在未接来电筛选与未接提醒之外。落盘保存，重启后仍然生效。
+    private var declinedCallIDs: Set<String> = []
+    private let declinedCallIDsKey = "djonehub.declined-call-ids"
     /// 用户在本机删除的通话记录 / 短信 ID。
     /// 模块接口每轮都会回传完整历史，不做墓碑过滤的话，用户刚删掉的记录下一轮就会复活。
     private var deletedCallIDs: Set<String> = []
@@ -233,6 +246,7 @@ final class AppModel: ObservableObject {
         deletedCallIDs = Set(UserDefaults.standard.stringArray(forKey: deletedCallIDsKey) ?? [])
         deletedMessageIDs = Set(UserDefaults.standard.stringArray(forKey: deletedMessageIDsKey) ?? [])
         seenIncomingSMSIDs = Set(UserDefaults.standard.stringArray(forKey: seenIncomingSMSIDsKey) ?? [])
+        declinedCallIDs = Set(UserDefaults.standard.stringArray(forKey: declinedCallIDsKey) ?? [])
         AppModel.shared = self
         callKit.handler = self
         // 背景启动时 SwiftUI 不会走 onAppear，这里延后一拍自行恢复轮询与保活。
@@ -746,6 +760,12 @@ final class AppModel: ObservableObject {
                     locallyDismissedCallID = nil
                 }
             }
+            if let pending = pendingOutgoingCall,
+               status.active != nil || Date().timeIntervalSince(pending.startedAt) > 15 {
+                // 模块已经报出这通通话，或者迟迟没报出来（ATD 被模块吞掉）：撤掉占位，
+                // 界面不能一直停在「正在呼叫」。
+                pendingOutgoingCall = nil
+            }
             if callHistory != history { callHistory = history }
             notifyMissedCalls(in: history)
             consecutivePollFailures = 0
@@ -989,7 +1009,26 @@ final class AppModel: ObservableObject {
             // 仅当模块已确认接收拨号请求后清空，失败时保留号码供用户重试或修改。
             self.numberInput = ""
             self.callKitManagesCall = self.callKit.managesCurrentCall
+            // 模块要先执行 ATD、再把这通电话写进 CLCC，轮询才看得到；先铺一条本机
+            // 占位记录，用户点完拨号立刻就能进通话页，而不是干等一两拍轮询。
+            self.pendingOutgoingCall = Self.pendingOutgoingCallRecord(number: number)
         }
+    }
+
+    /// 呼出占位通话：只用于立刻点亮 App 内通话页，模块的真实记录一到就被替换。
+    private static func pendingOutgoingCallRecord(number: String) -> CallRecord {
+        let now = Date()
+        return CallRecord(
+            id: "local-outgoing-\(Int(now.timeIntervalSince1970 * 1_000))",
+            index: 0,
+            direction: "outgoing",
+            state: "dialing",
+            number: number,
+            startedAt: now,
+            updatedAt: now,
+            endedAt: nil,
+            missed: false
+        )
     }
 
     func answer() async {
@@ -1013,6 +1052,9 @@ final class AppModel: ObservableObject {
         audio.stopCallTone()
         let dismissedID = activeCall?.id
         markCallHandled(dismissedID)
+        markCallDeclined(dismissedID)
+        // 呼出还没被模块报出来时界面上是本机占位通话：先撤掉它，界面立刻回到拨号盘。
+        if dismissedID == nil { pendingOutgoingCall = nil }
         // 拒接同样是关键操作，理由与挂断一致。
         isBusy = true
         defer { isBusy = false }
@@ -1037,6 +1079,8 @@ final class AppModel: ObservableObject {
         audio.stopCallTone()
         let dismissedID = activeCall?.id
         markCallHandled(dismissedID)
+        // 呼出还没被模块报出来时界面上是本机占位通话：先撤掉它，界面立刻回到拨号盘。
+        if dismissedID == nil { pendingOutgoingCall = nil }
         // 挂断是关键操作，不能受 isBusy 早退影响：否则界面点了没反应，
         // 模块侧却已经挂断，就出现「电话挂了但界面停在通话页」。
         isBusy = true
@@ -1501,6 +1545,26 @@ final class AppModel: ObservableObject {
         incomingNotifier.clearNotifications(for: callID)
     }
 
+    /// 记下用户主动拒接的来电：模块仍会写成 `missed`，本机按「已拒绝」呈现。
+    private func markCallDeclined(_ callID: String?) {
+        guard let callID, !callID.isEmpty else { return }
+        declinedCallIDs.insert(callID)
+        if declinedCallIDs.count > 500 { declinedCallIDs.removeAll() }
+        UserDefaults.standard.set(Array(declinedCallIDs), forKey: declinedCallIDsKey)
+    }
+
+    /// 这条记录在本机是否要显示成「已拒绝」（用户在响铃时明确拒接过的来电）。
+    func isDeclinedCall(_ record: CallRecord) -> Bool {
+        record.direction == "incoming" && declinedCallIDs.contains(record.id)
+    }
+
+    /// 锁屏通知上的接听 / 拒接按钮由后台直接调用模块接口，App 侧也要把这通记成
+    /// 「用户已处理」，否则模块回传的 missed 记录马上会变成一条未接来电提醒。
+    func markCallHandledByUser(_ callID: String, declined: Bool) {
+        markCallHandled(callID)
+        if declined { markCallDeclined(callID) }
+    }
+
     /// 未接来电提醒。
     ///
     /// 模块把未接来电写成一条**历史记录**（`missed == true`、`endedAt != nil`、`active == nil`），
@@ -1613,7 +1677,13 @@ final class AppModel: ObservableObject {
             }
             byID[record.id] = record
         }
-        let merged = normalizedCallHistory(Array(byID.values))
+        // 用户主动拒接的来电模块始终写 `missed = true`，本机把它还原成普通呼入：
+        // 列表里显示「已拒绝」，也不计入未接来电筛选。
+        let merged = normalizedCallHistory(Array(byID.values)).map { record in
+            record.missed && declinedCallIDs.contains(record.id)
+                ? record.withoutMissedFlag()
+                : record
+        }
         if !pendingRecords.isEmpty, historyStore.saveCallHistory(merged) {
             // 只有手机副本写入成功才确认模块，断线时模块仍会保留未交付队列。
             let persistedIDs = Set(merged.map(\.id))
@@ -1806,15 +1876,23 @@ extension AppModel: CallKitActionHandling {
         }
     }
 
-    func callKitEnd() async throws {
+    func callKitEnd(backendID: String?, wasRinging: Bool) async throws {
         audio.stopCallTone()
-        if activeCall?.direction == "incoming",
-           let state = activeCall?.state,
-           ["incoming", "waiting"].contains(state) {
+        // 系统通话界面上的挂断 / 拒接也必须落到本机账本上：响铃时拒接，activeCall
+        // 可能还没被轮询更新，所以用 CallKit 侧记下的模块 id 兜底。
+        let endedID = backendID ?? activeCall?.id
+        markCallHandled(endedID)
+        let stillRinging = wasRinging
+            || (activeCall?.direction == "incoming"
+                && ["incoming", "waiting"].contains(activeCall?.state ?? ""))
+        if stillRinging {
+            // 明确拒接：排除出未接来电，历史里显示「已拒绝」。
+            markCallDeclined(endedID)
             _ = try await api.rejectCall()
         } else {
             try await api.hangupCall()
         }
+        if activeCall == nil { pendingOutgoingCall = nil }
     }
 
     func callKitSetMuted(_ muted: Bool) async {
@@ -1864,6 +1942,8 @@ extension AppModel: CallKitActionHandling {
     }
 
     func callKitDidFail(_ message: String) {
+        // 拨号事务失败时占位通话必须撤掉，否则界面会停在「正在呼叫」。
+        pendingOutgoingCall = nil
         errorMessage = message
     }
 

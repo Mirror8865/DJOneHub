@@ -1322,6 +1322,8 @@ private struct RecentsRow: View {
     }
 
     private var subtitle: String {
+        // 用户主动拒接的来电在模块侧仍是 missed，本机按「已拒绝」显示。
+        if model.isDeclinedCall(call) { return L10n.t("已拒绝") }
         if call.missed { return L10n.t("未接来电") }
         return call.direction == "incoming" ? L10n.t("呼入") : L10n.t("呼出")
     }
@@ -1512,6 +1514,8 @@ struct CallDetailPane: View {
     }
 
     private var directionText: String {
+        // 用户主动拒接的来电在模块侧仍是 missed，本机按「已拒绝」显示。
+        if model.isDeclinedCall(call) { return L10n.t("已拒绝") }
         if call.missed { return L10n.t("未接来电") }
         return call.direction == "incoming" ? L10n.t("呼入") : L10n.t("呼出")
     }
@@ -3862,6 +3866,7 @@ struct ActiveCallView: View {
         case "active": return L10n.t("通话中")
         case "incoming", "waiting": return L10n.t("等待接听")
         case "held": return L10n.t("通话保持")
+        case "dialing", "alerting": return L10n.t("正在呼叫")
         default: return call.state
         }
     }

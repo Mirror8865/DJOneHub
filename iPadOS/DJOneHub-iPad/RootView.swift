@@ -91,7 +91,8 @@ struct RootView: View {
             // 1) App 内发起的呼出立即铺满通话页；
             // 2) 由系统 CallKit 呼入并接通的电话不要抢回前台（isInAppCallUISuppressed），
             //    只有用户自己回到 App（桌面 / 切回本 App）时才恢复 App 内通话页。
-            if let call = model.activeCall,
+            // 呼出时模块还没在 CLCC 里报出来，先用本机占位通话把通话页点亮。
+            if let call = model.activeCall ?? model.pendingOutgoingCall,
                !call.hasEndedState,
                scenePhase == .active,
                !inAppCallUISuppressed {
@@ -115,6 +116,11 @@ struct RootView: View {
         .onChange(of: model.locallyDismissedCallID) { newValue in
             if newValue != nil { inAppCallUISuppressed = true }
         }
+        .onChange(of: model.pendingOutgoingCall?.id) { newValue in
+            // 本机占位通话一出现就说明用户在 App 内拨了号：立刻让通话页上屏，
+            // 不能等下一轮模块轮询（上一通来电的抑制标记也要同时清掉）。
+            if newValue != nil { inAppCallUISuppressed = false }
+        }
         .onChange(of: scenePhase) { phase in
             // 用户返回本 App（从桌面或其它 App 切回来）后，恢复 App 内通话页。
             if phase == .active { inAppCallUISuppressed = false }
@@ -122,7 +128,7 @@ struct RootView: View {
         // 沉浸式：状态栏保持可见（HIG 不主张永久隐藏），但内容一直铺到屏幕边缘。
         .statusBarHidden(false)
         .persistentSystemOverlays(.automatic)
-        .animation(.easeInOut(duration: 0.2), value: model.activeCall?.id)
+        .animation(.easeInOut(duration: 0.2), value: model.activeCall?.id ?? model.pendingOutgoingCall?.id)
         .animation(.easeInOut(duration: 0.2), value: model.callKitManagesCall)
         .preferredColorScheme(settings.appearance.colorScheme)
         .fullScreenCover(isPresented: firstConnectionBinding) {

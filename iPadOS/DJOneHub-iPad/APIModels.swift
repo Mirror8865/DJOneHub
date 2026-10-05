@@ -22,6 +22,27 @@ struct CallRecord: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
+extension CallRecord {
+    /// 本机把「用户主动拒接的来电」从模块的未接统计里摘出来时用的副本。
+    ///
+    /// 模块只看 CLCC：一通从来电响铃直接结束的电话（无论用户拒接还是对方挂断）
+    /// 一律写 `missed = true`，模块侧没有信号能区分二者。用户在系统界面按下
+    /// 拒接后，本机按「已拒绝」呈现（不计入未接筛选、不再发未接提醒）。
+    func withoutMissedFlag() -> CallRecord {
+        CallRecord(
+            id: id,
+            index: index,
+            direction: direction,
+            state: state,
+            number: number,
+            startedAt: startedAt,
+            updatedAt: updatedAt,
+            endedAt: endedAt,
+            missed: false
+        )
+    }
+}
+
 /// 通话轮询结果；额外音频诊断字段由专门接口读取。
 struct CallStatus: Codable, Sendable {
     let active: CallRecord?

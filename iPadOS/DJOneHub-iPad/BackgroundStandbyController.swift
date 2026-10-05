@@ -100,8 +100,11 @@ final class DJOneHubNotificationDelegate: NSObject, UIApplicationDelegate, UNUse
 
                 if actionIdentifier == IncomingCallNotification.answerActionIdentifier {
                     try await api.answerCall()
+                    AppModel.shared?.markCallHandledByUser(callID, declined: false)
                 } else {
                     _ = try await api.rejectCall()
+                    // 明确拒接：本机要把它从「未接来电」里排除，历史显示「已拒绝」。
+                    AppModel.shared?.markCallHandledByUser(callID, declined: true)
                 }
             } catch {
                 Self.reportActionFailure(error)
