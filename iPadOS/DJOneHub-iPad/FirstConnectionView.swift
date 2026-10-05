@@ -125,13 +125,19 @@ struct FirstConnectionView: View {
             }
             .task {
                 // 引导页是用户第一个看到的界面：先把全部系统权限状态读出来。
-                // 权限申请一律由用户点按触发——系统授权面板要求从用户手势所在的
-                // 前台上下文弹出；App 自己在启动瞬间连弹五个面板时，系统会把它们
-                // 排队甚至直接丢弃，之后用户再点「申请」就什么都不会发生。
+                // 除通讯录外，权限申请一律由用户点按触发——系统授权面板要求从
+                // 用户手势所在的前台上下文弹出；App 自己在启动瞬间连弹五个面板时，
+                // 系统会把它们排队甚至直接丢弃，之后用户再点「申请」就什么都不会发生。
                 await model.refreshPermissionStates()
                 guard !runStarted else { return }
                 runStarted = true
                 await model.prepareModuleForFirstConnection()
+                // 通讯录是唯一一项没有别的路径会申请的权限：启动时的系统面板
+                // （麦克风 / 定位 / 通知）都不会带上它，以前只有用户手动点按才弹，
+                // 表现就是「首次进入 App 时联系人权限不会自动弹出、需要手动授权」。
+                // 这里在模块检测（麦克风面板）结束之后补申请一次；它会自己轮询用户
+                // 的选择、必要时重试，让通讯录和其它权限一样在首次进入时自动弹出。
+                await model.requestContactsPermissionIfNeeded()
             }
             .onChange(of: scenePhase) { phase in
                 // 从系统设置改完权限回来要立刻反映到列表。

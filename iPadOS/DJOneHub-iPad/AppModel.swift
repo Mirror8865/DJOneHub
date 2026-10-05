@@ -447,12 +447,57 @@ final class AppModel: ObservableObject {
 
     /// 首次安装打开 App 就把权限流程走完：按引导页列表的顺序逐个申请，
     /// 已授权的跳过；被永久拒绝的系统不会再弹窗，引导页会引导去系统设置。
-    /// 权限面板由系统串行弹出，逐个之间留一点间隔，避免上一个还没收起来。
+    ///
+    /// 系统同一时刻只允许在窗口上呈现一个授权面板。麦克风 / 通知的申请会一直
+    /// 挂起到用户做出选择，但定位（`requestAlwaysAuthorization`）与本地网络
+    /// （Bonjour 探测）是「发起即返回」，只等几百毫秒就轮到下一项——上一层面板
+    /// 还开着时提出的申请会被系统直接丢弃，连面板都不弹。通讯录排在列表最后，
+    /// 正是「首次进入时联系人权限不会自动弹出、必须手动去授权」的原因。
     func requestAllMissingPermissions() async {
         for permission in AppPermission.allCases where permissionState(for: permission) == .notDetermined {
             _ = await requestPermission(permission)
+            await waitUntilPreviousPromptClears(permission)
+        }
+        // 兜底：即使前面的面板收得慢导致这次申请被系统丢掉，也保证通讯录面板弹出来。
+        await requestContactsPermissionIfNeeded()
+    }
+
+    /// 等到上一条系统面板收起再申请下一项，避免申请被系统丢弃。
+    ///
+    /// 状态可查询的权限（麦克风 / 通知 / 通讯录）等到状态不再是「未决定」为止；
+    /// 定位在「使用期间」授权下状态一直是未决定、本地网络根本没有公开的查询 API，
+    /// 这两项只能等一段固定时长，再留一点余量让系统把窗口让出来。
+    private func waitUntilPreviousPromptClears(_ permission: AppPermission) async {
+        let isQueryable = permission != .localNetwork && permission != .locationAlways
+        for _ in 0..<(isQueryable ? 40 : 8) {
+            if isQueryable {
+                await refreshPermissionStates()
+                if permissionState(for: permission) != .notDetermined { break }
+            }
             try? await Task.sleep(for: .milliseconds(400))
         }
+        try? await Task.sleep(for: .milliseconds(400))
+    }
+
+    /// 确保通讯录授权面板被真正弹出来。
+    ///
+    /// 启动时的系统面板（麦克风 / 定位 / 通知）都不会带上通讯录，以前只有引导页的
+    /// 「全部申请」按钮会申请它，所以首次进入 App 时联系人权限不会自动弹出，用户
+    /// 必须手动去授权一次。首次接入流程现在直接调用这里补上这一项：申请后轮询到
+    /// 用户真正做出选择为止；若面板被系统丢弃（上一层面板还没收起），稍后重试，
+    /// 最多三次。
+    @discardableResult
+    func requestContactsPermissionIfNeeded() async -> Bool {
+        guard permissionState(for: .contacts) == .notDetermined else { return false }
+        for _ in 0..<3 {
+            _ = await requestPermission(.contacts)
+            for _ in 0..<25 {
+                await refreshPermissionStates()
+                if permissionState(for: .contacts) != .notDetermined { return true }
+                try? await Task.sleep(for: .milliseconds(300))
+            }
+        }
+        return false
     }
 
     /// 本地网络没有授权查询 API：起一次 Bonjour 浏览让系统弹一次授权，

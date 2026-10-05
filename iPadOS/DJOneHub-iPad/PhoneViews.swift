@@ -2556,6 +2556,9 @@ struct ChatPane: View {
     /// 顶层标签页选中项：会话页嵌在分栏里，切回「信息」板块时不一定每次
     /// 都能收到 `onAppear`，用这个共享键当作「重新可见」的确定性信号。
     @AppStorage("djonehub.selected-tab") private var selectedTabRaw = PhoneTab.calls.rawValue
+    /// 会话内容最底部的固定锚点 id：贴底一律滚到它而不是最后一条气泡。
+    private static let bottomAnchorID = "djonehub.chat.bottom"
+
     /// 会话背景（iOS 26「信息」的会话背景）：气泡的液态玻璃会折射背景内容。
     @StateObject private var chatBackgrounds = ChatBackgroundStore.shared
 
@@ -2591,7 +2594,12 @@ struct ChatPane: View {
                     // GlassEffectContainer，系统才会一次渲染整组玻璃、并允许相邻气泡融合；
                     // 逐个裸套 glassEffect 会各自渲一层，观感与性能都不符合规范。
                     BubbleGlassContainer {
-                        LazyVStack(spacing: 4) {
+                        // 用 VStack 而不是 LazyVStack：会话内容的总高必须在第一次布局
+                        // 时就完全确定，`scrollTo` 才能算出精确的贴底位置。LazyVStack
+                        // 只实例化当前可视行，「切标签回来」的那一刻贴底会按尚未实例化
+                        // 行的估算高度落位，整个会话（头像 + 名字 + 气泡）就会往下挪
+                        // 一点，直到用户再点一下 / 滑一下触发重排才被纠正。
+                        VStack(spacing: 4) {
                             header
                                 .padding(.bottom, 10)
                             ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
@@ -2608,10 +2616,20 @@ struct ChatPane: View {
                                 // iMessage 规则：同一发件人连续多条时，只有最后一条带小角。
                                 MessageBubble(message: message, hasTail: isLastOfRun(at: index))
                             }
+                            // 给浮在底部的输入条让位：这 76pt 留在内容最底部，贴底时
+                            // 最新一条消息就停在输入条上方，不会被输入条挡住。
+                            Color.clear
+                                .frame(height: 76)
+                            // 内容最底部的固定锚点：贴底一律滚到它，而不是最后一条
+                            // 气泡。气泡高度随文字换行变化，锚点高度恒为 1pt，落位
+                            // 只由内容总高决定；它排在让位段之后，所以贴底一定贴到
+                            // 真正的底部。
+                            Color.clear
+                                .frame(height: 1)
+                                .id(Self.bottomAnchorID)
                         }
                         .padding(.horizontal, 16)
                         .padding(.top, 12)
-                        .padding(.bottom, 76)
                     }
                 }
                 .scrollDismissesKeyboard(.interactively)
@@ -2620,6 +2638,9 @@ struct ChatPane: View {
                     guard value == PhoneTab.messages.rawValue else { return }
                     anchorToBottomAfterLayout(proxy)
                 }
+                // 分栏下切换会话时 ChatPane 视图会被复用、onAppear 不会重跑，
+                // 必须显式重新贴底，否则新会话会沿用上一条的滚动位置（同样表现为错位）。
+                .onChange(of: handle) { _ in anchorToBottomAfterLayout(proxy) }
                 .onChange(of: messages.count) { _ in scrollToLast(proxy, animated: true) }
             }
 
@@ -2797,13 +2818,15 @@ struct ChatPane: View {
     }
 
     private func scrollToLast(_ proxy: ScrollViewProxy, animated: Bool) {
-        guard let last = messages.last else { return }
+        // 滚到内容底部的固定锚点，而不是最后一条气泡：气泡高度随文字换行变化，
+        // 锚点高度恒为 1pt，落位只由内容总高决定。还没有任何消息时锚点同样存在
+        // （它和 header 一样无条件渲染），所以不需要因为 messages 为空而提前返回。
         if animated {
             withAnimation(.easeOut(duration: 0.2)) {
-                proxy.scrollTo(last.id, anchor: .bottom)
+                proxy.scrollTo(Self.bottomAnchorID, anchor: .bottom)
             }
         } else {
-            proxy.scrollTo(last.id, anchor: .bottom)
+            proxy.scrollTo(Self.bottomAnchorID, anchor: .bottom)
         }
     }
 
@@ -2812,7 +2835,14 @@ struct ChatPane: View {
     /// 表现为整个会话（头像 + 名字 + 气泡）一起往下挪一点，直到用户再点 /
     /// 滑一下才被纠正。推迟到下一轮主线程布局之后再贴底即可避开这段错位。
     private func anchorToBottomAfterLayout(_ proxy: ScrollViewProxy) {
-        DispatchQueue.main.async { scrollToLast(proxy, animated: false) }
+        // 切标签回来时 onAppear 会赶在新布局 / 安全区落定之前触发，此刻贴底会
+        // 按旧尺寸算出一个偏低的位置并锁住。这里跨两轮主线程布局各贴一次底：
+        // 第二轮的时机一定晚于安全区最终值；若第一轮已经落位正确，第二轮是无
+        // 副作用的重复调用（同一位置再 scrollTo 一次不会产生任何可见变化）。
+        DispatchQueue.main.async {
+            scrollToLast(proxy, animated: false)
+            DispatchQueue.main.async { scrollToLast(proxy, animated: false) }
+        }
     }
 
     /// 时间分隔：与日期同款，居中显示在消息窗口正中间。
