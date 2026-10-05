@@ -186,6 +186,9 @@ final class AppModel: ObservableObject {
     private var nextAudioDiagnosticRefresh = Date.distantPast
     private var nextModuleMetadataRefresh = Date.distantPast
     private var audioWarmupCallID: String?
+    /// 语音桥起不来之后的退避：连续失败次数与下一次允许重建通话音频的时间。
+    private var voiceAudioFailureCount = 0
+    private var voiceAudioRetryNotBefore = Date.distantPast
     private var lowPowerModeEnabled = true
     private lazy var embeddedAgentVersion: String = {
         guard let url = Bundle.main.url(forResource: "EmbeddedModuleUpdate", withExtension: "json"),
@@ -265,6 +268,12 @@ final class AppModel: ObservableObject {
         // 等看门狗下一拍（12 秒）之间进程就可能被系统挂起，那正是保活失效的成因。
         audio.onSessionReleased = { [weak self] in
             self?.backgroundStandby.rearmAudioKeepAlive()
+        }
+        // 模块语音桥彻底连不上时收起本地通话音频：一通已经听不到声音的通话
+        // 不能让麦克风、扬声器和语音处理单元一直空转（通话相关耗电里唯一会
+        // 无限持续的一项）。通话状态本身不动，轮询看到模块仍报 active 会再拉起。
+        audio.onTransportFailed = { [weak self] in
+            Task { @MainActor [weak self] in self?.handleVoiceTransportFailure() }
         }
         // 通话优先：有电话（含响铃）或通话提示音时，静音音频保活一律让位。
         // 这是实时判断而非一次性开关，所以通话结束后它会自动恢复播放。
@@ -848,15 +857,19 @@ final class AppModel: ObservableObject {
                 // 立刻丢掉缓存网卡并重读链路，让 iOS 更快重新评估这块 ECM 网卡、尽快续租。
                 api.resetLocalConnectionState()
                 refreshModuleLinkState()
+                voiceAudioFailureCount = 0
+                voiceAudioRetryNotBefore = .distantPast
                 backgroundStandby.resumeAfterCall()
                 isMuted = false
                 isSpeakerEnabled = false
                 isRecording = false
             }
             if status.active?.state == "active",
+               settingsTabIsVisible,
                Date() >= nextAudioDiagnosticRefresh,
                let audioConfig = try? await api.audioHostConfig() {
-                // 诊断统计无需跟随每次通话轮询，降低额外 TCP 建连和 JSON 解码频率。
+                // 语音桥诊断只有设置页会读；通话中不再每 3 秒为一个没人显示的
+                // 字符串多做一次 USB / TCP 建连与 JSON 解码。
                 nextAudioDiagnosticRefresh = Date().addingTimeInterval(3)
                 audio.updateModuleDiagnostics(audioConfig)
             }
@@ -886,6 +899,12 @@ final class AppModel: ObservableObject {
                 // 路状态（getifaddrs，几乎零成本），避免反复重建 NWPathMonitor。
                 if consecutivePollFailures == 3 { api.resetLocalConnectionState() }
                 refreshModuleLinkState()
+                // 链路连续不可达且通话仍挂在本机账本上：先收起本地通话音频，
+                // 别让麦克风 / 扬声器在一条已经断掉的链路上无限空转。
+                if consecutivePollFailures >= 6,
+                   ["active", "held"].contains(activeCall?.state ?? "") {
+                    handleVoiceTransportFailure()
+                }
                 // 后台轮询失败只更新离线状态；否则用户关闭弹窗后一秒又会被同一错误轰炸。
                 connectionMessage = moduleLinkState.pollFailureDescription
             }
@@ -1814,8 +1833,25 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 模块语音桥在重试窗口内始终连不上时的收尾。
+    ///
+    /// 这时模块侧的 D5/D6 路由已经不在，继续留着本地音频引擎只会让麦克风、
+    /// 扬声器和 VoiceProcessingIO 一直空转。只收音频，不动通话状态：
+    /// 轮询只要看到模块仍报 active，下一拍就会重新拉起（受退避窗口约束）。
+    private func handleVoiceTransportFailure() {
+        voiceAudioFailureCount += 1
+        voiceAudioRetryNotBefore = Date().addingTimeInterval(
+            min(60, 10 * Double(voiceAudioFailureCount))
+        )
+        guard audio.active else { return }
+        audio.deactivate()
+    }
+
     private func startCallAudioIfReady() async {
         guard activeCall?.state == "active", !audio.active, !startingCallAudio else { return }
+        // 语音桥连续失败后的退避窗口：这段时间不再重建音频，避免麦克风与
+        // 扬声器在一条起不来的链路上反复空转（每次失败都要等满 45 秒重试窗口）。
+        guard Date() >= voiceAudioRetryNotBefore else { return }
         let callID = activeCall?.id
         let managedByCallKit = callKit.managesCurrentCall
         guard !managedByCallKit || callKit.audioSessionIsActive else { return }

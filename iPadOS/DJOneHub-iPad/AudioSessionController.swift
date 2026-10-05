@@ -39,10 +39,20 @@ final class AudioSessionController: ObservableObject {
     /// 本类把音频会话交还系统（铃声播完、通话结束）之后回调。
     /// 静音音频保活靠它立刻重建：晚一步进程就可能已经被系统挂起。
     var onSessionReleased: (() -> Void)?
+    /// 模块语音桥在重试窗口内始终连不上之后回调一次。
+    /// 上层据此收起通话音频，避免麦克风 / 扬声器 / 语音处理单元无限空转耗电。
+    var onTransportFailed: (() -> Void)?
 
     private let moduleHost = NWEndpoint.Host("192.168.225.1")
     private let modulePort = NWEndpoint.Port(rawValue: 7_580)!
     private var engine: AVAudioEngine?
+    /// 8 kHz 单声道回放格式只建一次；原来每个 20 ms 分片都要新建一个 AVAudioFormat。
+    private static let pcmPlaybackFormat = AVAudioFormat(
+        commonFormat: .pcmFormatFloat32,
+        sampleRate: 8_000,
+        channels: 1,
+        interleaved: false
+    )
     private var player: AVAudioPlayerNode?
     private var transport: NetworkPCMTransport?
     private var encoder: VoicePCMEncoder?
@@ -143,12 +153,7 @@ final class AudioSessionController: ObservableObject {
             )
 
             engine.attach(player)
-            guard let playbackFormat = AVAudioFormat(
-                commonFormat: .pcmFormatFloat32,
-                sampleRate: 8_000,
-                channels: 1,
-                interleaved: false
-            ) else {
+            guard let playbackFormat = Self.pcmPlaybackFormat else {
                 throw VoiceAudioError.invalidPlaybackFormat
             }
             engine.connect(player, to: engine.mainMixerNode, format: playbackFormat)
@@ -398,6 +403,9 @@ final class AudioSessionController: ObservableObject {
             routeDescription = "网络语音未连接"
             diagnosticDescription = "\(DeviceContext.displayName) PCM 连接失败：\(message)"
             errorMessage = message
+            // 重试窗口耗尽说明这条语音链路这次真的起不来；把「收起本地音频」
+            // 交给上层决定，传输层自己不再重试。
+            if active { onTransportFailed?() }
         case .closed:
             transportReady = false
         }
@@ -422,12 +430,7 @@ final class AudioSessionController: ObservableObject {
         let frames = pcm.count / MemoryLayout<Int16>.size
         guard frames > 0,
               scheduledPlaybackFrames + frames <= maximumScheduledPlaybackFrames,
-              let format = AVAudioFormat(
-                  commonFormat: .pcmFormatFloat32,
-                  sampleRate: 8_000,
-                  channels: 1,
-                  interleaved: false
-              ),
+              let format = Self.pcmPlaybackFormat,
               let buffer = AVAudioPCMBuffer(
                   pcmFormat: format,
                   frameCapacity: AVAudioFrameCount(frames)
@@ -915,17 +918,27 @@ private final class VoicePCMEncoder: @unchecked Sendable {
         }
         samples.append(contentsOf: conditioner.process(copied, sampleRate: rate))
         let step = rate / 8_000
-        var pcm = Data()
-        pcm.reserveCapacity(frameCount / max(1, Int(step)) * 2 + 4)
+        var pcm16: [Int16] = []
+        pcm16.reserveCapacity(frameCount / max(1, Int(step)) + 4)
 
         while position + 1 < Double(samples.count) {
             let lower = Int(position)
             let fraction = Float(position - Double(lower))
             let value = samples[lower] * (1 - fraction) + samples[lower + 1] * fraction
-            let scaled = muted ? Int16(0) : Int16(max(-1, min(1, value)) * 32_767)
-            var littleEndian = scaled.littleEndian
-            withUnsafeBytes(of: &littleEndian) { pcm.append(contentsOf: $0) }
+            pcm16.append(muted ? Int16(0) : Int16(max(-1, min(1, value)) * 32_767))
             position += step
+        }
+        // 原来每个采样一次 Data.append + 一次 withUnsafeBytes 闭包；这里先在
+        // Int16 缓冲里攒好，最后整体转一次 little-endian 字节流。
+        let pcm = pcm16.withUnsafeBufferPointer { buffer -> Data in
+            var bytes = [UInt8]()
+            bytes.reserveCapacity(buffer.count * 2)
+            for value in buffer {
+                let littleEndian = value.littleEndian
+                bytes.append(UInt8(truncatingIfNeeded: littleEndian))
+                bytes.append(UInt8(truncatingIfNeeded: littleEndian >> 8))
+            }
+            return Data(bytes)
         }
         let consumed = max(0, min(Int(position), samples.count - 1))
         if consumed > 0 {
